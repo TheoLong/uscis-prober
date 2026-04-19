@@ -116,7 +116,8 @@ def read_all(limit: int | None = None) -> list[dict]:
 
 
 def clear() -> None:
-    """Wipe the log. Used by tests — never called from production code."""
+    """Wipe the log file. Irreversible — used both by tests and by the
+    operator-triggered `POST /api/system-log/clear` endpoint."""
     with _lock:
         if LOG_PATH.exists():
             LOG_PATH.unlink()

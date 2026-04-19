@@ -555,28 +555,29 @@ function renderSystemLog() {
   root.innerHTML = "";
 
   if (!state.systemLog.length) {
-    root.innerHTML =
-      `<div class="updates-empty">` +
+    const empty = document.createElement("div");
+    empty.className = "updates-empty";
+    empty.innerHTML =
       `<h3>System log is empty.</h3>` +
       `<p>The system log records what the tracker did (and when) — ` +
       `server startups, scheduler fires, pull lifecycle, case fetches, ` +
       `snapshot appends, email notifications. Events will appear here as ` +
-      `the app runs.</p>` +
-      `</div>`;
+      `the app runs.</p>`;
+    root.appendChild(empty);
     return;
   }
 
   const head = document.createElement("div");
-  head.className = "updates-head";
+  head.className = "updates-head syslog-head-row";
   head.innerHTML =
     `<div>` +
       `<h2>System log</h2>` +
       `<div class="updates-sub">` +
         `${state.systemLog.length} event${state.systemLog.length === 1 ? "" : "s"} · ` +
-        `Persisted to <code>data/system_log.json</code> · ` +
-        `Included in "Export all" zip. Newest first.` +
+        `Persisted to <code>data/system_log.json</code>. Newest first.` +
       `</div>` +
     `</div>`;
+  head.appendChild(renderSystemLogControls());
   root.appendChild(head);
 
   // Newest first.
@@ -584,6 +585,105 @@ function renderSystemLog() {
   for (const e of rowsNewestFirst) {
     root.appendChild(renderSystemLogRow(e));
   }
+}
+
+// Render the two System-log tab controls: "Export log" (one-click download
+// of the current log as JSON) and "Clear log" (two-step destructive wipe).
+// Both are deliberately scoped to the System log view so they can't be
+// confused with the "Export all" button in the topbar (which exports
+// cases only — not the log).
+function renderSystemLogControls() {
+  const wrap = document.createElement("div");
+  wrap.className = "syslog-controls";
+
+  const exportBtn = document.createElement("a");
+  exportBtn.href = "/api/system-log/export";
+  exportBtn.className = "syslog-export-btn";
+  exportBtn.textContent = "Export log";
+  exportBtn.title = "Download this log as JSON";
+
+  wrap.appendChild(exportBtn);
+  wrap.appendChild(renderClearLogControl());
+  return wrap;
+}
+
+// Two-step confirmation button for wiping the system log.
+//
+// Step 1: user clicks "Clear log" — the button widens into an armed warning
+//   with an explicit "Yes, delete all events" action and a "Cancel" escape.
+//   The armed state also auto-disarms after 8s if ignored, so a stale tab
+//   can't accidentally delete on the next click.
+//
+// Step 2: user clicks the red "Yes, delete all events" action — that's the
+//   only control that actually POSTs /api/system-log/clear. The server ALSO
+//   requires {"confirm": true} in the body as a second gate.
+function renderClearLogControl() {
+  const wrap = document.createElement("div");
+  wrap.className = "clear-log-control";
+
+  const idle = document.createElement("button");
+  idle.type = "button";
+  idle.className = "clear-log-btn";
+  idle.textContent = "Clear log";
+  idle.title = "Permanently delete every event in this log";
+
+  const armed = document.createElement("div");
+  armed.className = "clear-log-armed";
+  armed.hidden = true;
+  armed.innerHTML =
+    `<div class="clear-log-warning">` +
+      `<strong>Delete every event in the system log?</strong> ` +
+      `This is <u>irreversible</u>. The log is the only record of ` +
+      `scheduler fires, pull failures, and notification history — ` +
+      `clearing it will destroy the audit trail used to debug silent ` +
+      `failures (missed pulls, MFA errors, email delivery issues).` +
+    `</div>` +
+    `<div class="clear-log-actions">` +
+      `<button type="button" class="clear-log-cancel">Cancel</button>` +
+      `<button type="button" class="clear-log-confirm">Yes, delete all events</button>` +
+    `</div>`;
+
+  let disarmTimer = null;
+  const disarm = () => {
+    armed.hidden = true;
+    idle.hidden = false;
+    if (disarmTimer) { clearTimeout(disarmTimer); disarmTimer = null; }
+  };
+  const arm = () => {
+    idle.hidden = true;
+    armed.hidden = false;
+    // Safety: auto-disarm after 8s so a forgotten armed tab can't be
+    // clicked off later with one stray tap.
+    if (disarmTimer) clearTimeout(disarmTimer);
+    disarmTimer = setTimeout(disarm, 8000);
+  };
+
+  idle.addEventListener("click", arm);
+  armed.querySelector(".clear-log-cancel").addEventListener("click", disarm);
+  armed.querySelector(".clear-log-confirm").addEventListener("click", async () => {
+    if (disarmTimer) { clearTimeout(disarmTimer); disarmTimer = null; }
+    const confirmBtn = armed.querySelector(".clear-log-confirm");
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Clearing…";
+    try {
+      const res = await fetch("/api/system-log/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      await loadSystemLog();
+      renderSystemLog();
+    } catch (e) {
+      console.warn("clear log failed:", e);
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Retry delete";
+    }
+  });
+
+  wrap.appendChild(idle);
+  wrap.appendChild(armed);
+  return wrap;
 }
 
 function renderSystemLogRow(entry) {

@@ -40,7 +40,7 @@ from diff_utils import (
     summarize_case,
 )
 from mailer import notify_update
-from system_log import log as sys_log, read_all as read_system_log
+from system_log import log as sys_log, read_all as read_system_log, clear as clear_system_log
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -502,14 +502,11 @@ def api_export():
                 "entries": len(entries),
             })
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
-        # Include the system event log — crucial for post-hoc debugging.
-        try:
-            z.writestr(
-                "system_log.json",
-                json.dumps(read_system_log(), indent=2),
-            )
-        except Exception:  # pragma: no cover — never fail an export on log read
-            pass
+        # Note: the system event log is NOT included in this archive. It has
+        # its own dedicated `/api/system-log/export` endpoint so operators
+        # can decide whether to share it (it contains diagnostic details —
+        # email addresses, case labels — that don't belong with a case
+        # archive intended for external review).
     # Human-readable download timestamp: YYYY-MM-DD-HHMMSS-UTC so the file
     # sorts chronologically and is obvious when saved to disk.
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
@@ -537,6 +534,50 @@ def api_system_log():
         limit = None
     entries = read_system_log(limit=limit)
     return jsonify({"events": entries})
+
+
+@app.route("/api/system-log/export")
+def api_system_log_export():
+    """Return the system log as a downloadable JSON file.
+
+    Separate from `/api/export` (the cases archive) because the system log
+    contains diagnostic details (email addresses, case labels, scheduler
+    fires) that the operator may want to keep local even when sharing a
+    case archive for external review.
+    """
+    entries = read_system_log()
+    body = json.dumps(entries, indent=2)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
+    filename = f"uscis-system-log-{stamp}.json"
+    return Response(
+        body,
+        mimetype="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/system-log/clear", methods=["POST"])
+def api_system_log_clear():
+    """Wipe the system log. Two-step confirmation is enforced client-side.
+
+    Server-side we require the body to carry `{"confirm": true}` so a stray
+    curl / XSRF probe cannot clear the log by accident.
+    """
+    body = request.get_json(silent=True) or {}
+    if body.get("confirm") is not True:
+        return jsonify({"ok": False, "error": "confirmation_required"}), 400
+
+    prior = len(read_system_log())
+    try:
+        clear_system_log()
+    except OSError as exc:  # pragma: no cover — filesystem should not fail
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    # Record the clear itself so there's always an audit breadcrumb of who
+    # wiped what and when. (This single entry is the only thing the fresh
+    # log contains after the POST returns.)
+    sys_log("system_log_cleared", source="server", prior_entry_count=prior)
+    return jsonify({"ok": True, "priorEntryCount": prior})
 
 
 @app.route("/api/pull", methods=["POST"])

@@ -458,6 +458,89 @@ main[hidden] { display: none; }
   color: var(--muted);
   font-size: 0.74rem;
 }
+.syslog-controls {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.syslog-export-btn {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.12s;
+  line-height: 1.2;
+}
+.syslog-export-btn:hover { background: var(--bg-elev); }
+
+.clear-log-control { display: inline-flex; }
+
+.clear-log-btn {
+  font: inherit;
+  background: transparent;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: background 0.12s;
+}
+.clear-log-btn:hover { background: var(--bad-tint); }
+
+.clear-log-armed {
+  background: var(--bad-tint);
+  border: 1.5px solid var(--bad);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  max-width: 520px;
+}
+.clear-log-warning {
+  color: var(--text);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  margin-bottom: 10px;
+}
+.clear-log-warning strong { color: var(--bad); }
+.clear-log-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.clear-log-cancel,
+.clear-log-confirm {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-weight: 500;
+}
+.clear-log-cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.clear-log-cancel:hover { background: var(--bg-elev); }
+.clear-log-confirm {
+  background: var(--bad);
+  border: 1px solid var(--bad);
+  color: #fff;
+}
+.clear-log-confirm:hover { filter: brightness(0.92); }
+.clear-log-confirm[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+.syslog-head-row { gap: 14px; }
+
 .syslog-detail-v {
   font-family: var(--font-mono);
   color: var(--text);

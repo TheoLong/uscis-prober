@@ -39,7 +39,9 @@ Updates feed — every diff across every case, newest first:
 
 System log — structured event history of what the tracker did
 (scheduler fires, pull lifecycle, snapshot appends, notifications).
-Persisted to `data/system_log.json` and included in the export zip:
+Persisted to `data/system_log.json`. Download a copy with **Export
+log** or wipe with **Clear log** (two-step confirm) — both inside
+the System log tab:
 
 ![System log](docs/screenshot-system-log.png)
 

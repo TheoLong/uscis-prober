@@ -334,10 +334,136 @@ def test_api_system_log_ignores_bad_limit(monkeypatch, tmp_path):
         assert len(r.get_json()["events"]) == 1
 
 
-# -------- export zip includes system_log.json -----------------------
+# -------- clear endpoint ---------------------------------------------
 
-def test_api_export_includes_system_log(monkeypatch, tmp_path):
+def test_api_system_log_clear_wipes_and_audits(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    for i in range(3):
+        system_log.log("tick", i=i)
+    assert len(system_log.read_all()) == 3
+
+    with server.app.test_client() as c:
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({"confirm": True}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["ok"] is True
+        assert body["priorEntryCount"] == 3
+
+    # After wipe, only the audit breadcrumb remains (the clear records itself).
+    entries = system_log.read_all()
+    assert len(entries) == 1
+    assert entries[0]["event"] == "system_log_cleared"
+    assert entries[0]["prior_entry_count"] == 3
+    assert entries[0]["source"] == "server"
+
+
+def test_api_system_log_clear_rejects_without_confirm(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    system_log.log("tick")
+    before = system_log.read_all()
+
+    with server.app.test_client() as c:
+        # no body
+        r = c.post("/api/system-log/clear")
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "confirmation_required"
+
+        # body present but confirm not literally `true`
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({"confirm": "yes"}),
+            content_type="application/json",
+        )
+        assert r.status_code == 400
+
+        # Empty JSON object
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        assert r.status_code == 400
+
+    # Log is untouched across all three rejected calls.
+    assert system_log.read_all() == before
+
+
+def test_api_system_log_clear_on_empty_log_is_noop_plus_audit(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    # Log starts empty (autouse fixture cleared it).
+    assert system_log.read_all() == []
+
+    with server.app.test_client() as c:
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({"confirm": True}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200
+        assert r.get_json()["priorEntryCount"] == 0
+
+    entries = system_log.read_all()
+    assert len(entries) == 1
+    assert entries[0]["event"] == "system_log_cleared"
+    assert entries[0]["prior_entry_count"] == 0
+
+
+# -------- system log is NOT included in the cases export ------------
+
+def test_api_export_excludes_system_log(monkeypatch, tmp_path):
+    # The combined /api/export zip is for cases only. The system log has
+    # its own dedicated endpoint so operators can share case archives
+    # without leaking diagnostic metadata (email addresses, scheduler
+    # fires, etc.).
     import io, zipfile
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    system_log.log("server_startup")
+    system_log.log("pull_finished", exit_code=0)
+
+    with server.app.test_client() as c:
+        r = c.get("/api/export")
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+            names = set(z.namelist())
+            assert "system_log.json" not in names
+            assert "manifest.json" in names
+
+
+# -------- dedicated /api/system-log/export ---------------------------
+
+def test_api_system_log_export_returns_json_attachment(monkeypatch, tmp_path):
     import server
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
@@ -350,12 +476,32 @@ def test_api_export_includes_system_log(monkeypatch, tmp_path):
     system_log.log("pull_finished", exit_code=0)
 
     with server.app.test_client() as c:
-        r = c.get("/api/export")
+        r = c.get("/api/system-log/export")
         assert r.status_code == 200
-        with zipfile.ZipFile(io.BytesIO(r.data)) as z:
-            names = set(z.namelist())
-            assert "system_log.json" in names
-            body = json.loads(z.read("system_log.json"))
-            event_names = [e["event"] for e in body]
-            assert "server_startup" in event_names
-            assert "pull_finished" in event_names
+        assert r.mimetype == "application/json"
+        disp = r.headers.get("Content-Disposition", "")
+        assert disp.startswith("attachment;")
+        assert "uscis-system-log-" in disp
+        assert disp.endswith('.json"')
+
+        body = json.loads(r.data)
+        assert isinstance(body, list)
+        event_names = [e["event"] for e in body]
+        assert "server_startup" in event_names
+        assert "pull_finished" in event_names
+
+
+def test_api_system_log_export_on_empty_log_is_empty_array(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    # Autouse fixture already ensured log is empty.
+    with server.app.test_client() as c:
+        r = c.get("/api/system-log/export")
+        assert r.status_code == 200
+        assert json.loads(r.data) == []
