@@ -518,5 +518,15 @@ See Setup → Configure for the full field table with optional overrides.
 
 ## License
 
-No license set by default. Add one before publishing if you want others
-to fork it explicitly.
+**GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).**
+See [LICENSE](LICENSE) for the full text.
+
+Copyright (C) 2026 the USCIS Prober contributors.
+
+Short version: you're free to use, modify, and redistribute this code.
+If you deploy a **modified** version — including as a network service
+your users reach over the internet — you must make the modified
+source available to those users under the same license. Keeping
+this project and any derivatives open is the point.
+
+There is **no warranty**. See sections 15 and 16 of the license.
