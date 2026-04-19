@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Append-only structured log of what the system did at what time.
 
 Intended for backtracing and debugging when something goes wrong (e.g.

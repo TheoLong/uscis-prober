@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """USCIS case-service API — isolated from login.
 
 Call `fetch_case` with an authenticated Playwright context. This module will

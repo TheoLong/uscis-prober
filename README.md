@@ -1,5 +1,7 @@
 # USCIS Case Prober
 
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
+
 **Pulls the real USCIS API 3×/day and diffs snapshots** to catch the
 silent `updatedAt` bumps and event-code changes that public status
 checkers miss. Self-hosted, one config file.

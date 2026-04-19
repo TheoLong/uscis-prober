@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for MFA-code extraction + IMAP polling.
 
 SMTP/IMAP I/O is mocked so tests run offline.

@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Pick IMAP/SMTP hosts automatically from the `uscis_mfa_email` domain.
 
 Every supported provider is equal — the user supplies their email and

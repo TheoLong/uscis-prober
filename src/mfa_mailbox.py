@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Poll an IMAP inbox for the latest USCIS MFA code.
 
 IMAP host is picked automatically from the email domain (see

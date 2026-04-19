@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the session-fetch orchestrator.
 
 Playwright and auth/api modules are mocked — no browser is launched.

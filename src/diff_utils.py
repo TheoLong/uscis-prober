@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Compute per-day differences between USCIS case captures.
 
 Day-binning rule: when multiple captures exist for a single calendar day

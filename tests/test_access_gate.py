@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """End-to-end tests for the access gate via Flask's test client."""
 
 import tempfile

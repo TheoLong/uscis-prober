@@ -1,3 +1,5 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """USCIS login flow — isolated from fetching.
 
 Only call `ensure_authenticated` when you actually need to log in. It is the
