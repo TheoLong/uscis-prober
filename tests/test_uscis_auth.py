@@ -61,6 +61,30 @@ def test_probe_session_returns_true_on_authenticated_url():
     page.goto.assert_called_once()
 
 
+def test_probe_session_hits_authenticated_path_not_root():
+    # Regression guard: the probe URL must be an authenticated path.
+    # Navigating to `my.uscis.gov/` (public root) serves a page even
+    # when the session is dead, so the heuristic would incorrectly
+    # return True. The probe must hit something that redirects to
+    # /sign-in when unauthed.
+    assert "/account" in uscis_auth.DASHBOARD_URL
+    assert uscis_auth.DASHBOARD_URL != "https://my.uscis.gov/"
+
+    page = MagicMock()
+    page.url = "https://my.uscis.gov/account/applicant"
+    probe_session(page)
+    url_used = page.goto.call_args.args[0]
+    assert "/account" in url_used
+
+
+def test_probe_session_detects_stale_session_via_signin_redirect():
+    # When the session is stale, USCIS redirects to
+    # `myaccount.uscis.gov/sign-in`. `probe_session` must return False.
+    page = MagicMock()
+    page.url = "https://myaccount.uscis.gov/sign-in"
+    assert probe_session(page) is False
+
+
 def test_probe_session_returns_false_on_timeout():
     page = MagicMock()
     page.goto.side_effect = PlaywrightTimeout("slow")

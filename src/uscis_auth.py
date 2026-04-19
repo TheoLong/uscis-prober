@@ -25,7 +25,14 @@ from mfa_mailbox import fetch_latest_code
 logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://my.uscis.gov/oidc/login"
-DASHBOARD_URL = "https://my.uscis.gov/"
+# Authenticated landing page. Hitting this unauthed redirects to
+# `/sign-in` on `myaccount.uscis.gov`, which is how `probe_session`
+# detects a stale session. The public root `my.uscis.gov/` serves a
+# page even when the session is dead, so it gives a false positive.
+# This URL must also live under `my.uscis.gov` (not `myaccount…`) so
+# the post-login bridge primes the right cookie origin for the
+# case-service API.
+DASHBOARD_URL = "https://my.uscis.gov/account/applicant"
 
 ROOT = Path(__file__).resolve().parent.parent
 STORAGE_STATE_PATH = ROOT / ".uscis_session.json"
