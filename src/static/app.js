@@ -324,10 +324,13 @@ function renderOverview(panel, c) {
   for (const m of metrics) {
     const box = document.createElement("div");
     box.className = `metric ${m.tone || ""}`;
+    // Always render the sub slot (even empty) so every card reserves
+    // the same vertical space and card heights line up in the 2x2
+    // mobile grid and the 4-wide desktop row.
     box.innerHTML =
       `<div class="metric-label">${escapeHtml(m.label)}</div>` +
       `<div class="metric-value">${escapeHtml(String(m.value))}</div>` +
-      (m.sub ? `<div class="metric-sub">${escapeHtml(m.sub)}</div>` : "");
+      `<div class="metric-sub">${escapeHtml(m.sub || "")}</div>`;
     metricRow.appendChild(box);
   }
   panel.appendChild(metricRow);
@@ -970,18 +973,25 @@ function renderRaw(panel, c) {
   });
   actions.appendChild(dlAll);
 
-  const dlOne = document.createElement("button");
-  dlOne.type = "button";
-  dlOne.className = "raw-btn raw-btn-ghost";
-  dlOne.textContent = "Download this snapshot";
-  dlOne.title = "Download only the currently selected snapshot as JSON";
-  dlOne.addEventListener("click", () => {
+  const copyOne = document.createElement("button");
+  copyOne.type = "button";
+  copyOne.className = "raw-btn raw-btn-ghost";
+  const COPY_IDLE_LABEL = "Copy this snapshot";
+  copyOne.textContent = COPY_IDLE_LABEL;
+  copyOne.title = "Copy the currently selected snapshot as JSON to the clipboard";
+  copyOne.addEventListener("click", async () => {
     const ca = state.rawSelection[c.receiptNumber];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
-    const safeTs = (ca || "").replace(/[:]/g, "-");
-    downloadJson(`${c.receiptNumber}_${safeTs}.json`, entry);
+    const text = JSON.stringify(entry, null, 2);
+    const ok = await copyToClipboard(text);
+    copyOne.textContent = ok ? "Copied ✓" : "Copy failed";
+    copyOne.classList.toggle("raw-btn-copied", ok);
+    setTimeout(() => {
+      copyOne.textContent = COPY_IDLE_LABEL;
+      copyOne.classList.remove("raw-btn-copied");
+    }, 1600);
   });
-  actions.appendChild(dlOne);
+  actions.appendChild(copyOne);
 
   controls.appendChild(actions);
   panel.appendChild(controls);
@@ -1123,6 +1133,34 @@ function downloadJson(filename, payload) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   });
+}
+
+// Copy the given text to the clipboard. Returns true on success.
+// Prefers navigator.clipboard; falls back to a hidden textarea +
+// document.execCommand("copy") for browsers / contexts (e.g. http
+// origins that aren't localhost) where the async API is gated.
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* fall through to legacy path */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) {
+    return false;
+  }
 }
 
 function formatApplicant(s) {

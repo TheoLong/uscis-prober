@@ -323,6 +323,11 @@ main[hidden] { display: none; }
   padding: 14px 16px;
   position: relative;
   overflow: hidden;
+  /* Uniform internal layout so every card has matching label / value /
+     sub slots — keeps the numbers on a shared baseline across a row,
+     even when one label wraps or a sub-line is missing. */
+  display: flex;
+  flex-direction: column;
 }
 .metric::before {
   content: "";
@@ -337,6 +342,12 @@ main[hidden] { display: none; }
 .metric-label {
   font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.14em;
   color: var(--muted-2);
+  line-height: 1.25;
+  /* Reserve 2 label lines so a wrapped label ('DAYS SINCE LAST ACTIVITY')
+     doesn't push its value below a single-line neighbour. */
+  min-height: 2.5em;
+  display: flex;
+  align-items: flex-start;
 }
 .metric-value {
   margin-top: 4px;
@@ -600,7 +611,14 @@ main[hidden] { display: none; }
   word-break: break-word;
 }
 
-.metric-sub { color: var(--muted); font-size: 0.78rem; margin-top: 3px; }
+.metric-sub {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 3px;
+  /* Reserve a sub line even on metrics that don't have one — keeps
+     card heights identical in the 2x2 mobile grid. */
+  min-height: 1.1em;
+}
 
 /* ---------- callouts ---------- */
 .callouts { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
@@ -823,6 +841,12 @@ main[hidden] { display: none; }
 .raw-btn-ghost:hover {
   background: var(--pill-bg);
   color: var(--text);
+}
+.raw-btn-copied,
+.raw-btn-copied:hover {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: transparent;
 }
 pre.raw {
   margin: 0;
