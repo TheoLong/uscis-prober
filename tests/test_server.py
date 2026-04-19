@@ -359,6 +359,7 @@ def test_api_cases_empty_when_no_logs(client):
     body = r.get_json()
     assert "cases" in body
     assert body["cases"][0]["captures"] == 0
+    assert body["cases"][0]["days"] == 0
 
 
 def test_api_cases_surfaces_summary_when_logs_exist(client, tmp_path):
@@ -371,7 +372,24 @@ def test_api_cases_surfaces_summary_when_logs_exist(client, tmp_path):
     body = r.get_json()
     case = body["cases"][0]
     assert case["captures"] == 2
+    assert case["days"] == 2
     assert case["summary"]["stage"] == "Pending receipt"
+
+
+def test_api_cases_captures_and_days_diverge_on_same_day_pulls(client, tmp_path):
+    # UI renders `captures` and `days` as two separate sub-fact cells, so the
+    # API must expose them as independent counters — same-day snapshots bump
+    # `captures` but not `days`.
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-03-09T06:00:00Z"),
+        _entry("2026-03-09T18:00:00Z"),  # same calendar day
+        _entry("2026-03-10T06:00:00Z"),
+    ])
+    r = client.get("/api/cases")
+    case = r.get_json()["cases"][0]
+    assert case["captures"] == 3
+    assert case["days"] == 2
 
 
 def test_api_history_preserves_uscis_key_order(client, tmp_path):

@@ -392,7 +392,8 @@ function _renderSubFacts(c, latest) {
     { k: "Channel",        v: latest.elisChannelType || "—" },
     { k: "Representative", v: reps || "—" },
     { k: "Last pulled",    v: c.capturedAt ? formatLocalDateTime(c.capturedAt) : "—", mono: true },
-    { k: "Snapshots / days", v: `${c.captures} / ${c.days}` },
+    { k: "Snapshots",      v: `${c.captures ?? 0}` },
+    { k: "Days",           v: `${c.days ?? 0}` },
   ];
   for (const f of facts) {
     const el = document.createElement("div");
