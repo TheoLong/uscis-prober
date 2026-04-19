@@ -48,6 +48,7 @@ from uscis_auth import (
     STORAGE_STATE_PATH,
     ensure_authenticated,
 )
+from system_log import log as sys_log
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.json"
@@ -153,6 +154,8 @@ def _extract_cases(
         receipt = case["id"]
         label = case.get("label") or case.get("type") or ""
         logger.info("Fetching %s (%s)...", label or "?", receipt)
+        sys_log("case_fetch_start", source="session_fetch",
+                label=label or "?", receipt=receipt)
         try:
             if keep_alive:
                 _tab, data = fetch_case_in_new_tab(
@@ -161,10 +164,16 @@ def _extract_cases(
             else:
                 data = fetch_case(probe_tab, receipt)
         except SessionExpired:
+            sys_log("case_fetch_session_expired", level="warning",
+                    source="session_fetch", label=label or "?", receipt=receipt)
             raise
         except ApiError as e:
             logger.error("  ✗ %s", e)
             failures += 1
+            sys_log("case_fetch_api_error", level="error",
+                    source="session_fetch", label=label or "?",
+                    receipt=receipt, status=getattr(e, "status", None),
+                    error=str(e))
             continue
 
         form_type = (
@@ -180,8 +189,14 @@ def _extract_cases(
         except ValueError as e:
             logger.error("  ✗ cannot determine log file: %s", e)
             failures += 1
+            sys_log("snapshot_append_failed", level="error",
+                    source="session_fetch", label=label or "?",
+                    receipt=receipt, error=str(e))
             continue
         logger.info("  → %s", path.relative_to(ROOT))
+        sys_log("snapshot_appended", source="session_fetch",
+                label=label or "?", receipt=receipt,
+                form_type=form_type, file=path.name)
 
     return failures
 
@@ -232,10 +247,13 @@ def cmd_run(args) -> int:
     cases = config.get("cases", [])
     if not cases:
         logger.error("No cases in %s", CONFIG_PATH)
+        sys_log("cli_run_no_cases", level="error", source="session_fetch")
         return 1
 
     captured_at = _now_iso_utc()
     logger.info("USCIS Case Snapshot — %s (%d cases)", captured_at, len(cases))
+    sys_log("cli_run_start", source="session_fetch",
+            case_count=len(cases), captured_at=captured_at)
 
     failures = 0
     with sync_playwright() as pw:
@@ -271,8 +289,12 @@ def cmd_run(args) -> int:
 
     if failures:
         logger.warning("Completed with %d failure(s).", failures)
+        sys_log("cli_run_finished", level="warning", source="session_fetch",
+                case_count=len(cases), failures=failures)
         return 2
     logger.info("Done.")
+    sys_log("cli_run_finished", source="session_fetch",
+            case_count=len(cases), failures=0)
     return 0
 
 

@@ -8,8 +8,9 @@ const state = {
   nextRun: null,
   pullRunning: false,
   eventCodeLabels: {},     // e.g. { FTA0: "Database checks received..." }
-  view: "cases",           // "cases" | "updates"
+  view: "cases",           // "cases" | "updates" | "systemlog"
   updates: [],             // flat diff feed
+  systemLog: [],           // flat event log from /api/system-log
 };
 
 // ---------- boot ----------
@@ -55,13 +56,37 @@ function setView(view) {
   );
   document.getElementById("case-list").hidden = view !== "cases";
   document.getElementById("updates-feed").hidden = view !== "updates";
+  document.getElementById("systemlog-feed").hidden = view !== "systemlog";
   if (view === "updates") renderUpdates();
+  if (view === "systemlog") loadAndRenderSystemLog();
 }
 
 // ---------- data loading ----------
 
 async function refreshAll() {
-  await Promise.all([loadCases(), loadUpdates(), pollPullStatus()]);
+  await Promise.all([loadCases(), loadUpdates(), loadSystemLog(), pollPullStatus()]);
+}
+
+async function loadSystemLog() {
+  try {
+    const res = await fetch("/api/system-log?limit=500");
+    const j = await res.json();
+    state.systemLog = j.events || [];
+    const countEl = document.getElementById("systemlog-count");
+    if (state.systemLog.length) {
+      countEl.hidden = false;
+      countEl.textContent = String(state.systemLog.length);
+    } else {
+      countEl.hidden = true;
+    }
+  } catch (e) {
+    console.warn("loadSystemLog failed:", e);
+  }
+}
+
+async function loadAndRenderSystemLog() {
+  await loadSystemLog();
+  renderSystemLog();
 }
 
 async function loadUpdates() {
@@ -470,6 +495,122 @@ function describeItem(kind, obj) {
 }
 
 // ---------- updates feed ----------
+
+// ---------- system log view ----------
+
+// Well-known events and their visual tone. Any event not listed falls
+// through to "info" (or "error"/"warning" if the entry carries that level).
+const SYSTEMLOG_EVENT_INFO = {
+  server_startup:              { tone: "info",  label: "Server started" },
+  scheduler_configured:        { tone: "info",  label: "Scheduler configured" },
+  pull_triggered_manually:     { tone: "info",  label: "Pull triggered (manual)" },
+  pull_started:                { tone: "info",  label: "Pull started" },
+  pull_finished:               { tone: "ok",    label: "Pull finished" },
+  pull_failed:                 { tone: "bad",   label: "Pull failed" },
+  pull_timeout:                { tone: "bad",   label: "Pull timed out" },
+  pull_crashed:                { tone: "bad",   label: "Pull crashed" },
+  pull_skipped_already_running:{ tone: "warn",  label: "Pull skipped (already running)" },
+  notify_sent:                 { tone: "ok",    label: "Notification sent" },
+  notify_skipped:              { tone: "warn",  label: "Notification skipped" },
+  notify_failed:               { tone: "bad",   label: "Notification failed" },
+  notify_dispatcher_crashed:   { tone: "bad",   label: "Notification dispatcher crashed" },
+  cli_run_start:               { tone: "info",  label: "session_fetch: run start" },
+  cli_run_finished:            { tone: "ok",    label: "session_fetch: run finished" },
+  cli_run_no_cases:            { tone: "bad",   label: "session_fetch: no cases configured" },
+  case_fetch_start:            { tone: "info",  label: "Case fetch start" },
+  case_fetch_api_error:        { tone: "bad",   label: "Case fetch API error" },
+  case_fetch_session_expired:  { tone: "warn",  label: "Case fetch session expired" },
+  snapshot_appended:           { tone: "ok",    label: "Snapshot appended" },
+  snapshot_append_failed:      { tone: "bad",   label: "Snapshot append failed" },
+};
+
+function _eventInfo(entry) {
+  const known = SYSTEMLOG_EVENT_INFO[entry.event];
+  if (known) return known;
+  // Unknown event — fall back on the entry's own level.
+  const tone = entry.level === "error" ? "bad"
+    : entry.level === "warning" ? "warn"
+    : "info";
+  return { tone, label: entry.event };
+}
+
+function renderSystemLog() {
+  const root = document.getElementById("systemlog-feed");
+  root.innerHTML = "";
+
+  if (!state.systemLog.length) {
+    root.innerHTML =
+      `<div class="updates-empty">` +
+      `<h3>System log is empty.</h3>` +
+      `<p>The system log records what the tracker did (and when) — ` +
+      `server startups, scheduler fires, pull lifecycle, case fetches, ` +
+      `snapshot appends, email notifications. Events will appear here as ` +
+      `the app runs.</p>` +
+      `</div>`;
+    return;
+  }
+
+  const head = document.createElement("div");
+  head.className = "updates-head";
+  head.innerHTML =
+    `<div>` +
+      `<h2>System log</h2>` +
+      `<div class="updates-sub">` +
+        `${state.systemLog.length} event${state.systemLog.length === 1 ? "" : "s"} · ` +
+        `Persisted to <code>data/system_log.json</code> · ` +
+        `Included in "Export all" zip. Newest first.` +
+      `</div>` +
+    `</div>`;
+  root.appendChild(head);
+
+  // Newest first.
+  const rowsNewestFirst = [...state.systemLog].reverse();
+  for (const e of rowsNewestFirst) {
+    root.appendChild(renderSystemLogRow(e));
+  }
+}
+
+function renderSystemLogRow(entry) {
+  const info = _eventInfo(entry);
+  const block = document.createElement("div");
+  block.className = `change-block syslog-block syslog-${info.tone}`;
+
+  // Detail fields = everything that isn't the skeleton (ts, event, level, pid, source).
+  const skeleton = new Set(["ts", "event", "level", "pid", "source"]);
+  const detailKeys = Object.keys(entry).filter(k => !skeleton.has(k));
+
+  const when = formatLocalDateTime(new Date(entry.ts), { withSeconds: true });
+  const sourceTag = entry.source
+    ? `<span class="syslog-source">${escapeHtml(entry.source)}</span>`
+    : "";
+
+  let detailsHtml = "";
+  if (detailKeys.length) {
+    detailsHtml = `<div class="syslog-details">` +
+      detailKeys.map(k => {
+        const v = entry[k];
+        const shown = typeof v === "object" ? JSON.stringify(v) : String(v);
+        return (
+          `<div class="syslog-detail">` +
+            `<span class="syslog-detail-k">${escapeHtml(k)}</span>` +
+            `<span class="syslog-detail-v">${escapeHtml(shown)}</span>` +
+          `</div>`
+        );
+      }).join("") +
+      `</div>`;
+  }
+
+  block.innerHTML =
+    `<div class="syslog-head">` +
+      `<span class="kind-tag kind-${info.tone}">${escapeHtml(info.label)}</span>` +
+      sourceTag +
+      `<span class="syslog-ts">${escapeHtml(when)}</span>` +
+      `<span class="syslog-event">${escapeHtml(entry.event)}</span>` +
+    `</div>` +
+    detailsHtml;
+
+  return block;
+}
 
 function renderUpdates() {
   const root = document.getElementById("updates-feed");

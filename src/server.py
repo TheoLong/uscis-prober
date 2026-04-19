@@ -40,6 +40,7 @@ from diff_utils import (
     summarize_case,
 )
 from mailer import notify_update
+from system_log import log as sys_log, read_all as read_system_log
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -170,15 +171,23 @@ def _send_notifications_for_new(new_records: list[dict]) -> None:
         recipient = _notify_recipient(auth)
         if not recipient or not auth.get("uscis_mfa_email") or not auth.get("uscis_mfa_app_password"):
             logger.warning("Email auth missing — skipping %d notification(s).", len(new_records))
+            sys_log("notify_skipped", level="warning", source="server",
+                    reason="auth_missing", count=len(new_records))
             return
         for rec in new_records:
             try:
                 notify_update(auth, recipient, rec, EVENT_CODE_LABELS)
                 logger.info("Notified: %s (%s)", rec.get("id"), rec.get("kind"))
+                sys_log("notify_sent", source="server",
+                        record_id=rec.get("id"), kind=rec.get("kind"))
             except Exception as e:
                 logger.exception("Notify failed for %s: %s", rec.get("id"), e)
+                sys_log("notify_failed", level="error", source="server",
+                        record_id=rec.get("id"), error=str(e))
     except Exception as e:
         logger.exception("Notification dispatcher crashed: %s", e)
+        sys_log("notify_dispatcher_crashed", level="error", source="server",
+                error=str(e))
 
 
 def _run_pull_subprocess() -> None:
@@ -192,14 +201,17 @@ def _run_pull_subprocess() -> None:
     with _pull_lock:
         if _pull_state.running:
             logger.info("Pull already running; skipping trigger.")
+            sys_log("pull_skipped_already_running", source="server")
             return
         _pull_state = PullState(
             running=True,
             started_at=_now_iso(),
         )
 
+    start_wall = time.time()
     # Snapshot the diff set *before* pulling.
     before_ids = _update_ids(_all_update_records())
+    sys_log("pull_started", source="server", before_diff_count=len(before_ids))
 
     logger.info("Spawning pull: %s", " ".join(PULL_CMD))
     try:
@@ -213,6 +225,7 @@ def _run_pull_subprocess() -> None:
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         tail_lines = (stdout + "\n" + stderr).splitlines()[-80:]
+        duration = round(time.time() - start_wall, 2)
         with _pull_lock:
             _pull_state.running = False
             _pull_state.finished_at = _now_iso()
@@ -230,12 +243,29 @@ def _run_pull_subprocess() -> None:
             new_records = [
                 r for r in after_records if r.get("id") not in before_ids
             ]
+            sys_log(
+                "pull_finished",
+                source="server",
+                exit_code=0,
+                duration_seconds=duration,
+                new_diff_count=len(new_records),
+            )
             if new_records:
                 logger.info("Emitting %d notification(s).", len(new_records))
                 _send_notifications_for_new(new_records)
             else:
                 logger.info("No new diffs — no email sent.")
+        else:
+            sys_log(
+                "pull_failed",
+                level="error",
+                source="server",
+                exit_code=proc.returncode,
+                duration_seconds=duration,
+                stderr_tail=stderr.splitlines()[-10:],
+            )
     except subprocess.TimeoutExpired:
+        duration = round(time.time() - start_wall, 2)
         with _pull_lock:
             _pull_state.running = False
             _pull_state.finished_at = _now_iso()
@@ -243,13 +273,18 @@ def _run_pull_subprocess() -> None:
             _pull_state.ok = False
             _pull_state.last_error = "timeout (10min)"
         logger.error("Pull timed out after 10min.")
+        sys_log("pull_timeout", level="error", source="server",
+                duration_seconds=duration)
     except Exception as e:
+        duration = round(time.time() - start_wall, 2)
         with _pull_lock:
             _pull_state.running = False
             _pull_state.finished_at = _now_iso()
             _pull_state.ok = False
             _pull_state.last_error = str(e)
         logger.exception("Pull crashed.")
+        sys_log("pull_crashed", level="error", source="server",
+                duration_seconds=duration, error=str(e))
 
 
 def _spawn_pull_async() -> None:
@@ -274,6 +309,8 @@ def _setup_scheduler() -> None:
             replace_existing=True,
         )
     scheduler.start()
+    sys_log("scheduler_configured", source="server",
+            timezone=SCHEDULER_TZ, hours=list(PULL_HOURS))
 
 
 def _next_run_iso() -> str | None:
@@ -465,6 +502,14 @@ def api_export():
                 "entries": len(entries),
             })
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
+        # Include the system event log — crucial for post-hoc debugging.
+        try:
+            z.writestr(
+                "system_log.json",
+                json.dumps(read_system_log(), indent=2),
+            )
+        except Exception:  # pragma: no cover — never fail an export on log read
+            pass
     # Human-readable download timestamp: YYYY-MM-DD-HHMMSS-UTC so the file
     # sorts chronologically and is obvious when saved to disk.
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
@@ -478,11 +523,28 @@ def api_export():
     )
 
 
+@app.route("/api/system-log")
+def api_system_log():
+    """Return the structured event log (for the dashboard's System log tab).
+
+    Optional query params:
+      - `limit=N` — return only the last N events (default: all up to MAX_ENTRIES).
+    """
+    try:
+        limit_raw = request.args.get("limit")
+        limit = int(limit_raw) if limit_raw else None
+    except ValueError:
+        limit = None
+    entries = read_system_log(limit=limit)
+    return jsonify({"events": entries})
+
+
 @app.route("/api/pull", methods=["POST"])
 def api_pull():
     with _pull_lock:
         if _pull_state.running:
             return jsonify({"ok": False, "error": "pull_in_progress"}), 409
+    sys_log("pull_triggered_manually", source="server")
     _spawn_pull_async()
     return jsonify({"ok": True, "message": "Pull started"})
 
@@ -576,6 +638,13 @@ def main() -> None:
         "Scheduler started: daily pulls at %s (%s)",
         ", ".join(f"{h:02d}:00" for h in PULL_HOURS),
         SCHEDULER_TZ,
+    )
+    sys_log(
+        "server_startup",
+        source="server",
+        schedule_hours=list(PULL_HOURS),
+        schedule_timezone=SCHEDULER_TZ,
+        access_gate_armed=bool(optional_access_code),
     )
     # Don't use reloader — it spawns two processes and double-schedules jobs.
     # Bind to all interfaces — production access is gated by the optional

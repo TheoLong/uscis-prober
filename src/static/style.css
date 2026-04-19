@@ -403,6 +403,67 @@ main[hidden] { display: none; }
   font-weight: 500;
 }
 
+/* ---------- system log view ----------
+ * Event rows shown on the System log tab. Each row is a pill-headed
+ * block with a timestamp, event name, source, and any detail fields
+ * flattened out underneath. */
+.syslog-block {
+  display: block;
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.syslog-ok   { border-left: 3px solid var(--ok); }
+.syslog-bad  { border-left: 3px solid var(--bad); background: var(--bad-tint-soft); }
+.syslog-warn { border-left: 3px solid var(--warn); background: var(--warn-tint); }
+.syslog-info { border-left: 3px solid var(--accent); }
+.syslog-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.84rem;
+}
+.syslog-source {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--muted);
+}
+.syslog-ts {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.syslog-event {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--muted-2);
+}
+.syslog-details {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 14px;
+  align-items: baseline;
+  font-size: 0.78rem;
+}
+.syslog-detail { display: contents; }
+.syslog-detail-k {
+  font-family: var(--font-mono);
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.syslog-detail-v {
+  font-family: var(--font-mono);
+  color: var(--text);
+  word-break: break-word;
+}
+
 .metric-sub { color: var(--muted); font-size: 0.78rem; margin-top: 3px; }
 
 /* ---------- callouts ---------- */

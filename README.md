@@ -37,6 +37,12 @@ Updates feed — every diff across every case, newest first:
 
 ![Updates feed](docs/screenshot-updates.png)
 
+System log — structured event history of what the tracker did
+(scheduler fires, pull lifecycle, snapshot appends, notifications).
+Persisted to `data/system_log.json` and included in the export zip:
+
+![System log](docs/screenshot-system-log.png)
+
 > Receipt numbers and representative names are blurred / redacted in
 > the shots above. The live dashboard shows full case details.
 
