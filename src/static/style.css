@@ -487,19 +487,36 @@ main[hidden] { display: none; }
 .callout-info .callout-title { color: var(--accent-hot); }
 .callout-body { color: var(--muted); font-size: 0.82rem; }
 
-/* ---------- secondary facts ---------- */
+/* ---------- secondary facts ----------
+ * Grid of equal-width cells so labels and values line up vertically
+ * regardless of individual content length. `auto-fit` plus a minmax
+ * floor keeps it responsive on narrow viewports. */
 .sub-facts {
   margin-top: 14px;
-  display: flex; flex-wrap: wrap; gap: 18px 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px 18px;
   padding-top: 14px;
   border-top: 1px solid var(--border-soft);
 }
-.sub-fact { display: flex; flex-direction: column; gap: 2px; min-width: 120px; }
+.sub-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;   /* allow long values to shrink instead of forcing reflow */
+}
 .sub-fact-k {
   font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.12em;
   color: var(--muted-2);
+  white-space: nowrap;
 }
-.sub-fact-v { font-size: 0.88rem; color: var(--text); }
+.sub-fact-v {
+  font-size: 0.88rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .sub-fact-v.mono { font-family: var(--font-mono); font-size: 0.82rem; }
 
 /* ---------- timeline ---------- */
@@ -897,8 +914,12 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   .callout-title { font-size: 0.84rem; }
   .callout-body { font-size: 0.78rem; }
 
-  .sub-facts { gap: 10px 14px; padding-top: 12px; margin-top: 12px; }
-  .sub-fact { min-width: calc(50% - 7px); }
+  .sub-facts {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px 14px;
+    padding-top: 12px;
+    margin-top: 12px;
+  }
   .sub-fact-k { font-size: 0.62rem; }
   .sub-fact-v { font-size: 0.82rem; }
 
@@ -951,7 +972,7 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 /* Extra-narrow screens (e.g. 320px iPhone SE 1st gen) */
 @media (max-width: 380px) {
   .hero-metrics { grid-template-columns: 1fr; }
-  .sub-fact { min-width: 100%; }
+  .sub-facts { grid-template-columns: 1fr; }
   .case-meta .big { font-size: 0.8rem; }
 }
 
