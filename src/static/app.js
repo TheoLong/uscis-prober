@@ -133,6 +133,9 @@ async function pollPullStatus() {
     const btn = document.getElementById("pull-btn");
     const ind = document.getElementById("pull-indicator");
     btn.disabled = state.pullRunning;
+    // Button label mirrors the state so it reads correctly whether the
+    // pull was triggered manually or fired by the scheduler.
+    btn.textContent = state.pullRunning ? "Pulling…" : "Pull update";
     ind.hidden = !state.pullRunning;
     document.getElementById("next-when").textContent =
       state.nextRun ? formatLocal(state.nextRun) : "—";
@@ -145,7 +148,12 @@ async function pollPullStatus() {
       } else {
         toast("Pull complete — data refreshed", "ok");
       }
-      await Promise.all([loadCases(), loadUpdates()]);
+      // Reload cases/updates AND the system log — the pull lifecycle
+      // emits `pull_triggered_manually` / `pull_started` / `pull_finished`
+      // etc. that the System-log view should surface without needing a
+      // tab-switch.
+      await Promise.all([loadCases(), loadUpdates(), loadSystemLog()]);
+      if (state.view === "systemlog") renderSystemLog();
     }
   } catch (e) {
     console.warn("status poll failed:", e);
@@ -153,6 +161,7 @@ async function pollPullStatus() {
 }
 
 async function triggerPull() {
+  const btn = document.getElementById("pull-btn");
   try {
     const res = await fetch("/api/pull", { method: "POST" });
     if (res.status === 409) {
@@ -165,6 +174,12 @@ async function triggerPull() {
       return;
     }
     toast("Pull started…", "ok");
+    // Optimistically flip the button so there's no 3-second gap before
+    // the next status poll catches up. pollPullStatus() will reconcile
+    // against the server state on the next tick.
+    btn.disabled = true;
+    btn.textContent = "Pulling…";
+    document.getElementById("pull-indicator").hidden = false;
     pollPullStatus();
   } catch (e) {
     toast("Network error triggering pull", "bad");
