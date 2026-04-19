@@ -1,0 +1,18 @@
+{
+  "cases": [
+    { "id": "IOE0000000001", "label": "I-485" },
+    { "id": "IOE0000000002", "label": "I-765" },
+    { "id": "IOE0000000003", "label": "I-131" }
+  ],
+  "auth": {
+    "_comment": "my.uscis.gov login + the inbox that receives verification codes (any major provider — host auto-detected from the email domain)",
+    "uscis_email": "you@example.com",
+    "uscis_password": "your-uscis-password",
+    "uscis_mfa_email": "you@example.com",
+    "uscis_mfa_app_password": "16-char-app-password",
+    "_comment_gate": "Optional: when set, dashboard requires this code. Empty/null disables.",
+    "optional_access_code": "",
+    "_comment_notify": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email.",
+    "notification_email": ""
+  }
+}

@@ -1,0 +1,14 @@
+config.json
+.uscis_session.json
+.flask_secret
+# Per-case snapshots contain PII (applicant names, letter IDs, etc.) — keep local.
+data/*.json
+__pycache__/
+*.pyc
+.DS_Store
+.coverage
+.pytest_cache/
+htmlcov/
+venv/
+.venv/
+*.egg-info/

@@ -1,0 +1,869 @@
+// USCIS Checker UI — vanilla JS, no framework.
+
+const state = {
+  cases: [],
+  histories: {},           // label → history payload
+  activeTab: {},           // receiptNumber → tab id
+  rawSelection: {},        // receiptNumber → capturedAt for raw view
+  nextRun: null,
+  pullRunning: false,
+  eventCodeLabels: {},     // e.g. { FTA0: "Database checks received..." }
+  view: "cases",           // "cases" | "updates"
+  updates: [],             // flat diff feed
+};
+
+// ---------- boot ----------
+
+document.addEventListener("DOMContentLoaded", async () => {
+  document.getElementById("pull-btn").addEventListener("click", triggerPull);
+  wireExportInfo();
+  document.querySelectorAll(".view-tab").forEach(btn =>
+    btn.addEventListener("click", () => setView(btn.dataset.view))
+  );
+  await refreshAll();
+  setInterval(updateCountdown, 1000);
+  setInterval(pollPullStatus, 3000);
+});
+
+function wireExportInfo() {
+  const btn = document.getElementById("export-info-btn");
+  const pop = document.getElementById("export-info-popover");
+  if (!btn || !pop) return;
+  const close = () => {
+    pop.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  };
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    const open = pop.hidden;
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  // Dismiss when the user clicks anywhere else or presses Escape.
+  document.addEventListener("click", e => {
+    if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") close();
+  });
+}
+
+function setView(view) {
+  state.view = view;
+  document.querySelectorAll(".view-tab").forEach(btn =>
+    btn.classList.toggle("active", btn.dataset.view === view)
+  );
+  document.getElementById("case-list").hidden = view !== "cases";
+  document.getElementById("updates-feed").hidden = view !== "updates";
+  if (view === "updates") renderUpdates();
+}
+
+// ---------- data loading ----------
+
+async function refreshAll() {
+  await Promise.all([loadCases(), loadUpdates(), pollPullStatus()]);
+}
+
+async function loadUpdates() {
+  try {
+    const res = await fetch("/api/updates");
+    const j = await res.json();
+    state.updates = j.updates || [];
+    state.eventCodeLabels = { ...state.eventCodeLabels, ...(j.eventCodeLabels || {}) };
+    const countEl = document.getElementById("updates-count");
+    if (state.updates.length) {
+      countEl.hidden = false;
+      countEl.textContent = String(state.updates.length);
+    } else {
+      countEl.hidden = true;
+    }
+    if (state.view === "updates") renderUpdates();
+  } catch (e) {
+    console.warn("loadUpdates failed:", e);
+  }
+}
+
+async function loadCases() {
+  const res = await fetch("/api/cases");
+  const j = await res.json();
+  state.cases = j.cases || [];
+  state.eventCodeLabels = j.eventCodeLabels || {};
+  await Promise.all(state.cases.map(c => loadHistory(c.label)));
+  renderSummary();
+  renderCases();
+}
+
+async function loadHistory(label) {
+  const res = await fetch(`/api/cases/${encodeURIComponent(label)}/history`);
+  state.histories[label] = await res.json();
+}
+
+async function pollPullStatus() {
+  try {
+    const res = await fetch("/api/pull/status");
+    const s = await res.json();
+    state.nextRun = s.next_run ? new Date(s.next_run) : null;
+    const wasRunning = state.pullRunning;
+    state.pullRunning = !!s.running;
+    const btn = document.getElementById("pull-btn");
+    const ind = document.getElementById("pull-indicator");
+    btn.disabled = state.pullRunning;
+    ind.hidden = !state.pullRunning;
+    document.getElementById("next-when").textContent =
+      state.nextRun ? formatLocal(state.nextRun) : "—";
+    updateCountdown();
+
+    // If a pull just finished, refresh data
+    if (wasRunning && !state.pullRunning) {
+      if (s.ok === false) {
+        toast(`Pull failed: ${s.last_error || "see logs"}`, "bad");
+      } else {
+        toast("Pull complete — data refreshed", "ok");
+      }
+      await Promise.all([loadCases(), loadUpdates()]);
+    }
+  } catch (e) {
+    console.warn("status poll failed:", e);
+  }
+}
+
+async function triggerPull() {
+  try {
+    const res = await fetch("/api/pull", { method: "POST" });
+    if (res.status === 409) {
+      toast("A pull is already running…", "bad");
+      return;
+    }
+    const j = await res.json();
+    if (!j.ok) {
+      toast(j.error || "pull failed", "bad");
+      return;
+    }
+    toast("Pull started…", "ok");
+    pollPullStatus();
+  } catch (e) {
+    toast("Network error triggering pull", "bad");
+  }
+}
+
+// ---------- rendering ----------
+
+function renderSummary() {
+  const totalCaptures = state.cases.reduce((n, c) => n + (c.captures || 0), 0);
+  const last = state.cases
+    .map(c => c.capturedAt)
+    .filter(Boolean)
+    .sort()
+    .slice(-1)[0];
+  // Announce the tz once here so individual timestamps can stay compact.
+  const tz = getLocalTimezoneAbbrev();
+  document.getElementById("summary-line").textContent =
+    `${state.cases.length} cases · ${totalCaptures} snapshots` +
+    (last ? ` · last ${formatLocal(new Date(last))}` : "") +
+    ` · times in ${tz}`;
+}
+
+function renderCases() {
+  const root = document.getElementById("case-list");
+  root.innerHTML = "";
+  const tmpl = document.getElementById("case-card-template");
+  for (const c of state.cases) {
+    const node = tmpl.content.cloneNode(true);
+    const article = node.querySelector(".case-card");
+    article.dataset.label = c.label;
+    article.dataset.receipt = c.receiptNumber;
+
+    article.querySelector(".case-label").textContent = c.label;
+    article.querySelector(".case-receipt").textContent = c.receiptNumber;
+
+    const meta = article.querySelector(".case-meta");
+    meta.innerHTML = "";
+    if (c.applicantName) {
+      const a = document.createElement("span");
+      a.className = "big";
+      a.textContent = formatApplicant(c.applicantName);
+      meta.appendChild(a);
+    }
+    if (c.formName) {
+      const f = document.createElement("span");
+      f.textContent = c.formName;
+      meta.appendChild(f);
+    }
+
+    // Status badges: only surface meaningful signals, skip default falses.
+    const badges = article.querySelector(".case-badges");
+    const latest = c.latest || {};
+    if (c.closed === true) badges.appendChild(badge("closed", "bad"));
+    if (c.actionRequired) badges.appendChild(badge("action required", "warn"));
+    if (latest.isPremiumProcessed) badges.appendChild(badge("premium", "warn"));
+    if (latest.cmsFailure) badges.appendChild(badge("Case Management System failure", "bad"));
+    if (!badges.children.length && c.closed === false) {
+      badges.appendChild(badge("pending", ""));
+    }
+
+    // Tabs wiring
+    const tabs = article.querySelectorAll(".tab");
+    const panels = article.querySelectorAll(".tab-panel");
+    const active = state.activeTab[c.receiptNumber] || "overview";
+    tabs.forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.tab === active);
+      btn.addEventListener("click", () => switchTab(c, btn.dataset.tab));
+    });
+    panels.forEach(p => (p.hidden = p.dataset.tab !== active));
+
+    // Initial panel content
+    renderPanel(article, c, active);
+
+    root.appendChild(node);
+  }
+}
+
+function switchTab(caseObj, tabId) {
+  state.activeTab[caseObj.receiptNumber] = tabId;
+  const article = document.querySelector(
+    `.case-card[data-receipt="${CSS.escape(caseObj.receiptNumber)}"]`
+  );
+  if (!article) return;
+  article.querySelectorAll(".tab").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.tab === tabId);
+  });
+  article.querySelectorAll(".tab-panel").forEach(p => {
+    p.hidden = p.dataset.tab !== tabId;
+  });
+  renderPanel(article, caseObj, tabId);
+}
+
+function renderPanel(article, c, tabId) {
+  const panel = article.querySelector(`.tab-panel[data-tab="${tabId}"]`);
+  if (!panel) return;
+  if (tabId === "overview") renderOverview(panel, c);
+  if (tabId === "changes")  renderChanges(panel, c);
+  if (tabId === "raw")      renderRaw(panel, c);
+}
+
+// ---------- overview ----------
+
+function renderOverview(panel, c) {
+  const latest = c.latest || {};
+  const s = c.summary || {};
+  panel.innerHTML = "";
+
+  // --- Hero metrics: raw data signals only (no inference) ---
+  const metrics = [
+    {
+      label: "Days pending",
+      value: s.daysPending ?? "—",
+      sub: latest.submissionDate ? `since ${latest.submissionDate}` : "",
+      tone: "",
+    },
+    {
+      label: "Days since last activity",
+      value: s.daysSinceUpdate ?? "—",
+      sub: latest.updatedAt ? `last activity ${latest.updatedAt}` : "",
+      tone: s.daysSinceUpdate == null
+        ? ""
+        : s.daysSinceUpdate <= 7 ? "ok"
+        : s.daysSinceUpdate <= 30 ? ""
+        : "warn",
+    },
+    {
+      label: "All updates",
+      value: s.allUpdates ?? 0,
+      sub: "",
+      tone: "",
+    },
+    {
+      label: "Silent updates",
+      value: s.silentUpdates ?? 0,
+      sub: "updates without event",
+      tone: (s.silentUpdates ?? 0) > 0 ? "ok" : "",
+    },
+  ];
+  const metricRow = document.createElement("div");
+  metricRow.className = "hero-metrics";
+  for (const m of metrics) {
+    const box = document.createElement("div");
+    box.className = `metric ${m.tone || ""}`;
+    box.innerHTML =
+      `<div class="metric-label">${escapeHtml(m.label)}</div>` +
+      `<div class="metric-value">${escapeHtml(String(m.value))}</div>` +
+      (m.sub ? `<div class="metric-sub">${escapeHtml(m.sub)}</div>` : "");
+    metricRow.appendChild(box);
+  }
+  panel.appendChild(metricRow);
+
+  // --- Factual callouts: ONLY things pulled verbatim from USCIS fields. ---
+  // Anything derived or community-interpreted belongs in the Inferred block
+  // at the end of the overview, not here.
+  const factCallouts = document.createElement("div");
+  factCallouts.className = "callouts";
+
+  if (latest.actionRequired || (s.evidenceRequestCount ?? 0) > 0) {
+    factCallouts.appendChild(
+      callout(
+        "bad",
+        "Action required",
+        (s.evidenceRequestCount ?? 0) > 0
+          ? `evidenceRequests has ${s.evidenceRequestCount} entr${s.evidenceRequestCount === 1 ? "y" : "ies"} — an Request for Evidence / Notice of Intent to Deny has been issued. Check the raw JSON.`
+          : "USCIS set actionRequired — look for a Request for Evidence or similar in the notices."
+      )
+    );
+  }
+  if (latest.closed === true) {
+    factCallouts.appendChild(
+      callout(
+        "ok",
+        "Case closed",
+        "USCIS marked the case closed. Look at the latest event code to see the outcome (APR0/H008 = approval, DNY0 = denial, CRD0 = card mailed)."
+      )
+    );
+  }
+  if (s.upcomingAppointment) {
+    const appt = s.upcomingAppointment;
+    const when = appt.appointmentDateTime
+      ? formatLocalDateTime(appt.appointmentDateTime)
+      : "";
+    const daysUntil = appt.daysUntil;
+    const tail = daysUntil != null ? ` (in ${daysUntil} day${daysUntil === 1 ? "" : "s"})` : "";
+    factCallouts.appendChild(
+      callout(
+        "info",
+        `Upcoming: ${appt.actionType || "appointment"}`,
+        when ? `Scheduled for ${when}${tail}` : "Scheduled — see notices."
+      )
+    );
+  }
+  if (factCallouts.children.length) panel.appendChild(factCallouts);
+
+  // --- Secondary facts: a compact strip, no duplication with header ---
+  panel.appendChild(_renderSubFacts(c, latest));
+
+  // --- Observed event codes (factual only — no inference, no stage
+  // guessing, no community folklore; form-agnostic). ---
+  panel.appendChild(renderObservedEventCodes(c));
+}
+
+function _renderSubFacts(c, latest) {
+  const sub = document.createElement("div");
+  sub.className = "sub-facts";
+  const reps = latest.representativeName ? formatApplicant(latest.representativeName) : "";
+  const facts = [
+    { k: "Submitted",      v: latest.submissionDate || "—" },
+    { k: "Channel",        v: latest.elisChannelType || "—" },
+    { k: "Representative", v: reps || "—" },
+    { k: "Last pulled",    v: c.capturedAt ? formatLocalDateTime(c.capturedAt) : "—", mono: true },
+    { k: "Snapshots / days", v: `${c.captures} / ${c.days}` },
+  ];
+  for (const f of facts) {
+    const el = document.createElement("div");
+    el.className = "sub-fact";
+    el.innerHTML =
+      `<span class="sub-fact-k">${escapeHtml(f.k)}</span>` +
+      `<span class="sub-fact-v${f.mono ? " mono" : ""}">${escapeHtml(String(f.v))}</span>`;
+    sub.appendChild(el);
+  }
+  return sub;
+}
+
+// ---------- changes ----------
+
+function renderChanges(panel, c) {
+  panel.innerHTML = "";
+  const hist = state.histories[c.label];
+  const changes = (hist && hist.changes) || [];
+  if (!changes.length) {
+    panel.innerHTML = `<div class="no-changes">No differences detected between day-binned captures.</div>`;
+    return;
+  }
+  // Show newest first
+  for (const ch of [...changes].reverse()) {
+    panel.appendChild(renderChangeBlock(ch));
+  }
+}
+
+const KIND_INFO = {
+  silent_update:  { label: "silent update",  tone: "silent",
+                 desc: "updatedAt date advanced; no visible event or notice." },
+  same_day_refresh: { label: "same-day re-stamp", tone: "silent",
+                 desc: "updatedAtTimestamp moved within the same day — usually a sync artifact." },
+  event:       { label: "new event",      tone: "ok" },
+  notice:      { label: "new notice",     tone: "warn" },
+  appointment: { label: "appointment",    tone: "warn" },
+  decision:    { label: "decision flag",  tone: "ok" },
+  status:      { label: "status change",  tone: "" },
+};
+
+
+function renderChangeBlock(ch) {
+  const block = document.createElement("div");
+  block.className = "change-block";
+  const info = KIND_INFO[ch.kind] || KIND_INFO.status;
+  const kindTag =
+    `<span class="kind-tag kind-${info.tone || "n"}" ` +
+    `title="${escapeHtml(info.desc || info.label)}">${escapeHtml(info.label)}</span>`;
+  block.innerHTML =
+    `<div class="change-block-head">` +
+      `<span class="change-range">${escapeHtml((ch.from || "").slice(0,10))} ` +
+      `<span class="change-arrow">→</span> ${escapeHtml((ch.to || "").slice(0,10))}</span>` +
+      kindTag +
+    `</div>`;
+
+  if (ch.scalars && Object.keys(ch.scalars).length) {
+    const sec = document.createElement("div");
+    sec.className = "change-section";
+    sec.innerHTML = `<h5>Field changes</h5>`;
+    for (const [k, v] of Object.entries(ch.scalars)) {
+      const row = document.createElement("div");
+      row.className = "change-scalar";
+      row.innerHTML =
+        `<span class="field">${escapeHtml(k)}</span>` +
+        `<span class="from">${escapeHtml(formatValue(v.from))}</span>` +
+        `<span class="to">${escapeHtml(formatValue(v.to))}</span>`;
+      sec.appendChild(row);
+    }
+    block.appendChild(sec);
+  }
+
+  const collections = [
+    ["events", "Events"],
+    ["notices", "Notices"],
+    ["documents", "Documents"],
+    ["addendums", "Addendums"],
+  ];
+  for (const [key, title] of collections) {
+    const c = ch[key] || {};
+    if (!(c.added?.length || c.removed?.length)) continue;
+    const sec = document.createElement("div");
+    sec.className = "change-section";
+    sec.innerHTML = `<h5>${title}</h5>`;
+    for (const a of c.added || []) {
+      const chip = document.createElement("span");
+      chip.className = "change-item-added";
+      chip.textContent = "+ " + describeItem(key, a);
+      sec.appendChild(chip);
+    }
+    for (const r of c.removed || []) {
+      const chip = document.createElement("span");
+      chip.className = "change-item-removed";
+      chip.textContent = "− " + describeItem(key, r);
+      sec.appendChild(chip);
+    }
+    block.appendChild(sec);
+  }
+  return block;
+}
+
+function describeItem(kind, obj) {
+  if (kind === "events") {
+    const code = obj.eventCode || "?";
+    const caption = state.eventCodeLabels[code];
+    const when = obj.eventDateTime || "—";
+    return caption ? `${code} (${caption}) @ ${when}` : `${code} @ ${when}`;
+  }
+  if (kind === "notices") {
+    const appt = obj.appointmentDateTime
+      ? ` (appt ${formatLocalDateTime(obj.appointmentDateTime)})`
+      : "";
+    return `${obj.actionType || "?"} — letter ${obj.letterId || "?"}${appt}`;
+  }
+  return JSON.stringify(obj);
+}
+
+// ---------- updates feed ----------
+
+function renderUpdates() {
+  const root = document.getElementById("updates-feed");
+  root.innerHTML = "";
+  if (!state.updates.length) {
+    root.innerHTML =
+      `<div class="updates-empty">` +
+      `<h3>No updates yet.</h3>` +
+      `<p>An update is created whenever a pull discovers something new: ` +
+      `a silent update, a new event code, an appointment change, a decision flag flip, ` +
+      `or a new notice. Records are computed directly from the capture history, so ` +
+      `restarting the server never loses or duplicates them.</p>` +
+      `</div>`;
+    return;
+  }
+
+  const head = document.createElement("div");
+  head.className = "updates-head";
+  head.innerHTML =
+    `<div>` +
+      `<h2>Updates</h2>` +
+      `<div class="updates-sub">` +
+        `${state.updates.length} record${state.updates.length === 1 ? "" : "s"}` +
+        ` across ${new Set(state.updates.map(u => u.receiptNumber)).size} case(s).` +
+        ` Derived from capture history — never stored.` +
+      `</div>` +
+    `</div>`;
+  root.appendChild(head);
+
+  for (const u of state.updates) {
+    root.appendChild(renderUpdateRecord(u));
+  }
+}
+
+function renderUpdateRecord(u) {
+  const info = KIND_INFO[u.kind] || KIND_INFO.status;
+  const detected = u.detectedOn || (u.to || "").slice(0, 10);
+  const real = u.realUpdateDate;
+  const dateLine = real && real !== detected
+    ? `Detected ${detected} · Update date ${real}`
+    : `Detected ${detected}`;
+
+  const block = document.createElement("article");
+  block.className = "update-record";
+  block.dataset.id = u.id || "";
+  block.innerHTML =
+    `<header class="update-head">` +
+      `<div class="update-head-left">` +
+        `<span class="update-case">${escapeHtml(u.caseLabel || "?")}</span>` +
+        `<span class="update-receipt">${escapeHtml(u.receiptNumber || "")}</span>` +
+      `</div>` +
+      `<span class="kind-tag kind-${info.tone || "n"}" ` +
+           `title="${escapeHtml(info.desc || info.label)}">${escapeHtml(info.label)}</span>` +
+    `</header>` +
+    `<div class="update-dates">${escapeHtml(dateLine)}</div>`;
+
+  // Scalar changes
+  const scalars = u.scalars || {};
+  if (Object.keys(scalars).length) {
+    const sec = document.createElement("div");
+    sec.className = "change-section";
+    sec.innerHTML = `<h5>Field changes</h5>`;
+    for (const [k, v] of Object.entries(scalars)) {
+      const row = document.createElement("div");
+      row.className = "change-scalar";
+      row.innerHTML =
+        `<span class="field">${escapeHtml(k)}</span>` +
+        `<span class="from">${escapeHtml(formatValue(v.from))}</span>` +
+        `<span class="to">${escapeHtml(formatValue(v.to))}</span>`;
+      sec.appendChild(row);
+    }
+    block.appendChild(sec);
+  }
+
+  // Collection deltas
+  const collections = [
+    ["events", "Events"],
+    ["notices", "Notices"],
+    ["documents", "Documents"],
+    ["addendums", "Addendums"],
+  ];
+  for (const [key, title] of collections) {
+    const coll = u[key] || {};
+    if (!(coll.added?.length || coll.removed?.length)) continue;
+    const sec = document.createElement("div");
+    sec.className = "change-section";
+    sec.innerHTML = `<h5>${title}</h5>`;
+    for (const a of coll.added || []) {
+      const chip = document.createElement("span");
+      chip.className = "change-item-added";
+      chip.textContent = "+ " + describeItem(key, a);
+      sec.appendChild(chip);
+    }
+    for (const r of coll.removed || []) {
+      const chip = document.createElement("span");
+      chip.className = "change-item-removed";
+      chip.textContent = "− " + describeItem(key, r);
+      sec.appendChild(chip);
+    }
+    block.appendChild(sec);
+  }
+
+  return block;
+}
+
+// Factual combined timeline: every USCIS event on the case plus every
+// silent update we've detected, merged chronologically (newest first).
+// Date + code only — no interpretation, no community folklore, no stage
+// inference. Form-agnostic: works the same for I-140, I-485, I-765, I-131…
+function renderObservedEventCodes(c) {
+  const section = document.createElement("section");
+  section.className = "events-section";
+
+  const heading = document.createElement("h4");
+  heading.className = "events-heading";
+  heading.textContent = "Timeline";
+  section.appendChild(heading);
+
+  // 1. Raw events from the latest snapshot.
+  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
+  const rows = events.map(e => ({
+    date: (e.eventDateTime || e.createdAt || "").slice(0, 10) || "—",
+    code: e.eventCode || "?",
+  }));
+
+  // 2. Silent updates from the diff history. Each one is an `updatedAt`
+  // bump USCIS made with no event / notice change — surface it as its
+  // own row dated by the advanced updatedAt value.
+  const hist = state.histories[c.label];
+  for (const ch of (hist && hist.changes) || []) {
+    if (ch.kind !== "silent_update") continue;
+    const when = (ch.scalars?.updatedAt?.to || ch.to || "").slice(0, 10) || "—";
+    rows.push({ date: when, code: "silent update", silent: true });
+  }
+
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "no-changes";
+    empty.textContent = "No activity observed yet.";
+    section.appendChild(empty);
+    return section;
+  }
+
+  // Newest first.
+  rows.sort((a, b) => b.date.localeCompare(a.date));
+
+  const list = document.createElement("ul");
+  list.className = "events-list";
+  for (const r of rows) {
+    const item = document.createElement("li");
+    item.className = "events-item";
+    item.innerHTML =
+      `<span class="events-date">${escapeHtml(r.date)}</span>` +
+      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
+    list.appendChild(item);
+  }
+  section.appendChild(list);
+  return section;
+}
+
+function callout(tone, title, body) {
+  const el = document.createElement("div");
+  el.className = `callout callout-${tone}`;
+  el.innerHTML =
+    `<div class="callout-title">${escapeHtml(title)}</div>` +
+    `<div class="callout-body">${escapeHtml(body)}</div>`;
+  return el;
+}
+
+// ---------- raw ----------
+
+function renderRaw(panel, c) {
+  panel.innerHTML = "";
+  const hist = state.histories[c.label];
+  const entries = (hist && hist.entries) || [];
+  if (!entries.length) {
+    panel.innerHTML = `<div class="no-changes">No captures yet.</div>`;
+    return;
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "raw-controls";
+
+  // Snapshot picker: label each option with the user's local wall-clock time.
+  const label = document.createElement("label");
+  label.textContent = "Snapshot: ";
+  const select = document.createElement("select");
+  for (const e of [...entries].reverse()) {
+    const opt = document.createElement("option");
+    opt.value = e.capturedAt;
+    opt.textContent = formatSnapshotLabel(e.capturedAt);
+    select.appendChild(opt);
+  }
+  const current =
+    state.rawSelection[c.receiptNumber] ||
+    entries[entries.length - 1].capturedAt;
+  select.value = current;
+  state.rawSelection[c.receiptNumber] = current;
+  select.addEventListener("change", () => {
+    state.rawSelection[c.receiptNumber] = select.value;
+    updateRawBody();
+  });
+  label.appendChild(select);
+  controls.appendChild(label);
+
+  // Actions: download the full log file for this case.
+  const actions = document.createElement("span");
+  actions.className = "raw-actions";
+
+  const dlAll = document.createElement("button");
+  dlAll.type = "button";
+  dlAll.className = "raw-btn";
+  dlAll.textContent = `Download full history (${entries.length})`;
+  dlAll.title = "Download every capture for this case as a single JSON file";
+  dlAll.addEventListener("click", () => {
+    const num = (c.label || "").match(/(\d+)/);
+    const fname = num ? `${num[1]}_logs.json` : `${c.receiptNumber}.json`;
+    downloadJson(fname, entries);
+  });
+  actions.appendChild(dlAll);
+
+  const dlOne = document.createElement("button");
+  dlOne.type = "button";
+  dlOne.className = "raw-btn raw-btn-ghost";
+  dlOne.textContent = "Download this snapshot";
+  dlOne.title = "Download only the currently selected snapshot as JSON";
+  dlOne.addEventListener("click", () => {
+    const ca = state.rawSelection[c.receiptNumber];
+    const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
+    const safeTs = (ca || "").replace(/[:]/g, "-");
+    downloadJson(`${c.receiptNumber}_${safeTs}.json`, entry);
+  });
+  actions.appendChild(dlOne);
+
+  controls.appendChild(actions);
+  panel.appendChild(controls);
+
+  const pre = document.createElement("pre");
+  pre.className = "raw";
+  panel.appendChild(pre);
+  updateRawBody();
+
+  function updateRawBody() {
+    const ca = state.rawSelection[c.receiptNumber];
+    const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
+    // 4-space indent + syntax highlight — written as HTML so colours work.
+    pre.innerHTML = highlightJson(JSON.stringify(entry, null, 4));
+  }
+}
+
+// Token-based JSON syntax highlight. Returns HTML safe to assign to
+// innerHTML — the source is always JSON.stringify output, so there are
+// no surprises beyond the string/number/boolean/null/key tokens.
+function highlightJson(src) {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Matches (in order): keys, string values, numbers, booleans, null.
+  const re = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  return esc(src).replace(re, (m, str, colon, bool) => {
+    if (str) {
+      return colon
+        ? `<span class="json-key">${str}</span>${colon}`
+        : `<span class="json-string">${str}</span>`;
+    }
+    if (bool === "true" || bool === "false") {
+      return `<span class="json-bool">${bool}</span>`;
+    }
+    if (bool === "null") {
+      return `<span class="json-null">null</span>`;
+    }
+    return `<span class="json-number">${m}</span>`;
+  });
+}
+
+// ---------- helpers ----------
+
+function updateCountdown() {
+  const el = document.getElementById("countdown");
+  if (!state.nextRun) {
+    el.textContent = "—";
+    return;
+  }
+  const ms = state.nextRun.getTime() - Date.now();
+  if (ms <= 0) {
+    el.textContent = "due";
+    return;
+  }
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  el.textContent =
+    (h ? `${h}h ` : "") + `${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
+}
+
+// Single canonical datetime renderer — every displayed timestamp goes
+// through this. Output is compact 12-hour local wall-clock WITHOUT the
+// timezone abbreviation (e.g. "2026-04-18 8:33PM"). The timezone is
+// surfaced once in the topbar subtitle via getLocalTimezoneAbbrev(), so
+// each individual timestamp doesn't have to repeat it.
+//
+// Accepts a Date or an ISO-8601 string. Pass { withSeconds: true } for
+// the raw-JSON snapshot picker, which needs second-level precision.
+function formatLocalDateTime(input, opts) {
+  if (input == null) return "—";
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) return String(input);
+  const pad = n => String(n).padStart(2, "0");
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  let hours = d.getHours();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  const seconds = opts && opts.withSeconds ? `:${pad(d.getSeconds())}` : "";
+  // No space before AM/PM — user-requested compact form.
+  const time = `${hours}:${pad(d.getMinutes())}${seconds}${ampm}`;
+  return `${date} ${time}`;
+}
+
+// Current browser's short timezone abbreviation (e.g. "EDT", "PST", "JST").
+// Falls back to the UTC offset when the runtime doesn't surface a name.
+function getLocalTimezoneAbbrev() {
+  const d = new Date();
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, {
+      timeZoneName: "short",
+    }).formatToParts(d);
+    const tzPart = parts.find(p => p.type === "timeZoneName");
+    if (tzPart && tzPart.value) return tzPart.value;
+  } catch (_) { /* fall through */ }
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const h = Math.floor(Math.abs(off) / 60);
+  const m = Math.abs(off) % 60;
+  return `UTC${sign}${h}${m ? `:${String(m).padStart(2, "0")}` : ""}`;
+}
+
+// Back-compat aliases: existing call sites can stay as-is.
+const formatLocal = d => formatLocalDateTime(d);
+const formatSnapshotLabel = iso => formatLocalDateTime(iso, { withSeconds: true });
+
+function downloadJson(filename, payload) {
+  const text = JSON.stringify(payload, null, 2);
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  requestAnimationFrame(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+}
+
+function formatApplicant(s) {
+  if (!s) return "";
+  // USCIS returns "LASTNAME, FIRSTNAME" → display as "Firstname Lastname".
+  const m = s.match(/^([A-Z]+),\s*([A-Z]+)/);
+  if (!m) return s;
+  const cap = x => x[0] + x.slice(1).toLowerCase();
+  return `${cap(m[2])} ${cap(m[1])}`;
+}
+
+function formatValue(v) {
+  if (v === undefined) return "—";
+  if (v === null) return "null";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return String(v);
+}
+
+function badge(text, kind) {
+  const el = document.createElement("span");
+  el.className = "badge" + (kind ? " " + kind : "");
+  el.textContent = text;
+  return el;
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+}
+
+function toast(msg, kind) {
+  let t = document.getElementById("toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "toast";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.className = `show ${kind || ""}`;
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => {
+    t.className = "";
+  }, 3500);
+}
