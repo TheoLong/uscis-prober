@@ -113,7 +113,7 @@ body {
   border-color: var(--accent);
 }
 
-/* "Export all" + its info popover live in a positioning context. */
+/* "Export data" + its info popover live in a positioning context. */
 .export-group {
   position: relative;
   display: inline-flex;
@@ -497,49 +497,95 @@ main[hidden] { display: none; }
 }
 .clear-log-btn:hover { background: var(--bad-tint); }
 
-.clear-log-armed {
-  background: var(--bad-tint);
-  border: 1.5px solid var(--bad);
+.syslog-head-row { gap: 14px; }
+
+/* ---------- modal dialog (shared) ---------- */
+/* The overlay is position:fixed so opening it does NOT reflow the page
+   underneath — event rows, header, and other controls stay exactly
+   where they were. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 30, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+  animation: modal-fade-in 0.12s ease-out;
+}
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 14px;
-  max-width: 520px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.18);
+  max-width: 480px;
+  width: 100%;
+  padding: 20px 22px;
+  animation: modal-pop-in 0.14s ease-out;
 }
-.clear-log-warning {
+@keyframes modal-pop-in {
+  from { transform: scale(0.96); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.modal-card-danger { border-top: 3px solid var(--bad); }
+
+.modal-title {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 600;
   color: var(--text);
-  font-size: 0.85rem;
-  line-height: 1.45;
-  margin-bottom: 10px;
 }
-.clear-log-warning strong { color: var(--bad); }
-.clear-log-actions {
+.modal-card-danger .modal-title { color: var(--bad); }
+
+.modal-body {
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.modal-body p { margin: 0 0 10px; }
+.modal-body p:last-child { margin-bottom: 0; }
+.modal-body strong { color: var(--bad); }
+.modal-hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.modal-actions {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+  margin-top: 18px;
 }
-.clear-log-cancel,
-.clear-log-confirm {
+.modal-btn {
   font: inherit;
-  font-size: 0.85rem;
-  padding: 6px 12px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  padding: 7px 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-weight: 500;
+  line-height: 1.2;
 }
-.clear-log-cancel {
+.modal-btn-cancel {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text);
 }
-.clear-log-cancel:hover { background: var(--bg-elev); }
-.clear-log-confirm {
+.modal-btn-cancel:hover { background: var(--bg-elev); }
+.modal-btn-danger {
   background: var(--bad);
   border: 1px solid var(--bad);
   color: #fff;
 }
-.clear-log-confirm:hover { filter: brightness(0.92); }
-.clear-log-confirm[disabled] { opacity: 0.6; cursor: not-allowed; }
-
-.syslog-head-row { gap: 14px; }
+.modal-btn-danger:hover { filter: brightness(0.92); }
+.modal-btn-danger:focus-visible { outline: 2px solid var(--bad); outline-offset: 2px; }
+.modal-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
 
 .syslog-detail-v {
   font-family: var(--font-mono);

@@ -92,7 +92,7 @@ get the credentials your email provider needs.
 - **Email notifications.** One email per new diff per pull. Before /
   after diff-ID snapshotting around each pull → no duplicates, no
   misses, survives restarts.
-- **One-click export.** `/api/export` (or the "Export all" button)
+- **One-click export.** `/api/export` (or the "Export data" button)
   bundles every `data/*_logs.json` plus a manifest into a timestamped
   zip. Useful for sharing with a lawyer or archiving.
 
@@ -318,7 +318,7 @@ python src/server.py
 
 Open <http://127.0.0.1:8080>. Cases render with Overview / Timeline /
 Changes / Raw JSON tabs, plus a global Updates feed. Pulls run on the
-schedule; click **Pull update** for an ad-hoc probe; **Export all**
+schedule; click **Pull update** for an ad-hoc probe; **Export data**
 downloads the full zip archive.
 
 ### Troubleshooting

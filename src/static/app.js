@@ -590,7 +590,7 @@ function renderSystemLog() {
 // Render the two System-log tab controls: "Export log" (one-click download
 // of the current log as JSON) and "Clear log" (two-step destructive wipe).
 // Both are deliberately scoped to the System log view so they can't be
-// confused with the "Export all" button in the topbar (which exports
+// confused with the "Export data" button in the topbar (which exports
 // cases only — not the log).
 function renderSystemLogControls() {
   const wrap = document.createElement("div");
@@ -607,16 +607,20 @@ function renderSystemLogControls() {
   return wrap;
 }
 
-// Two-step confirmation button for wiping the system log.
+// Two-step destructive flow for wiping the system log.
 //
-// Step 1: user clicks "Clear log" — the button widens into an armed warning
-//   with an explicit "Yes, delete all events" action and a "Cancel" escape.
-//   The armed state also auto-disarms after 8s if ignored, so a stale tab
-//   can't accidentally delete on the next click.
+// Step 1 — user clicks "Clear log" in the System log tab header. That
+//   click opens a fixed-position confirmation DIALOG (overlay + centered
+//   modal) layered above the page. Because the dialog is position:fixed
+//   it does not reflow the underlying layout — the event list, the
+//   other controls, and the rest of the page stay exactly where they
+//   were.
 //
-// Step 2: user clicks the red "Yes, delete all events" action — that's the
-//   only control that actually POSTs /api/system-log/clear. The server ALSO
-//   requires {"confirm": true} in the body as a second gate.
+// Step 2 — user clicks the red "Yes, delete all events" action inside
+//   the dialog. That is the only control that POSTs
+//   /api/system-log/clear. The server ALSO requires {"confirm": true}
+//   in the body as a second gate. Cancel, Escape, and backdrop-click
+//   all close the dialog safely.
 function renderClearLogControl() {
   const wrap = document.createElement("div");
   wrap.className = "clear-log-control";
@@ -626,43 +630,56 @@ function renderClearLogControl() {
   idle.className = "clear-log-btn";
   idle.textContent = "Clear log";
   idle.title = "Permanently delete every event in this log";
+  idle.addEventListener("click", openClearLogDialog);
 
-  const armed = document.createElement("div");
-  armed.className = "clear-log-armed";
-  armed.hidden = true;
-  armed.innerHTML =
-    `<div class="clear-log-warning">` +
-      `<strong>Delete every event in the system log?</strong> ` +
-      `This is <u>irreversible</u>. The log is the only record of ` +
-      `scheduler fires, pull failures, and notification history — ` +
-      `clearing it will destroy the audit trail used to debug silent ` +
-      `failures (missed pulls, MFA errors, email delivery issues).` +
-    `</div>` +
-    `<div class="clear-log-actions">` +
-      `<button type="button" class="clear-log-cancel">Cancel</button>` +
-      `<button type="button" class="clear-log-confirm">Yes, delete all events</button>` +
+  wrap.appendChild(idle);
+  return wrap;
+}
+
+function openClearLogDialog() {
+  // Prevent stacking multiple dialogs on fast double-clicks.
+  if (document.querySelector(".modal-overlay[data-modal='clear-log']")) return;
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.dataset.modal = "clear-log";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "clear-log-title");
+
+  overlay.innerHTML =
+    `<div class="modal-card modal-card-danger">` +
+      `<h3 id="clear-log-title" class="modal-title">Clear system log?</h3>` +
+      `<div class="modal-body">` +
+        `<p><strong>This is irreversible.</strong> The log is the only ` +
+        `record of scheduler fires, pull failures, and notification ` +
+        `history. Clearing it will destroy the audit trail used to ` +
+        `debug silent failures — missed pulls, MFA errors, email ` +
+        `delivery issues.</p>` +
+        `<p class="modal-hint">If you might need the log later, click ` +
+        `<em>Export log</em> first.</p>` +
+      `</div>` +
+      `<div class="modal-actions">` +
+        `<button type="button" class="modal-btn modal-btn-cancel">Cancel</button>` +
+        `<button type="button" class="modal-btn modal-btn-danger">Yes, delete all events</button>` +
+      `</div>` +
     `</div>`;
 
-  let disarmTimer = null;
-  const disarm = () => {
-    armed.hidden = true;
-    idle.hidden = false;
-    if (disarmTimer) { clearTimeout(disarmTimer); disarmTimer = null; }
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
   };
-  const arm = () => {
-    idle.hidden = true;
-    armed.hidden = false;
-    // Safety: auto-disarm after 8s so a forgotten armed tab can't be
-    // clicked off later with one stray tap.
-    if (disarmTimer) clearTimeout(disarmTimer);
-    disarmTimer = setTimeout(disarm, 8000);
-  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
 
-  idle.addEventListener("click", arm);
-  armed.querySelector(".clear-log-cancel").addEventListener("click", disarm);
-  armed.querySelector(".clear-log-confirm").addEventListener("click", async () => {
-    if (disarmTimer) { clearTimeout(disarmTimer); disarmTimer = null; }
-    const confirmBtn = armed.querySelector(".clear-log-confirm");
+  overlay.addEventListener("click", (e) => {
+    // Click on the backdrop (not inside the card) closes.
+    if (e.target === overlay) close();
+  });
+  overlay.querySelector(".modal-btn-cancel").addEventListener("click", close);
+
+  const confirmBtn = overlay.querySelector(".modal-btn-danger");
+  confirmBtn.addEventListener("click", async () => {
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Clearing…";
     try {
@@ -674,6 +691,7 @@ function renderClearLogControl() {
       if (!res.ok) throw new Error(`status ${res.status}`);
       await loadSystemLog();
       renderSystemLog();
+      close();
     } catch (e) {
       console.warn("clear log failed:", e);
       confirmBtn.disabled = false;
@@ -681,9 +699,11 @@ function renderClearLogControl() {
     }
   });
 
-  wrap.appendChild(idle);
-  wrap.appendChild(armed);
-  return wrap;
+  document.body.appendChild(overlay);
+  // Give the red-destructive button focus so Enter = confirm, but not
+  // before the browser has painted (otherwise a trailing Enter keystroke
+  // from the idle button can accidentally confirm).
+  requestAnimationFrame(() => confirmBtn.focus());
 }
 
 function renderSystemLogRow(entry) {
