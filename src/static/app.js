@@ -393,7 +393,7 @@ function _renderSubFacts(c, latest) {
     { k: "Representative", v: reps || "—" },
     { k: "Last pulled",    v: c.capturedAt ? formatLocalDateTime(c.capturedAt) : "—", mono: true },
     { k: "Snapshots",      v: `${c.captures ?? 0}` },
-    { k: "Days",           v: `${c.days ?? 0}` },
+    { k: "Days logged",    v: `${c.days ?? 0}` },
   ];
   for (const f of facts) {
     const el = document.createElement("div");
