@@ -293,13 +293,13 @@ function renderOverview(panel, c) {
     {
       label: "Days pending",
       value: s.daysPending ?? "—",
-      sub: latest.submissionDate ? `since ${latest.submissionDate}` : "",
+      sub: latest.submissionDate ? `since ${formatDate(latest.submissionDate)}` : "",
       tone: "",
     },
     {
       label: "Days since last activity",
       value: s.daysSinceUpdate ?? "—",
-      sub: latest.updatedAt ? `last activity ${latest.updatedAt}` : "",
+      sub: latest.updatedAt ? `last activity ${formatDate(latest.updatedAt)}` : "",
       tone: s.daysSinceUpdate == null
         ? ""
         : s.daysSinceUpdate <= 7 ? "ok"
@@ -388,12 +388,12 @@ function _renderSubFacts(c, latest) {
   sub.className = "sub-facts";
   const reps = latest.representativeName ? formatApplicant(latest.representativeName) : "";
   const facts = [
-    { k: "Submitted",      v: latest.submissionDate || "—" },
+    { k: "Submitted",      v: latest.submissionDate ? formatDate(latest.submissionDate) : "—" },
     { k: "Channel",        v: latest.elisChannelType || "—" },
     { k: "Representative", v: reps || "—" },
-    { k: "Last pulled",    v: c.capturedAt ? formatLocalDateTime(c.capturedAt) : "—", mono: true },
     { k: "Snapshots",      v: `${c.captures ?? 0}` },
     { k: "Days logged",    v: `${c.days ?? 0}` },
+    { k: "Last pulled",    v: c.capturedAt ? formatLocalDateTime(c.capturedAt) : "—", mono: true },
   ];
   for (const f of facts) {
     const el = document.createElement("div");
@@ -444,8 +444,8 @@ function renderChangeBlock(ch) {
     `title="${escapeHtml(info.desc || info.label)}">${escapeHtml(info.label)}</span>`;
   block.innerHTML =
     `<div class="change-block-head">` +
-      `<span class="change-range">${escapeHtml((ch.from || "").slice(0,10))} ` +
-      `<span class="change-arrow">→</span> ${escapeHtml((ch.to || "").slice(0,10))}</span>` +
+      `<span class="change-range">${escapeHtml(formatDate(ch.from))} ` +
+      `<span class="change-arrow">→</span> ${escapeHtml(formatDate(ch.to))}</span>` +
       kindTag +
     `</div>`;
 
@@ -498,7 +498,7 @@ function describeItem(kind, obj) {
   if (kind === "events") {
     const code = obj.eventCode || "?";
     const caption = state.eventCodeLabels[code];
-    const when = obj.eventDateTime || "—";
+    const when = obj.eventDateTime ? formatDate(obj.eventDateTime) : "—";
     return caption ? `${code} (${caption}) @ ${when}` : `${code} @ ${when}`;
   }
   if (kind === "notices") {
@@ -785,9 +785,11 @@ function renderUpdateRecord(u) {
   const info = KIND_INFO[u.kind] || KIND_INFO.status;
   const detected = u.detectedOn || (u.to || "").slice(0, 10);
   const real = u.realUpdateDate;
-  const dateLine = real && real !== detected
-    ? `Detected ${detected} · Update date ${real}`
-    : `Detected ${detected}`;
+  const detectedDisplay = formatDate(detected);
+  const realDisplay = real ? formatDate(real) : "";
+  const dateLine = realDisplay && realDisplay !== detectedDisplay
+    ? `Detected ${detectedDisplay} · Update date ${realDisplay}`
+    : `Detected ${detectedDisplay}`;
 
   const block = document.createElement("article");
   block.className = "update-record";
@@ -899,7 +901,7 @@ function renderObservedEventCodes(c) {
     const item = document.createElement("li");
     item.className = "events-item";
     item.innerHTML =
-      `<span class="events-date">${escapeHtml(r.date)}</span>` +
+      `<span class="events-date">${escapeHtml(formatDate(r.date))}</span>` +
       `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
     list.appendChild(item);
   }
@@ -1049,12 +1051,14 @@ function updateCountdown() {
 //
 // Accepts a Date or an ISO-8601 string. Pass { withSeconds: true } for
 // the raw-JSON snapshot picker, which needs second-level precision.
+// Display format is MM/DD/YYYY — the stored timestamp is untouched;
+// this only affects rendering.
 function formatLocalDateTime(input, opts) {
   if (input == null) return "—";
   const d = input instanceof Date ? input : new Date(input);
   if (isNaN(d.getTime())) return String(input);
   const pad = n => String(n).padStart(2, "0");
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const date = `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${d.getFullYear()}`;
   let hours = d.getHours();
   const ampm = hours >= 12 ? "PM" : "AM";
   hours = hours % 12 || 12;
@@ -1062,6 +1066,26 @@ function formatLocalDateTime(input, opts) {
   // No space before AM/PM — user-requested compact form.
   const time = `${hours}:${pad(d.getMinutes())}${seconds}${ampm}`;
   return `${date} ${time}`;
+}
+
+// Render a calendar date as MM/DD/YYYY.  Accepts:
+//   - "YYYY-MM-DD"            (e.g. USCIS submissionDate)
+//   - "YYYY-MM-DDTHH:MM:SSZ"  (will be truncated to the date portion)
+//   - a Date object
+// Returns the original value when it can't be parsed, so operators
+// still see a legible fallback rather than "NaN/NaN/NaN".
+function formatDate(input) {
+  if (input == null || input === "") return "—";
+  if (input instanceof Date) {
+    if (isNaN(input.getTime())) return "—";
+    const pad = n => String(n).padStart(2, "0");
+    return `${pad(input.getMonth() + 1)}/${pad(input.getDate())}/${input.getFullYear()}`;
+  }
+  const s = String(input);
+  // Match a leading YYYY-MM-DD (year, month, day) before any "T" or space.
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[2]}/${m[3]}/${m[1]}`;
+  return s;
 }
 
 // Current browser's short timezone abbreviation (e.g. "EDT", "PST", "JST").
