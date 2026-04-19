@@ -126,7 +126,8 @@ LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>USCIS Checker — Sign in</title>
+<title>USCIS Prober — Sign in</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
 <link rel="stylesheet" href="/static/style.css">
 <style>
   body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
@@ -138,7 +139,12 @@ LOGIN_HTML = """<!DOCTYPE html>
     border-radius: var(--radius);
     box-shadow: var(--shadow);
   }
-  .gate h1 { margin: 0 0 4px; font-size: 1.05rem; font-weight: 700; letter-spacing: 0.02em; }
+  .gate h1 {
+    margin: 0 0 4px;
+    font-size: 1.05rem; font-weight: 700; letter-spacing: 0.02em;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .gate h1 img { width: 22px; height: 22px; }
   .gate p  { margin: 0 0 20px; color: var(--muted); font-size: 0.85rem; }
   .gate input {
     width: 100%; padding: 10px 12px;
@@ -165,7 +171,7 @@ LOGIN_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <form class="gate" id="f" autocomplete="off">
-  <h1>USCIS Checker</h1>
+  <h1><img src="/static/logo.svg" alt="">USCIS Prober</h1>
   <p>Enter access code to continue.</p>
   <input name="code" id="code" autofocus inputmode="text" autocomplete="off"
          spellcheck="false" placeholder="access code">

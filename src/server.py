@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""USCIS Checker — long-running local web dashboard.
+"""USCIS Prober — long-running local web dashboard.
 
 Launches a Flask app on http://localhost:8080 that:
   - Reads case snapshots from `data/*_logs.json`

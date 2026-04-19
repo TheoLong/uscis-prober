@@ -53,12 +53,19 @@ body {
   backdrop-filter: saturate(150%) blur(10px);
   border-bottom: 1px solid var(--border-soft);
 }
-.topbar-left { display: flex; align-items: baseline; gap: 14px; }
+.topbar-left { display: flex; align-items: center; gap: 14px; }
 .topbar-left h1 {
   margin: 0;
   font-size: 1.15rem;
   font-weight: 600;
   letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand-logo {
+  display: block;
+  flex-shrink: 0;
 }
 .subtitle { color: var(--muted); font-size: 0.85rem; }
 .topbar-right { display: flex; align-items: center; gap: 16px; }

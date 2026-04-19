@@ -1,4 +1,4 @@
-// USCIS Checker UI — vanilla JS, no framework.
+// USCIS Prober UI — vanilla JS, no framework.
 
 const state = {
   cases: [],

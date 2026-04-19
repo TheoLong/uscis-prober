@@ -113,7 +113,7 @@ def build_update_email(
             lines.append(f"  - {desc}")
         lines.append("")
     lines.append("—")
-    lines.append("USCIS Checker (local dashboard)")
+    lines.append("USCIS Prober (local dashboard)")
     plain = "\n".join(lines)
 
     # ----- HTML -----
@@ -189,7 +189,7 @@ def build_update_email(
     {''.join(html_sections)}
   </div>
   <div style='color:#94a3b8;font-size:11px;margin-top:14px;text-align:center;'>
-    USCIS Checker — local dashboard
+    USCIS Prober — local dashboard
   </div>
 </body></html>"""
 
