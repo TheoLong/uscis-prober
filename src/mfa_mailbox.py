@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import email
 import email.message
+import html
 import imaplib
 import logging
 import re
@@ -25,45 +26,45 @@ logger = logging.getLogger(__name__)
 
 USCIS_SENDER = "MyAccount@uscis.dhs.gov"
 USCIS_MFA_SUBJECT = "Secure two-step verification notification"
-USCIS_MFA_BODY_ANCHOR = "Please enter this secure MFA code"
 
-# The USCIS MFA email always wraps the code in:
-#   Please enter this secure MFA code:
-#     <span style='color: #0078AE; font-size: 24px; font-weight: 600;'>094897</span>
-# Two independent anchors, either of which is sufficient:
-#
-#   PRIMARY : the unique sentence "Please enter this secure MFA code"
-#             followed (after arbitrary HTML/whitespace) by a <span> with 6 digits.
-#   FALLBACK: a <span> styled with the USCIS code color (#0078AE) containing 6 digits.
-#
-# Naïve `\b\d{6}\b` or `[^\d]*?\d{6}` matching must be avoided — the email body style
-# contains `color: #333333`, `#0078AE`, `font-size: 24px`, etc. which produce
-# spurious digit matches.
-_CODE_RE_PRIMARY = re.compile(
-    r"Please enter this secure MFA code"
-    r"[\s\S]*?"
-    r"<span[^>]*>\s*(\d{6})\s*</span>",
-    re.IGNORECASE,
-)
-_CODE_RE_FALLBACK = re.compile(
-    r"<span[^>]*color:\s*#0078AE[^>]*>\s*(\d{6})\s*</span>",
-    re.IGNORECASE,
-)
+
+_STYLE_BLOCK_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+# Wipe CSS hex-colour tokens that might survive HTML stripping (inline
+# mentions in body copy, preview snippets, etc.). `#333333` would
+# otherwise match the 6-digit regex below.
+_HEX_COLOUR_RE = re.compile(r"#[0-9a-fA-F]{3,8}\b")
+_SIX_DIGITS_RE = re.compile(r"\b(\d{6})\b")
 
 
 def _extract_code(body: str) -> str | None:
     """Extract the 6-digit USCIS MFA code from an email body.
 
-    Returns None if no reliable anchor is found — we refuse to guess rather
-    than return the first `\\d{6}` we see.
+    Strategy — rendered-text extraction:
+      1. Remove <style>...</style> blocks (their CSS rules contain hex
+         colours like `#333333` that would otherwise look like 6-digit
+         tokens).
+      2. Strip every remaining HTML tag — including `style="..."`
+         attributes on arbitrary tags, which would also leak hex colours.
+      3. Decode HTML entities so `&#48;` etc. don't mask a digit.
+      4. Return the first standalone 6-digit token in the plain text.
+
+    This is deliberately template-agnostic.  USCIS has changed the
+    anchor wording at least once (2026-04-20: "MFA code" -> "verification
+    code") and will probably tweak it again.  The sender + subject +
+    freshness filters in `_check_inbox_once` already guarantee the
+    email IS the MFA email for the current login; the only job of this
+    function is to pull the code out of whatever template they ship.
+
+    Returns None if no 6-digit token survives the HTML stripping — we
+    refuse to return hex colours or other style fragments.
     """
-    m = _CODE_RE_PRIMARY.search(body)
-    if m:
-        return m.group(1)
-    m = _CODE_RE_FALLBACK.search(body)
-    if m:
-        return m.group(1)
-    return None
+    without_style = _STYLE_BLOCK_RE.sub(" ", body)
+    plain = _TAG_RE.sub(" ", without_style)
+    plain = html.unescape(plain)
+    plain = _HEX_COLOUR_RE.sub(" ", plain)
+    m = _SIX_DIGITS_RE.search(plain)
+    return m.group(1) if m else None
 
 
 def fetch_latest_code(
@@ -98,14 +99,14 @@ def _check_inbox_once(
     uscis_mfa_app_password: str,
     since: datetime,
 ) -> str | None:
-    """One sweep of the inbox. Multiple anchors are required to accept a match:
+    """One sweep of the inbox. Accepted when every gate passes:
 
-    1. IMAP: sender is MyAccount@uscis.dhs.gov AND subject contains the MFA body phrase
-       AND the message was received on/after `since` (date granularity).
+    1. IMAP: sender is MyAccount@uscis.dhs.gov AND subject contains the MFA
+       subject AND the message was received on/after `since` (date granularity).
     2. Python: Subject header starts with the exact MFA subject (case-insensitive).
     3. Python: Date header is newer than `since` (second-granularity filter).
-    4. Python: body contains the MFA body anchor phrase.
-    5. Python: body exposes the 6-digit code inside the styled `<span>`.
+    4. Python: body yields a 6-digit code after HTML stripping
+       (template-agnostic — see `_extract_code`).
     """
     host, port = imap_host_port(uscis_mfa_email)
     with imaplib.IMAP4_SSL(host, port) as mail:
@@ -147,11 +148,7 @@ def _check_inbox_once(
 
             body = _extract_body(msg)
 
-            # Anchor 4: the known MFA body phrase must appear
-            if USCIS_MFA_BODY_ANCHOR.lower() not in body.lower():
-                continue
-
-            # Anchor 5: the code must appear inside the styled span
+            # Gate 4: pull a 6-digit code from the rendered text.
             code = _extract_code(body)
             if code:
                 return code

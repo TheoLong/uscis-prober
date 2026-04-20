@@ -22,11 +22,23 @@ from mfa_mailbox import (
 )
 
 
+# Pre-2026-04-20 USCIS body — kept to prove backwards-compat.
 USCIS_BODY_TEMPLATE = (
     "<!DOCTYPE html><html><body style='color: #333333;'>"
     "<h1>Secure two-step verification notification</h1>"
     "<p>You have requested a secure MFA code to log into your USCIS Account.</p>"
     "<p>Please enter this secure MFA code: "
+    "<span style='color: #0078AE; font-size: 24px; font-weight: 600;'>{code}</span>"
+    "</p></body></html>"
+)
+
+# 2026-04-20 USCIS body — anchor phrase reworded from "MFA code" to
+# "verification code"; styling of the code span unchanged.
+USCIS_BODY_TEMPLATE_V2 = (
+    "<!DOCTYPE html><html><body style='color: #333333;'>"
+    "<h1>Secure two-step verification notification</h1>"
+    "<p>You have requested a secure verification code to log into your USCIS Account.</p>"
+    "<p>Please enter this secure verification code: "
     "<span style='color: #0078AE; font-size: 24px; font-weight: 600;'>{code}</span>"
     "</p></body></html>"
 )
@@ -37,8 +49,16 @@ USCIS_BODY_TEMPLATE = (
 def test_extract_code_ignores_css_hex_colors():
     body = USCIS_BODY_TEMPLATE.format(code="550162")
     # Body contains `#333333`, `#0078AE`, `font-size: 24`, `font-weight: 600`;
-    # a naive \d{6} would pick `333333` first. Ours must pick `550162`.
+    # a naive \d{6} would pick `333333` first. HTML stripping removes the
+    # style attributes before digit search, so ours picks `550162`.
     assert _extract_code(body) == "550162"
+
+
+def test_extract_code_works_on_new_2026_04_20_body():
+    # Regression guard for the USCIS template rename — "MFA code" became
+    # "verification code". Extraction must succeed on the new copy.
+    body = USCIS_BODY_TEMPLATE_V2.format(code="085975")
+    assert _extract_code(body) == "085975"
 
 
 def test_extract_code_leading_zero_preserved():
@@ -46,18 +66,40 @@ def test_extract_code_leading_zero_preserved():
     assert _extract_code(body) == "094897"
 
 
-def test_extract_code_returns_none_without_anchor_phrase():
+def test_extract_code_survives_template_without_known_anchor_phrase():
+    # Template-agnostic: no known intro sentence, no #0078AE styling —
+    # just the code in plain prose. We still return it because the
+    # upstream sender/subject/freshness gates already proved this email
+    # is the MFA for the current login.
     body = (
-        "<html><body>Your security code is "
-        "<span style='color: #0078AE'>123456</span></body></html>"
+        "<html><body>Your one-time passcode is "
+        "<strong>123456</strong> (valid 10 minutes).</body></html>"
     )
-    # The fallback span regex with #0078AE should still match even without the phrase.
     assert _extract_code(body) == "123456"
+
+
+def test_extract_code_ignores_hex_colors_in_style_block():
+    body = (
+        "<html><head><style>body { color: #333333; border: 1px solid #4a4a4a; }</style></head>"
+        "<body>Please enter this secure verification code: "
+        "<span>654321</span></body></html>"
+    )
+    assert _extract_code(body) == "654321"
+
+
+def test_extract_code_decodes_html_entities_around_digits():
+    # &#32; is a space entity — without html.unescape() the digits would
+    # still be visible, but this test guards against regressions if a
+    # future template wraps digits in &#XXXX; entities.
+    body = "<p>Code:&#32;<span>001122</span></p>"
+    assert _extract_code(body) == "001122"
 
 
 def test_extract_code_returns_none_on_junk():
     assert _extract_code("") is None
     assert _extract_code("No code here, just some text with #333333 in it.") is None
+    # No \d{6} sequence at all.
+    assert _extract_code("<html><body>hello world</body></html>") is None
 
 
 # -------- _extract_body ---------------------------------------------------
@@ -199,10 +241,22 @@ def test_check_inbox_once_skips_bad_date_header(since_dt):
         assert _check_inbox_once("u", "pw", since_dt) is None
 
 
-def test_check_inbox_once_skips_missing_anchor_phrase(since_dt):
-    # Valid subject/date but body has no "Please enter this secure MFA code"
-    # and no #0078AE fallback — must return None, not blind-match 6 digits.
-    body = "<html><body>Just random text 654321 in here.</body></html>"
+def test_check_inbox_once_accepts_any_body_once_email_is_anchored(since_dt):
+    # Sender + subject + freshness already bound this email to the
+    # current login; once those pass, a 6-digit token in a non-USCIS-
+    # template body is still accepted.  This is the 2026-04-20 fix:
+    # USCIS can rename the intro sentence, remove the #0078AE styling,
+    # or otherwise rework the template, and we still extract the code.
+    body = "<html><body>Your one-time passcode is <b>654321</b>.</body></html>"
+    fake = _FakeMail(fetch_data=[(b"x", _fake_msg(body=body))])
+    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
+        assert _check_inbox_once("u", "pw", since_dt) == "654321"
+
+
+def test_check_inbox_once_returns_none_when_no_6digit_token(since_dt):
+    # Valid email identity but body simply has no code anywhere. We
+    # must not guess — return None so the polling loop keeps waiting.
+    body = "<html><body>Thanks for signing up. Nothing here.</body></html>"
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg(body=body))])
     with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
         assert _check_inbox_once("u", "pw", since_dt) is None
