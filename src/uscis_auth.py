@@ -18,6 +18,7 @@ from pathlib import Path
 
 from playwright.sync_api import (
     BrowserContext,
+    Error as PlaywrightError,
     Page,
     TimeoutError as PlaywrightTimeout,
 )
@@ -59,11 +60,25 @@ def is_session_page_authenticated(page: Page) -> bool:
 
 def probe_session(page: Page) -> bool:
     """Navigate to the authenticated landing page and report whether the
-    session is currently valid. Does NOT initiate a login."""
+    session is currently valid. Does NOT initiate a login.
+
+    Any navigation error is treated as 'session stale' — this includes:
+      - PlaywrightTimeout: page never reached domcontentloaded.
+      - net::ERR_ABORTED: common when USCIS bounces us through a
+        redirect chain `/account/applicant` -> `/oidc/...` -> `/sign-in`;
+        Chromium aborts the first navigation when a redirect races.
+      - Any other Playwright Error during goto.
+
+    In every case the right answer is the same: return False so
+    `ensure_authenticated` falls through to `_do_login`.
+    """
     try:
         page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=20_000)
     except PlaywrightTimeout:
         logger.warning("Timeout probing %s", DASHBOARD_URL)
+        return False
+    except PlaywrightError as e:
+        logger.warning("Navigation error probing %s: %s", DASHBOARD_URL, e)
         return False
     page.wait_for_timeout(1500)  # let any redirect settle
     ok = is_session_page_authenticated(page)
@@ -151,6 +166,8 @@ def _do_login(context: BrowserContext, page: Page, auth: dict[str, str]) -> None
         page.wait_for_timeout(2000)
     except PlaywrightTimeout:
         logger.warning("Timed out bridging to my.uscis.gov.")
+    except PlaywrightError as e:
+        logger.warning("Navigation error bridging to my.uscis.gov: %s", e)
 
 
 def is_session_page_authenticated_url(url: str) -> bool:

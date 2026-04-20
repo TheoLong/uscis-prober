@@ -94,6 +94,21 @@ def test_probe_session_returns_false_on_timeout():
     assert probe_session(page) is False
 
 
+def test_probe_session_returns_false_on_net_aborted():
+    # Regression guard: USCIS sometimes bounces /account/applicant through a
+    # redirect chain that races with Chromium, producing
+    # `net::ERR_ABORTED`. That raises playwright.sync_api.Error (NOT
+    # TimeoutError) — probe_session must still report the session as
+    # stale so ensure_authenticated falls through to _do_login.
+    from playwright.sync_api import Error as PlaywrightError
+    page = MagicMock()
+    page.goto.side_effect = PlaywrightError(
+        "Page.goto: net::ERR_ABORTED at https://my.uscis.gov/account/applicant"
+    )
+    page.url = ""
+    assert probe_session(page) is False
+
+
 def test_probe_session_returns_false_on_sign_in_url():
     page = MagicMock()
     page.url = "https://my.uscis.gov/sign-in"
