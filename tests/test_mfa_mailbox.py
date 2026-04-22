@@ -200,45 +200,72 @@ def since_dt():
     return datetime(2026, 4, 18, 22, 0, 0, tzinfo=timezone.utc)
 
 
+# _check_inbox_once now returns a 3-tuple `(code, search_query, returned_uids)`
+# and populates an optional `tally` dict with reason codes for every branch.
+# Helper below keeps the assertion call-sites terse.
+def _scan(fake, since_dt, *, tally=None):
+    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
+        return _check_inbox_once("u@example.com", "pw", since_dt, tally=tally)
+
+
 def test_check_inbox_once_returns_code_on_match(since_dt):
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg())])
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        code = _check_inbox_once("u@example.com", "pw", since_dt)
+    tally: dict[str, int] = {}
+    code, query, uids = _scan(fake, since_dt, tally=tally)
     assert code == "424242"
+    # The caller uses `query` to record the exact IMAP SEARCH string on
+    # a timeout event — so this test pins the observable shape of that
+    # string (the `SINCE` value will be whatever the caller derived).
+    assert query.startswith(f'(FROM "{mfa_mailbox.USCIS_SENDER}"')
+    assert uids == ["1"]
+    assert tally == {mfa_mailbox.REASON_ACCEPTED: 1}
 
 
 def test_check_inbox_once_no_results_returns_none(since_dt):
     fake = _FakeMail(ids=())
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, query, uids = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert query is not None  # search was attempted
+    assert uids == []
+    assert tally == {mfa_mailbox.REASON_IMAP_SEARCH_EMPTY: 1}
 
 
 def test_check_inbox_once_search_fails_returns_none(since_dt):
     fake = _FakeMail(search_ok=False)
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, query, uids = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert query is not None
+    assert tally == {mfa_mailbox.REASON_IMAP_SEARCH_FAILED: 1}
 
 
 def test_check_inbox_once_skips_wrong_subject(since_dt):
     fake = _FakeMail(
         fetch_data=[(b"x", _fake_msg(subject="unrelated subject"))]
     )
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_SUBJECT_MISMATCH: 1}
 
 
 def test_check_inbox_once_skips_stale_message(since_dt):
     fake = _FakeMail(
         fetch_data=[(b"x", _fake_msg(date_hdr="Wed, 01 Jan 2020 00:00:00 +0000"))]
     )
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_STALE: 1}
 
 
 def test_check_inbox_once_skips_bad_date_header(since_dt):
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg(date_hdr="not a date"))])
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_BAD_DATE_HEADER: 1}
 
 
 def test_check_inbox_once_accepts_any_body_once_email_is_anchored(since_dt):
@@ -249,8 +276,10 @@ def test_check_inbox_once_accepts_any_body_once_email_is_anchored(since_dt):
     # or otherwise rework the template, and we still extract the code.
     body = "<html><body>Your one-time passcode is <b>654321</b>.</body></html>"
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg(body=body))])
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) == "654321"
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code == "654321"
+    assert tally == {mfa_mailbox.REASON_ACCEPTED: 1}
 
 
 def test_check_inbox_once_returns_none_when_no_6digit_token(since_dt):
@@ -258,8 +287,10 @@ def test_check_inbox_once_returns_none_when_no_6digit_token(since_dt):
     # must not guess — return None so the polling loop keeps waiting.
     body = "<html><body>Thanks for signing up. Nothing here.</body></html>"
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg(body=body))])
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_NO_CODE_EXTRACTED: 1}
 
 
 def test_check_inbox_once_handles_fetch_failure(since_dt):
@@ -268,49 +299,246 @@ def test_check_inbox_once_handles_fetch_failure(since_dt):
             return ("NO", [None])
 
     fake = _FetchFailMail()
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_FETCH_FAILED: 1}
+
+
+def test_check_inbox_once_records_search_query_verbatim(since_dt):
+    # The IMAP SEARCH query string is the SINGLE most important
+    # diagnostic on a timeout — it shows the SINCE value we sent. Pin
+    # the exact format so the timeout sys_log event is unambiguous.
+    fake = _FakeMail(fetch_data=[(b"x", _fake_msg())])
+    _, query, _ = _scan(fake, since_dt)
+    expected = (
+        f'(FROM "{mfa_mailbox.USCIS_SENDER}" '
+        f'SUBJECT "{mfa_mailbox.USCIS_MFA_SUBJECT}" '
+        f'SINCE {since_dt.strftime("%d-%b-%Y")})'
+    )
+    assert query == expected
+
+
+def test_check_inbox_once_returns_decoded_uids(since_dt):
+    # `returned_uids` is recorded on the timeout event so an operator
+    # can see what the server actually gave us. Must be ASCII strings.
+    fake = _FakeMail(
+        ids=(b"101", b"102"),
+        fetch_data=[(b"x", _fake_msg()), (b"y", _fake_msg())],
+    )
+    _, _, uids = _scan(fake, since_dt)
+    assert uids == ["101", "102"]
+
+
+def test_check_inbox_once_tally_accumulates_across_multiple_rejections(since_dt):
+    # One stale, one wrong-subject — verify both reasons count.
+    fake = _FakeMail(
+        ids=(b"1", b"2"),
+        fetch_data=[
+            (b"x", _fake_msg(date_hdr="Wed, 01 Jan 2020 00:00:00 +0000")),
+            (b"y", _fake_msg(subject="random")),
+        ],
+    )
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    # Newest-first iteration: uid=2 checked first (subject rejected),
+    # then uid=1 (stale rejected).
+    assert tally == {
+        mfa_mailbox.REASON_SUBJECT_MISMATCH: 1,
+        mfa_mailbox.REASON_STALE: 1,
+    }
+
+
+def test_check_inbox_once_imap_connect_failure_categorised(since_dt):
+    tally: dict[str, int] = {}
+    with patch.object(
+        mfa_mailbox.imaplib, "IMAP4_SSL",
+        side_effect=OSError("network unreachable"),
+    ):
+        code, query, uids = _check_inbox_once(
+            "u@example.com", "pw", since_dt, tally=tally,
+        )
+    assert code is None
+    assert query is None  # never got as far as building a query
+    assert uids is None
+    assert tally == {mfa_mailbox.REASON_IMAP_CONNECT_FAILED: 1}
+
+
+def test_check_inbox_once_imap_login_failure_categorised(since_dt):
+    class _LoginFailMail(_FakeMail):
+        def login(self, *a, **k):
+            raise imaplib.IMAP4.error("Invalid credentials")
+
+    fake = _LoginFailMail()
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_IMAP_LOGIN_FAILED: 1}
 
 
 # -------- fetch_latest_code (polling loop) --------------------------------
 
+def _mk_fake_check(sequence, query="QUERY", uids=None):
+    """Build a _check_inbox_once replacement that returns a scripted
+    sequence of codes (or None) and mutates the caller's tally dict so
+    the surrounding lifecycle tests can verify aggregation.
+
+    Each sequence element is either a code string or None. None also
+    bumps REASON_STALE in the tally so timeout events can assert on a
+    realistic reason breakdown.
+    """
+    uids = uids if uids is not None else ["1"]
+    it = iter(sequence)
+
+    def _fake(email_addr, pw, since, *, tally=None):
+        try:
+            nxt = next(it)
+        except StopIteration:
+            nxt = None
+        if tally is not None:
+            key = (mfa_mailbox.REASON_ACCEPTED if nxt
+                   else mfa_mailbox.REASON_STALE)
+            tally[key] = tally.get(key, 0) + 1
+        return (nxt, query, uids)
+
+    return _fake
+
+
 def test_fetch_latest_code_returns_first_match(monkeypatch):
-    monkeypatch.setattr(mfa_mailbox, "_check_inbox_once", lambda *a, **k: "111111")
-    assert fetch_latest_code("u", "pw", max_wait_seconds=1) == "111111"
+    monkeypatch.setattr(
+        mfa_mailbox, "_check_inbox_once", _mk_fake_check(["111111"]),
+    )
+    assert fetch_latest_code("u@example.com", "pw", max_wait_seconds=1) == "111111"
 
 
 def test_fetch_latest_code_times_out(monkeypatch):
-    monkeypatch.setattr(mfa_mailbox, "_check_inbox_once", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mfa_mailbox, "_check_inbox_once", _mk_fake_check([None, None]),
+    )
     monkeypatch.setattr(mfa_mailbox.time, "sleep", lambda _s: None)
-    with pytest.raises(TimeoutError):
-        fetch_latest_code("u", "pw", max_wait_seconds=0, poll_interval_seconds=0)
+    with pytest.raises(TimeoutError) as exc_info:
+        fetch_latest_code("u@example.com", "pw",
+                          max_wait_seconds=0, poll_interval_seconds=0)
+    # Diagnostic payload must be inlined into the error message.
+    msg = str(exc_info.value)
+    assert "cycles=" in msg
+    assert "reasons=" in msg
+    assert "host=" in msg
+    assert "last_query=" in msg
+    assert "last_uids=" in msg
 
 
 def test_fetch_latest_code_default_since_is_two_minutes_ago(monkeypatch):
     captured = {}
 
-    def _capture(gu, pw, since, *_a, **_k):
+    def _capture(gu, pw, since, *, tally=None):
         captured["since"] = since
-        return "999999"
+        return ("999999", "Q", [])
 
     monkeypatch.setattr(mfa_mailbox, "_check_inbox_once", _capture)
-    fetch_latest_code("u", "pw", max_wait_seconds=1)
+    fetch_latest_code("u@example.com", "pw", max_wait_seconds=1)
     # Default since should be ~2 min ago and tz-aware.
     assert captured["since"].tzinfo is not None
 
 
 def test_fetch_latest_code_sleeps_between_polls(monkeypatch):
     sleeps = []
-    results = [None, "222222"]
-
-    def _check(*_a, **_k):
-        return results.pop(0)
-
-    monkeypatch.setattr(mfa_mailbox, "_check_inbox_once", _check)
+    monkeypatch.setattr(
+        mfa_mailbox, "_check_inbox_once", _mk_fake_check([None, "222222"]),
+    )
     monkeypatch.setattr(mfa_mailbox.time, "sleep", lambda s: sleeps.append(s))
-    code = fetch_latest_code("u", "pw", max_wait_seconds=5, poll_interval_seconds=3)
+    code = fetch_latest_code(
+        "u@example.com", "pw", max_wait_seconds=5, poll_interval_seconds=3,
+    )
     assert code == "222222"
     assert sleeps == [3]
+
+
+# -------- sys_log instrumentation --------------------------------------
+
+def test_fetch_latest_code_emits_started_and_succeeded_sys_log(monkeypatch, tmp_path):
+    # Redirect system_log.LOG_PATH to a tmp file for this test.
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+
+    monkeypatch.setattr(
+        mfa_mailbox, "_check_inbox_once", _mk_fake_check(["111111"]),
+    )
+    fetch_latest_code("u@example.com", "pw", max_wait_seconds=1)
+
+    events = [e["event"] for e in system_log.read_all()]
+    assert "mfa_fetch_started" in events
+    assert "mfa_fetch_succeeded" in events
+    assert "mfa_fetch_timeout" not in events
+
+
+def test_fetch_latest_code_timeout_sys_log_carries_diagnostics(monkeypatch, tmp_path):
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+    monkeypatch.setattr(mfa_mailbox.time, "sleep", lambda _s: None)
+
+    # Control time.time() deterministically: 3 calls inside the budget,
+    # then the 4th call is past deadline.  Budget is 10s.
+    t_values = iter([0.0, 0.0, 1.0, 2.0, 3.0, 99.0, 99.0, 99.0, 99.0])
+    monkeypatch.setattr(mfa_mailbox.time, "time", lambda: next(t_values, 100.0))
+
+    # Simulate the live failure mode: every cycle, search returns empty.
+    def _always_empty(email_addr, pw, since, *, tally=None):
+        if tally is not None:
+            tally[mfa_mailbox.REASON_IMAP_SEARCH_EMPTY] = (
+                tally.get(mfa_mailbox.REASON_IMAP_SEARCH_EMPTY, 0) + 1
+            )
+        return (None, '(FROM "x" SUBJECT "y" SINCE 22-Apr-2026)', [])
+
+    monkeypatch.setattr(mfa_mailbox, "_check_inbox_once", _always_empty)
+    with pytest.raises(TimeoutError):
+        fetch_latest_code(
+            "u@example.com", "pw",
+            max_wait_seconds=10, poll_interval_seconds=0,
+        )
+
+    timeouts = [e for e in system_log.read_all()
+                if e["event"] == "mfa_fetch_timeout"]
+    assert len(timeouts) == 1
+    ev = timeouts[0]
+    assert ev["level"] == "error"
+    assert ev["cycles"] >= 1
+    assert ev["reasons"] == {mfa_mailbox.REASON_IMAP_SEARCH_EMPTY: ev["cycles"]}
+    assert ev["last_search_query"] == '(FROM "x" SUBJECT "y" SINCE 22-Apr-2026)'
+    assert ev["last_returned_uids"] == []
+    assert "since" in ev
+    assert "imap_host" in ev
+
+
+def test_fetch_latest_code_success_sys_log_carries_cycles_count(monkeypatch, tmp_path):
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+    monkeypatch.setattr(mfa_mailbox.time, "sleep", lambda _s: None)
+
+    # Succeed on the 3rd cycle.
+    monkeypatch.setattr(
+        mfa_mailbox, "_check_inbox_once",
+        _mk_fake_check([None, None, "333333"]),
+    )
+    fetch_latest_code(
+        "u@example.com", "pw",
+        max_wait_seconds=60, poll_interval_seconds=0,
+    )
+    successes = [e for e in system_log.read_all()
+                 if e["event"] == "mfa_fetch_succeeded"]
+    assert len(successes) == 1
+    ev = successes[0]
+    assert ev["cycles"] == 3
+    assert ev["code_length"] == 6
+    # Reason tally should reflect 2 rejects + 1 accept.
+    assert ev["reasons"] == {
+        mfa_mailbox.REASON_STALE: 2,
+        mfa_mailbox.REASON_ACCEPTED: 1,
+    }
 
 
 def test_check_inbox_once_skips_empty_fetch_row(since_dt):
@@ -320,8 +548,8 @@ def test_check_inbox_once_skips_empty_fetch_row(since_dt):
             return ("OK", [])
 
     fake = _EmptyFetchMail()
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    code, _, _ = _scan(fake, since_dt)
+    assert code is None
 
 
 def test_check_inbox_once_skips_null_fetch_row(since_dt):
@@ -331,16 +559,16 @@ def test_check_inbox_once_skips_null_fetch_row(since_dt):
             return ("OK", [None])
 
     fake = _NullFetchMail()
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        assert _check_inbox_once("u", "pw", since_dt) is None
+    code, _, _ = _scan(fake, since_dt)
+    assert code is None
 
 
 def test_check_inbox_once_handles_naive_date(since_dt):
     # Message with a tz-less Date header. _check_inbox_once must treat it as UTC.
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg(date_hdr="18 Apr 2026 22:43:21"))])
-    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
-        # Naive date >= since_dt → the match path runs through the tz-normalise branch.
-        assert _check_inbox_once("u", "pw", since_dt) == "424242"
+    code, _, _ = _scan(fake, since_dt)
+    # Naive date >= since_dt → the match path runs through the tz-normalise branch.
+    assert code == "424242"
 
 
 def test_extract_body_non_multipart_with_payload():
