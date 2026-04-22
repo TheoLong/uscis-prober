@@ -33,10 +33,15 @@ import logging
 import os
 import re
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import (
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeout,
+    sync_playwright,
+)
 
 from uscis_api import (
     ApiError,
@@ -79,8 +84,26 @@ def _now_iso_utc() -> str:
 
 
 def load_config() -> dict:
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+    """Load config.json.  Emits a sys_log event on any failure so the
+    caller has a categorised record even if the process dies before
+    the calling command gets to print anything."""
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except FileNotFoundError as e:
+        sys_log(
+            "config_load_failed", level="error", source="session_fetch",
+            reason="file_not_found", path=str(CONFIG_PATH),
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+        raise
+    except json.JSONDecodeError as e:
+        sys_log(
+            "config_load_failed", level="error", source="session_fetch",
+            reason="malformed_json", path=str(CONFIG_PATH),
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+        raise
 
 
 def load_auth(
@@ -93,6 +116,10 @@ def load_auth(
     auth = config.get("auth") or {}
     missing = [k for k in required if not auth.get(k)]
     if missing:
+        sys_log(
+            "auth_config_missing_keys", level="error", source="session_fetch",
+            missing=missing,
+        )
         raise SystemExit(
             f"Missing auth keys in {CONFIG_PATH}: {', '.join(missing)}\n"
             f"See config.example.json for the expected shape."
@@ -110,6 +137,9 @@ def log_file_for(form_type: str) -> Path:
 def append_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
     """Append a snapshot entry. Never replaces — multiple runs per day each
     get their own row keyed by the full ISO-8601 timestamp in `capturedAt`.
+
+    Emits sys_log events when an existing log file is malformed, so a
+    silent "start fresh" never happens without a trace.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path = log_file_for(form_type)
@@ -125,8 +155,20 @@ def append_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
                     logger.warning(
                         "%s was not a JSON array — starting fresh.", path.name
                     )
-        except json.JSONDecodeError:
+                    sys_log(
+                        "snapshot_log_not_array", level="warning",
+                        source="session_fetch",
+                        file=path.name,
+                        existing_type=type(existing).__name__,
+                    )
+        except json.JSONDecodeError as e:
             logger.warning("%s was not valid JSON — starting fresh.", path.name)
+            sys_log(
+                "snapshot_log_invalid_json", level="warning",
+                source="session_fetch",
+                file=path.name,
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
 
     logs.append({"capturedAt": captured_at, "data": data})
 
@@ -255,39 +297,112 @@ def cmd_run(args) -> int:
     captured_at = _now_iso_utc()
     logger.info("USCIS Case Snapshot — %s (%d cases)", captured_at, len(cases))
     sys_log("cli_run_start", source="session_fetch",
-            case_count=len(cases), captured_at=captured_at)
+            case_count=len(cases), captured_at=captured_at,
+            headless=args.headless, keep_alive=args.keep_alive,
+            storage_state_exists=STORAGE_STATE_PATH.exists())
 
     failures = 0
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=args.headless)
-        context = browser.new_context(
-            storage_state=str(STORAGE_STATE_PATH)
-            if STORAGE_STATE_PATH.exists()
-            else None
-        )
-        page = context.new_page()
+        # Browser + context + page construction is a distinct failure
+        # surface (chromium binary missing, corrupt storage_state, etc.)
+        # that must not silently manifest as a top-level traceback.
+        try:
+            browser = pw.chromium.launch(headless=args.headless)
+        except Exception as e:
+            sys_log(
+                "browser_launch_failed", level="error",
+                source="session_fetch",
+                error=f"{type(e).__name__}: {e}"[:200],
+                headless=args.headless,
+            )
+            raise
 
         try:
-            ensure_authenticated(context, page, auth, allow_login=True)
+            context = browser.new_context(
+                storage_state=str(STORAGE_STATE_PATH)
+                if STORAGE_STATE_PATH.exists()
+                else None
+            )
+            page = context.new_page()
+        except Exception as e:
+            sys_log(
+                "browser_context_failed", level="error",
+                source="session_fetch",
+                error=f"{type(e).__name__}: {e}"[:200],
+                storage_state_exists=STORAGE_STATE_PATH.exists(),
+            )
+            browser.close()
+            raise
+
+        try:
+            try:
+                ensure_authenticated(context, page, auth, allow_login=True)
+            except AuthError as e:
+                # ensure_authenticated already emitted an
+                # `auth_ensure_result` event with snapshot — re-emit a
+                # cli-level marker so the run-level event is easy to
+                # correlate in the dashboard timeline.
+                sys_log(
+                    "cli_run_auth_failed", level="error",
+                    source="session_fetch",
+                    error=f"AuthError: {e}"[:200],
+                )
+                raise
 
             try:
                 failures = _extract_cases(
                     context, cases, captured_at, keep_alive=args.keep_alive
                 )
-            except SessionExpired:
+            except SessionExpired as e:
                 logger.warning("Session expired mid-run — re-authenticating once.")
-                ensure_authenticated(context, page, auth, allow_login=True)
-                failures = _extract_cases(
-                    context, cases, captured_at, keep_alive=args.keep_alive
+                sys_log(
+                    "cli_run_session_expired_retry", level="warning",
+                    source="session_fetch",
+                    receipt=getattr(e, "receipt", None),
                 )
+                try:
+                    ensure_authenticated(context, page, auth, allow_login=True)
+                except AuthError as ae:
+                    sys_log(
+                        "cli_run_auth_failed", level="error",
+                        source="session_fetch",
+                        phase="post_session_expired_retry",
+                        error=f"AuthError: {ae}"[:200],
+                    )
+                    raise
+                try:
+                    failures = _extract_cases(
+                        context, cases, captured_at, keep_alive=args.keep_alive
+                    )
+                except SessionExpired as e2:
+                    # Session died AGAIN after a fresh login — give up.
+                    sys_log(
+                        "cli_run_session_expired_twice", level="error",
+                        source="session_fetch",
+                        receipt=getattr(e2, "receipt", None),
+                    )
+                    raise
         finally:
-            # Persist whatever session state we ended up with.
+            # Persist whatever session state we ended up with. Failures
+            # here are non-fatal but must be visible so we don't lose a
+            # working session silently.
             try:
                 context.storage_state(path=str(STORAGE_STATE_PATH))
-            except Exception:
-                pass
+            except Exception as e:
+                sys_log(
+                    "storage_state_persist_failed", level="warning",
+                    source="session_fetch",
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
             _hold_browser_open(args)
-            browser.close()
+            try:
+                browser.close()
+            except Exception as e:  # pragma: no cover — teardown best-effort
+                sys_log(
+                    "browser_close_failed", level="warning",
+                    source="session_fetch",
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
 
     if failures:
         logger.warning("Completed with %d failure(s).", failures)
@@ -427,14 +542,33 @@ def main() -> int:
     )
 
     cmd = args.cmd or "run"
-    if cmd in ("run", "fetch"):
-        return cmd_run(args)
-    if cmd == "login":
-        return cmd_login(args)
-    if cmd == "extract":
-        return cmd_extract(args)
-    parser.error(f"unknown command: {cmd}")  # pragma: no cover — argparse blocks unknowns
-    return 2  # pragma: no cover
+    # Wrap every subcommand in a last-resort handler so an uncaught
+    # exception anywhere in the whole process still produces a
+    # categorised `cli_uncaught_exception` system-log event.  Without
+    # this, the only surviving record of a surprise crash is a stderr
+    # traceback captured by the parent server process — useful, but
+    # not dashboard-visible and not correlatable to a specific run.
+    try:
+        if cmd in ("run", "fetch"):
+            return cmd_run(args)
+        if cmd == "login":
+            return cmd_login(args)
+        if cmd == "extract":
+            return cmd_extract(args)
+        parser.error(f"unknown command: {cmd}")  # pragma: no cover — argparse blocks unknowns
+        return 2  # pragma: no cover
+    except SystemExit:
+        # Propagate argparse / load_auth SystemExit untouched.
+        raise
+    except BaseException as e:
+        tb_tail = "".join(traceback.format_exception(e))[-1200:]
+        sys_log(
+            "cli_uncaught_exception", level="error", source="session_fetch",
+            cmd=cmd,
+            error=f"{type(e).__name__}: {e}"[:200],
+            traceback_tail=tb_tail,
+        )
+        raise
 
 
 if __name__ == "__main__":  # pragma: no cover

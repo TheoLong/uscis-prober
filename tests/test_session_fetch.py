@@ -502,3 +502,72 @@ def test_main_verbose_enables_debug(monkeypatch):
         main()
     # verbose flag must flip the configured level.
     assert bc.call_args.kwargs["level"] == session_fetch.logging.DEBUG
+
+
+# -------- system log instrumentation ------------------------------------
+
+@pytest.fixture
+def syslog_to_tmp(monkeypatch, tmp_path):
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+    return lambda: system_log.read_all()
+
+
+def test_load_config_emits_file_not_found(monkeypatch, tmp_path, syslog_to_tmp):
+    monkeypatch.setattr(session_fetch, "CONFIG_PATH", tmp_path / "missing.json")
+    with pytest.raises(FileNotFoundError):
+        session_fetch.load_config()
+    events = [e for e in syslog_to_tmp() if e["event"] == "config_load_failed"]
+    assert len(events) == 1
+    assert events[0]["reason"] == "file_not_found"
+
+
+def test_load_config_emits_malformed_json(monkeypatch, tmp_path, syslog_to_tmp):
+    cfg = tmp_path / "config.json"
+    cfg.write_text("not { valid json")
+    monkeypatch.setattr(session_fetch, "CONFIG_PATH", cfg)
+    with pytest.raises(json.JSONDecodeError):
+        session_fetch.load_config()
+    events = [e for e in syslog_to_tmp() if e["event"] == "config_load_failed"]
+    assert len(events) == 1
+    assert events[0]["reason"] == "malformed_json"
+
+
+def test_load_auth_emits_missing_keys(syslog_to_tmp):
+    with pytest.raises(SystemExit):
+        session_fetch.load_auth({"auth": {"uscis_email": "e"}})
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "auth_config_missing_keys"]
+    assert len(events) == 1
+    # All three remaining required keys must be reported.
+    missing = events[0]["missing"]
+    assert "uscis_password" in missing
+    assert "uscis_mfa_email" in missing
+    assert "uscis_mfa_app_password" in missing
+
+
+def test_append_snapshot_emits_invalid_json_warning(
+    tmp_path, monkeypatch, syslog_to_tmp,
+):
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    log_file = tmp_path / "485_logs.json"
+    log_file.write_text("not { valid json")
+    session_fetch.append_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "snapshot_log_invalid_json"]
+    assert len(events) == 1
+    assert events[0]["file"] == "485_logs.json"
+
+
+def test_append_snapshot_emits_not_array_warning(
+    tmp_path, monkeypatch, syslog_to_tmp,
+):
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    log_file = tmp_path / "485_logs.json"
+    log_file.write_text('{"this": "is an object, not a list"}')
+    session_fetch.append_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "snapshot_log_not_array"]
+    assert len(events) == 1
+    assert events[0]["existing_type"] == "dict"

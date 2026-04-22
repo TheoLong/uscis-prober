@@ -134,3 +134,77 @@ def test_fetch_case_in_new_tab_returns_tab_and_data():
     assert data["formType"] == "I-131"
     # Dashboard visited first, then the case endpoint.
     assert tab.goto.call_count == 2
+
+
+# -------- system log instrumentation ------------------------------------
+
+@pytest.fixture
+def syslog_to_tmp(monkeypatch, tmp_path):
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+    return lambda: system_log.read_all()
+
+
+def test_parse_case_response_non_200_emits_sys_log(syslog_to_tmp):
+    tab = _tab(body_text="service unavailable", status=503)
+    with pytest.raises(ApiError):
+        _parse_case_response(tab, "IOE1", 503)
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_non_200"]
+    assert len(events) == 1
+    assert events[0]["status"] == 503
+    assert events[0]["receipt"] == "IOE1"
+    assert "service unavailable" in events[0]["body_preview"]
+
+
+def test_parse_case_response_empty_body_emits_sys_log(syslog_to_tmp):
+    tab = _tab(body_text="", status=200)
+    with pytest.raises(ApiError):
+        _parse_case_response(tab, "IOE1", 200)
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_empty_body"]
+    assert len(events) == 1
+
+
+def test_parse_case_response_bad_json_emits_sys_log(syslog_to_tmp):
+    tab = _tab(body_text="not json at all", status=200)
+    with pytest.raises(ApiError):
+        _parse_case_response(tab, "IOE1", 200)
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_bad_json"]
+    assert len(events) == 1
+    assert "not json" in events[0]["body_preview"]
+
+
+def test_parse_case_response_401_does_not_spam_sys_log(syslog_to_tmp):
+    # SessionExpired is already categorised upstream as
+    # case_fetch_session_expired — we must NOT also emit an api_*
+    # event so the same failure isn't double-counted in dashboards.
+    tab = _tab(body_text="denied", status=401)
+    with pytest.raises(SessionExpired):
+        _parse_case_response(tab, "IOE1", 401)
+    assert syslog_to_tmp() == []
+
+
+def test_fetch_case_nav_failure_emits_sys_log(syslog_to_tmp):
+    from playwright.sync_api import Error as PlaywrightError
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightError("net::ERR_CONNECTION_RESET")
+    with pytest.raises(PlaywrightError):
+        fetch_case(tab, "IOE1")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_nav_failed"]
+    assert len(events) == 1
+    assert events[0]["receipt"] == "IOE1"
+    assert "ERR_CONNECTION_RESET" in events[0]["error"]
+
+
+def test_open_worker_tab_dashboard_timeout_emits_sys_log(syslog_to_tmp):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    context = MagicMock()
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightTimeout("dashboard too slow")
+    context.new_page.return_value = tab
+    with pytest.raises(PlaywrightTimeout):
+        open_worker_tab(context)
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_worker_tab_failed"]
+    assert len(events) == 1
+    assert events[0]["phase"] == "dashboard_goto"
+    assert "dashboard too slow" in events[0]["error"]

@@ -279,3 +279,214 @@ def test_handle_mfa_if_present_without_remember_checkbox():
             datetime.now(timezone.utc),
         )
     remember.check.assert_not_called()
+
+
+# -------- system log instrumentation ------------------------------------
+
+@pytest.fixture
+def syslog_to_tmp(monkeypatch, tmp_path):
+    """Redirect system_log.LOG_PATH to tmp and return a helper that
+    reads the events back out. Every sys_log-focused test uses this."""
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+    def _read():
+        return system_log.read_all()
+    return _read
+
+
+def _mock_authed_page(url="https://my.uscis.gov/account/applicant"):
+    p = MagicMock()
+    p.url = url
+    p.title.return_value = "USCIS — applicant"
+    body = MagicMock()
+    body.inner_text.return_value = "welcome to your USCIS account"
+    p.locator.return_value = body
+    return p
+
+
+def _mock_stale_page(url="https://myaccount.uscis.gov/sign-in"):
+    p = MagicMock()
+    p.url = url
+    p.title.return_value = "Sign in to USCIS"
+    body = MagicMock()
+    body.inner_text.return_value = "Sign in to continue"
+    p.locator.return_value = body
+    return p
+
+
+def test_probe_session_emits_valid_result(syslog_to_tmp):
+    page = _mock_authed_page()
+    assert probe_session(page) is True
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "probe_session_result"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "valid"
+
+
+def test_probe_session_emits_stale_result_with_snapshot(syslog_to_tmp):
+    page = _mock_stale_page()
+    assert probe_session(page) is False
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "probe_session_result"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["outcome"] == "stale"
+    # Snapshot fields must be present so operators can see where we
+    # actually landed.
+    assert ev["url"] == "https://myaccount.uscis.gov/sign-in"
+    assert "title" in ev and "body_preview" in ev
+
+
+def test_probe_session_emits_error_outcome_on_net_aborted(syslog_to_tmp):
+    from playwright.sync_api import Error as PlaywrightError
+    page = _mock_stale_page()
+    page.goto.side_effect = PlaywrightError("net::ERR_ABORTED")
+    assert probe_session(page) is False
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "probe_session_result"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "error"
+    assert "net::ERR_ABORTED" in events[0]["error"]
+
+
+def test_probe_session_emits_timeout_outcome(syslog_to_tmp):
+    page = _mock_stale_page()
+    page.goto.side_effect = PlaywrightTimeout("slow")
+    assert probe_session(page) is False
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "probe_session_result"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "timeout"
+
+
+def test_ensure_authenticated_emits_already_valid(syslog_to_tmp):
+    page = _mock_authed_page()
+    context = MagicMock()
+    ensure_authenticated(context, page, {}, allow_login=True)
+    outcomes = [e.get("outcome") for e in syslog_to_tmp()
+                if e["event"] == "auth_ensure_result"]
+    assert outcomes == ["already_valid"]
+
+
+def test_ensure_authenticated_emits_refused_stale_no_login(syslog_to_tmp):
+    page = _mock_stale_page()
+    context = MagicMock()
+    with pytest.raises(AuthError):
+        ensure_authenticated(context, page, {}, allow_login=False)
+    outcomes = [e.get("outcome") for e in syslog_to_tmp()
+                if e["event"] == "auth_ensure_result"]
+    assert outcomes == ["refused_stale_no_login"]
+
+
+def test_ensure_authenticated_emits_login_verify_failed(syslog_to_tmp):
+    page = _mock_stale_page()
+    context = MagicMock()
+    with patch.object(uscis_auth, "_do_login"):  # no-op login
+        with pytest.raises(AuthError):
+            ensure_authenticated(context, page, {}, allow_login=True)
+    outcomes = [e.get("outcome") for e in syslog_to_tmp()
+                if e["event"] == "auth_ensure_result"]
+    assert outcomes == ["login_verify_failed"]
+
+
+def test_do_login_emits_login_result_ok_on_success(syslog_to_tmp):
+    page = _mock_authed_page()
+    # First wait_for_selector = email form (ok), second = MFA (absent).
+    page.wait_for_selector.side_effect = [None, PlaywrightTimeout("no mfa")]
+    tos = MagicMock(); tos.count.return_value = 0
+    page.locator.side_effect = [tos, MagicMock()]  # tos + body snapshot
+    context = MagicMock()
+    auth = {"uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g", "uscis_mfa_app_password": "a"}
+
+    with patch.object(uscis_auth, "fetch_latest_code"):
+        _do_login(context, page, auth)
+
+    results = [e for e in syslog_to_tmp()
+               if e["event"] == "login_result"]
+    assert len(results) == 1
+    assert results[0]["outcome"] == "ok"
+
+
+def test_do_login_emits_login_result_failed_with_snapshot(syslog_to_tmp):
+    # This is TODAY'S failure mode: #email-address selector never appears.
+    # The login_result event must capture step=email_form and the page
+    # snapshot so we can see what USCIS was actually showing.
+    page = MagicMock()
+    page.url = "https://my.uscis.gov/oidc/login"
+    page.title.return_value = "Too Many Attempts"
+    body = MagicMock()
+    body.inner_text.return_value = (
+        "Your IP has been rate-limited. Try again in 15 minutes."
+    )
+    page.locator.return_value = body
+    page.wait_for_selector.side_effect = PlaywrightTimeout(
+        "Timeout 20000ms exceeded. waiting for #email-address"
+    )
+
+    context = MagicMock()
+    auth = {"uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g", "uscis_mfa_app_password": "a"}
+
+    with pytest.raises(PlaywrightTimeout):
+        _do_login(context, page, auth)
+
+    results = [e for e in syslog_to_tmp()
+               if e["event"] == "login_result"]
+    assert len(results) == 1
+    ev = results[0]
+    assert ev["outcome"] == "failed"
+    assert ev["step"] == uscis_auth.LOGIN_STEP_EMAIL_FORM
+    assert "TimeoutError" in ev["error"]
+    # Page snapshot must carry the signal an operator would need:
+    assert ev["title"] == "Too Many Attempts"
+    assert "rate-limited" in ev["body_preview"]
+    assert ev["url"] == "https://my.uscis.gov/oidc/login"
+
+
+def test_do_login_emits_login_result_failed_with_step_goto(syslog_to_tmp):
+    # Navigating to the login page itself fails.  step must be goto_login.
+    page = _mock_stale_page("")
+    page.goto.side_effect = PlaywrightTimeout("login page never loaded")
+    context = MagicMock()
+    auth = {"uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g", "uscis_mfa_app_password": "a"}
+
+    with pytest.raises(PlaywrightTimeout):
+        _do_login(context, page, auth)
+
+    results = [e for e in syslog_to_tmp()
+               if e["event"] == "login_result"]
+    assert len(results) == 1
+    assert results[0]["outcome"] == "failed"
+    assert results[0]["step"] == uscis_auth.LOGIN_STEP_GOTO
+
+
+def test_handle_mfa_if_present_emits_prompt_absent(syslog_to_tmp):
+    page = MagicMock()
+    page.wait_for_selector.side_effect = PlaywrightTimeout("none")
+    with patch.object(uscis_auth, "fetch_latest_code"):
+        _handle_mfa_if_present(
+            page, {"uscis_mfa_email": "g", "uscis_mfa_app_password": "a"},
+            datetime.now(timezone.utc),
+        )
+    results = [e for e in syslog_to_tmp()
+               if e["event"] == "login_mfa_result"]
+    assert [e["outcome"] for e in results] == ["prompt_absent"]
+
+
+def test_handle_mfa_if_present_emits_prompt_present_and_submitted(syslog_to_tmp):
+    page = MagicMock()
+    page.wait_for_selector.return_value = None
+    remember = MagicMock(); remember.count.return_value = 1
+    remember.is_checked.return_value = False
+    page.locator.return_value = remember
+    with patch.object(uscis_auth, "fetch_latest_code", return_value="424242"):
+        _handle_mfa_if_present(
+            page, {"uscis_mfa_email": "g", "uscis_mfa_app_password": "a"},
+            datetime.now(timezone.utc),
+        )
+    outcomes = [e["outcome"] for e in syslog_to_tmp()
+                if e["event"] == "login_mfa_result"]
+    assert outcomes == ["prompt_present", "extracted_and_submitted"]
