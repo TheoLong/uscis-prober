@@ -490,3 +490,86 @@ def test_handle_mfa_if_present_emits_prompt_present_and_submitted(syslog_to_tmp)
     outcomes = [e["outcome"] for e in syslog_to_tmp()
                 if e["event"] == "login_mfa_result"]
     assert outcomes == ["prompt_present", "extracted_and_submitted"]
+
+
+# -------- clear session state before login ------------------------------
+
+def test_do_login_clears_cookies_before_submitting(syslog_to_tmp):
+    # Regression guard for the 2026-04-22 half-auth cascade: when
+    # earlier attempts left session cookies in a "waiting for MFA"
+    # state, USCIS skips the email/password form.  _do_login MUST
+    # wipe cookies (and the persisted storage file) before it
+    # navigates to the login URL, guaranteeing a fresh form.
+    page = _mock_authed_page()
+    page.wait_for_selector.side_effect = [None, PlaywrightTimeout("no mfa")]
+    tos = MagicMock(); tos.count.return_value = 0
+    page.locator.side_effect = [tos, MagicMock()]
+    context = MagicMock()
+    auth = {"uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g", "uscis_mfa_app_password": "a"}
+
+    with patch.object(uscis_auth, "fetch_latest_code"):
+        _do_login(context, page, auth)
+
+    # Cookie clearance must happen before anything else is called on
+    # the context (new_page, etc.). Assert clear_cookies is the first
+    # context mutation.
+    context.clear_cookies.assert_called_once()
+    # And a login_storage_cleared event must fire so the dashboard
+    # shows the recovery step.
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "login_storage_cleared"]
+    assert len(events) == 1
+    assert events[0]["cookies_cleared"] is True
+
+
+def test_do_login_unlinks_storage_state_file(monkeypatch, tmp_path, syslog_to_tmp):
+    # Point the storage-state path at a tmp file, touch it, then run
+    # _do_login and assert the file was removed.
+    fake_storage = tmp_path / ".uscis_session.json"
+    fake_storage.write_text('{"cookies": []}')
+    monkeypatch.setattr(uscis_auth, "STORAGE_STATE_PATH", fake_storage)
+
+    page = _mock_authed_page()
+    page.wait_for_selector.side_effect = [None, PlaywrightTimeout("no mfa")]
+    tos = MagicMock(); tos.count.return_value = 0
+    page.locator.side_effect = [tos, MagicMock()]
+    context = MagicMock()
+    auth = {"uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g", "uscis_mfa_app_password": "a"}
+
+    with patch.object(uscis_auth, "fetch_latest_code"):
+        _do_login(context, page, auth)
+
+    assert not fake_storage.exists()
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "login_storage_cleared"]
+    assert len(events) == 1
+    assert events[0]["file_cleared"] is True
+
+
+def test_do_login_tolerates_missing_storage_state_file(
+    monkeypatch, tmp_path, syslog_to_tmp,
+):
+    # First-ever login: no saved storage state yet. The unlink should
+    # skip silently and file_cleared must be False.
+    fake_storage = tmp_path / ".uscis_session.json"
+    monkeypatch.setattr(uscis_auth, "STORAGE_STATE_PATH", fake_storage)
+    assert not fake_storage.exists()
+
+    page = _mock_authed_page()
+    page.wait_for_selector.side_effect = [None, PlaywrightTimeout("no mfa")]
+    tos = MagicMock(); tos.count.return_value = 0
+    page.locator.side_effect = [tos, MagicMock()]
+    context = MagicMock()
+    auth = {"uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g", "uscis_mfa_app_password": "a"}
+
+    with patch.object(uscis_auth, "fetch_latest_code"):
+        _do_login(context, page, auth)
+
+    events = [e for e in syslog_to_tmp()
+              if e["event"] == "login_storage_cleared"]
+    assert len(events) == 1
+    assert events[0]["cookies_cleared"] is True
+    assert events[0]["file_cleared"] is False

@@ -307,16 +307,64 @@ def test_check_inbox_once_handles_fetch_failure(since_dt):
 
 def test_check_inbox_once_records_search_query_verbatim(since_dt):
     # The IMAP SEARCH query string is the SINGLE most important
-    # diagnostic on a timeout — it shows the SINCE value we sent. Pin
-    # the exact format so the timeout sys_log event is unambiguous.
+    # diagnostic on a timeout.  Pin the exact format so the timeout
+    # sys_log event is unambiguous — and critically, the query must
+    # NOT include a SINCE clause (see `_check_inbox_once` docstring:
+    # Gmail evaluates SINCE in server-local Pacific time, which drops
+    # messages whose UTC date has rolled over but server-local has
+    # not).
     fake = _FakeMail(fetch_data=[(b"x", _fake_msg())])
     _, query, _ = _scan(fake, since_dt)
     expected = (
         f'(FROM "{mfa_mailbox.USCIS_SENDER}" '
-        f'SUBJECT "{mfa_mailbox.USCIS_MFA_SUBJECT}" '
-        f'SINCE {since_dt.strftime("%d-%b-%Y")})'
+        f'SUBJECT "{mfa_mailbox.USCIS_MFA_SUBJECT}")'
     )
     assert query == expected
+    assert "SINCE" not in query  # regression guard — never re-add
+
+
+def test_check_inbox_once_succeeds_on_gmail_tz_boundary(since_dt):
+    # Regression guard for the 2026-04-22 outage: a message whose UTC
+    # Date is newer than `since` must be extracted, even though Gmail
+    # would have silently excluded it under the old `SINCE` clause
+    # because server-local (Pacific) time hadn't crossed the date
+    # boundary yet.  Our fake mail simulates that exclusion by
+    # returning empty for any query containing `SINCE`; the fix
+    # removes SINCE, so this test must pass.
+    class _GmailTZMail(_FakeMail):
+        def search(self, _charset, query):
+            if "SINCE" in query.decode() if isinstance(query, bytes) else "SINCE" in query:
+                return ("OK", [b""])  # mimic Gmail swallowing the message
+            return super().search(_charset, query)
+
+    # Date header inside the fresh future window.
+    fresh_msg = _fake_msg(date_hdr="Wed, 22 Apr 2026 00:00:09 +0000")
+    fake = _GmailTZMail(fetch_data=[(b"x", fresh_msg)])
+    # `since` is a few seconds before the message, simulating the
+    # overnight pull's submit_time.
+    probe_since = datetime(2026, 4, 22, 0, 0, 6, tzinfo=timezone.utc)
+    code, query, _ = _scan(fake, probe_since)
+    assert code == "424242"
+    assert "SINCE" not in query
+
+
+def test_check_inbox_once_scan_is_bounded(since_dt, monkeypatch):
+    # Without SINCE the mailbox could return thousands of historical
+    # matches.  The scan is capped at MAX_SEARCH_IDS_SCANNED and walks
+    # newest-first, so even a giant inbox resolves in one fetch when
+    # the top UID is the one we want.
+    monkeypatch.setattr(mfa_mailbox, "MAX_SEARCH_IDS_SCANNED", 3)
+    # 5 stale messages + 1 fresh at the top.
+    stale = b"Wed, 01 Jan 2020 00:00:00 +0000"
+    fresh = b"Wed, 18 Apr 2026 23:00:00 +0000"
+    ids = tuple(str(n).encode() for n in range(1, 7))
+    fetch_data = [(b"x", _fake_msg(date_hdr=stale.decode()))] * 5 \
+               + [(b"x", _fake_msg(date_hdr=fresh.decode()))]
+    fake = _FakeMail(ids=ids, fetch_data=fetch_data)
+    code, _, returned_uids = _scan(fake, since_dt)
+    assert code == "424242"
+    # Only the last 3 UIDs were scanned.
+    assert returned_uids == ["4", "5", "6"]
 
 
 def test_check_inbox_once_returns_decoded_uids(since_dt):

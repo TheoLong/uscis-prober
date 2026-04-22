@@ -66,6 +66,14 @@ REASON_ACCEPTED               = "accepted"
 USCIS_SENDER = "MyAccount@uscis.dhs.gov"
 USCIS_MFA_SUBJECT = "Secure two-step verification notification"
 
+# Because the IMAP SEARCH doesn't use SINCE (Gmail TZ bug — see
+# `_check_inbox_once` docstring), the server can return every
+# historical USCIS MFA email.  Scan only the most recent N; the MFA
+# we're waiting for is seconds old and reverse-UID iteration returns
+# on first match, so this cap is pure defence against unbounded
+# mailbox growth.
+MAX_SEARCH_IDS_SCANNED = 50
+
 
 _STYLE_BLOCK_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -230,7 +238,11 @@ def _check_inbox_once(
     """One sweep of the inbox. Accepted when every gate passes:
 
     1. IMAP: sender is MyAccount@uscis.dhs.gov AND subject contains the MFA
-       subject AND the message was received on/after `since` (date granularity).
+       subject.  NOTE: we do NOT include a SINCE clause — Gmail evaluates
+       SINCE in server-local (Pacific) time, so an email dated
+       `2026-04-22T00:00:09Z` is indexed as 21-Apr on Gmail's side and
+       `SINCE 22-Apr-2026` silently excludes it.  The Python-side
+       Date-header gate below is the authoritative freshness check.
     2. Python: Subject header starts with the exact MFA subject (case-insensitive).
     3. Python: Date header is newer than `since` (second-granularity filter).
     4. Python: body yields a 6-digit code after HTML stripping
@@ -300,11 +312,11 @@ def _check_inbox_once(
                 return None, None, None
 
             # --- build + run search ---
-            since_str = since.strftime("%d-%b-%Y")  # IMAP SINCE is date-only
+            # Server-side filter is FROM + SUBJECT only. No SINCE —
+            # see the docstring at the top of this function for why.
             search_query = (
                 f'(FROM "{USCIS_SENDER}" '
-                f'SUBJECT "{USCIS_MFA_SUBJECT}" '
-                f'SINCE {since_str})'
+                f'SUBJECT "{USCIS_MFA_SUBJECT}")'
             )
             try:
                 status, data = mail.search(None, search_query)
@@ -325,10 +337,18 @@ def _check_inbox_once(
                 bump(REASON_IMAP_SEARCH_EMPTY)
                 return None, search_query, returned_uids
 
-            ids = data[0].split()
+            all_ids = data[0].split()
+            # Without SINCE the inbox can return every historical USCIS
+            # MFA email.  Bound the scan to the most recent 50 — the
+            # MFA we want is seconds old, and reverse-UID iteration
+            # already returns on first match.  This is pure defense
+            # against unbounded mailbox growth.
+            ids = all_ids[-MAX_SEARCH_IDS_SCANNED:]
             returned_uids = [x.decode("ascii", errors="replace") for x in ids]
-            logger.info("mfa/IMAP search returned %d uid(s): %s",
-                        len(returned_uids), returned_uids)
+            logger.info(
+                "mfa/IMAP search returned %d total uid(s), scanning last %d: %s",
+                len(all_ids), len(ids), returned_uids,
+            )
 
             # --- walk newest-first through returned IDs ---
             for num in reversed(ids):

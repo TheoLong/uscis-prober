@@ -254,6 +254,54 @@ def _persist(context: BrowserContext) -> None:
     logger.info("Saved session state → %s", STORAGE_STATE_PATH.name)
 
 
+def _clear_stored_session(context: BrowserContext) -> None:
+    """Wipe every bit of session state before a fresh login.
+
+    Why: when an earlier login fails partway (e.g. the MFA step times
+    out), USCIS has already accepted our first factor.  The session
+    cookies on disk + in the live context are now in a
+    "half-authenticated" state.  A follow-up attempt to `/oidc/login`
+    gets redirected to the MFA challenge page at
+    `myaccount.uscis.gov/auth` instead of the email/password form —
+    and `_do_login` then times out forever waiting for the
+    `#email-address` selector that isn't there.
+
+    Clear:
+      * the live BrowserContext's cookies (so the current attempt
+        starts clean);
+      * the persisted `.uscis_session.json` (so a future process that
+        loads storage_state doesn't re-inherit the bad cookies).
+
+    Both operations are best-effort — any failure is logged but does
+    not abort the login, because a retry with dirty cookies is still
+    more likely to succeed than aborting entirely.
+    """
+    cookies_cleared = False
+    try:
+        context.clear_cookies()
+        cookies_cleared = True
+    except Exception as e:  # pragma: no cover — best-effort
+        logger.warning("clear_cookies failed: %s", e)
+
+    file_cleared = False
+    try:
+        if STORAGE_STATE_PATH.exists():
+            STORAGE_STATE_PATH.unlink()
+            file_cleared = True
+    except Exception as e:  # pragma: no cover — best-effort
+        logger.warning("unlink storage state failed: %s", e)
+
+    sys_log(
+        "login_storage_cleared", source="auth",
+        cookies_cleared=cookies_cleared,
+        file_cleared=file_cleared,
+    )
+    logger.info(
+        "Cleared session state before login (cookies=%s, file=%s)",
+        cookies_cleared, file_cleared,
+    )
+
+
 # ---------------------------------------------------------------------------
 # _do_login — full OIDC form + MFA (only path that burns a code)
 # ---------------------------------------------------------------------------
@@ -261,6 +309,13 @@ def _persist(context: BrowserContext) -> None:
 def _do_login(context: BrowserContext, page: Page, auth: dict[str, str]) -> None:
     """Full OpenID Connect login + MFA. This is the *only* code path that
     burns an MFA code.
+
+    Always starts from a blank slate. See `_clear_stored_session()` for
+    why half-auth cookies from a previously-failed login MUST be wiped
+    before we try again: USCIS reads those cookies and skips the
+    email/password form, redirecting straight to the MFA challenge
+    page — where `_do_login` can't operate (no `#email-address`
+    selector exists on that page).
 
     Emits exactly one `login_result` sys_log event at function exit:
       - outcome="ok"     on successful login (code delivered & submitted)
@@ -273,6 +328,7 @@ def _do_login(context: BrowserContext, page: Page, auth: dict[str, str]) -> None
             the single most useful field for distinguishing rate-limit
             pages, CAPTCHA interstitials, and selector renames.
     """
+    _clear_stored_session(context)
     sys_log("login_started", source="auth", target=LOGIN_URL)
     logger.info("Starting login flow (this will send a MFA email)...")
 
