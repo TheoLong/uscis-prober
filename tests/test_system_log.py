@@ -349,6 +349,117 @@ def test_parse_jsonl_stderr_line_ignores_plain_text():
     assert system_log.parse_jsonl_stderr_line(bad) is None
 
 
+# ======================================================================
+# Error-handling coverage — every failure path must sys_log
+# ======================================================================
+
+def test_route_unhandled_exception_emits_sys_log(monkeypatch, tmp_path):
+    import server
+    _stub_server_config(monkeypatch, tmp_path)
+
+    # Force any route to raise by monkeypatching a dependency it uses.
+    def _kaboom(*a, **k):
+        raise RuntimeError("surprise from the data layer")
+    monkeypatch.setattr(server, "load_config", _kaboom)
+
+    with server.app.test_client() as c:
+        r = c.get("/api/cases")
+    assert r.status_code == 500
+    body = r.get_json()
+    # The client gets an opaque body — no traceback leaks.
+    assert body == {"ok": False, "error": "internal_error"}
+
+    events = [e for e in system_log.read_all()
+              if e["event"] == "route_unhandled_exception"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["path"] == "/api/cases"
+    assert ev["method"] == "GET"
+    assert ev["level"] == "error"
+    assert "RuntimeError" in ev["error"]
+    assert "surprise from the data layer" in ev["error"]
+    # Traceback tail is present and bounded.
+    assert "traceback_tail" in ev and len(ev["traceback_tail"]) <= 1200
+
+
+def test_pull_pre_snapshot_failure_emits_sys_log(monkeypatch, tmp_path):
+    # If the before-pull snapshot read itself crashes (e.g. a case file
+    # with a shape that slips past load_case_entries' gracefulness), we
+    # should emit `pull_pre_snapshot_failed` and KEEP GOING rather than
+    # abort the whole pull.
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        server, "_all_update_records",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom in pre-snapshot")),
+    )
+
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=0, stdout="", stderr="")
+    with patch.object(subprocess, "run", return_value=proc), \
+         patch.object(server, "_send_notifications_for_new", return_value=[]):
+        # Note: the notifications call inside _run_pull_subprocess also
+        # uses _all_update_records; it'll crash, but that's caught by
+        # the `if proc.returncode == 0` branch — which is wrapped in the
+        # function's own try/except via the pull envelope. Skip
+        # notifications entirely by patching.
+        pass
+    # Re-patch _all_update_records only for the pre-snapshot call — keep
+    # the post-pull call working so we can assert the pre-snapshot
+    # event appears alongside a normal pull entry.
+    calls = {"n": 0}
+    def _partial_fail(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom in pre-snapshot")
+        return []
+    monkeypatch.setattr(server, "_all_update_records", _partial_fail)
+
+    with patch.object(subprocess, "run", return_value=proc):
+        server._run_pull_subprocess(trigger="manual")
+
+    entries = system_log.read_all()
+    pre_fail = [e for e in entries if e["event"] == "pull_pre_snapshot_failed"]
+    assert len(pre_fail) == 1
+    assert "boom in pre-snapshot" in pre_fail[0]["error"]
+    # The pull still completed and wrote its consolidated entry.
+    pulls = [e for e in entries if e["event"] == "pull"]
+    assert len(pulls) == 1
+
+
+def test_pull_thread_crash_emits_sys_log(monkeypatch, tmp_path):
+    import server
+    _stub_server_config(monkeypatch, tmp_path)
+
+    # Force _run_pull_subprocess to raise so the outer _runner try/except
+    # in _spawn_pull_async is exercised — the only defender against a
+    # truly unexpected crash in the pull thread.
+    def _boom(trigger="scheduled"):
+        raise RuntimeError("runner exploded")
+    monkeypatch.setattr(server, "_run_pull_subprocess", _boom)
+
+    server._spawn_pull_async(trigger="manual")
+    # The daemon thread runs async; give it a beat to finish and write
+    # its sys_log entry. The call is cheap (our patched runner raises
+    # immediately) so 1s is plenty of headroom.
+    import time as _time
+    for _ in range(20):
+        crashes = [e for e in system_log.read_all()
+                   if e["event"] == "pull_thread_crashed"]
+        if crashes:
+            break
+        _time.sleep(0.05)
+
+    assert len(crashes) == 1
+    assert "runner exploded" in crashes[0]["error"]
+    assert crashes[0]["trigger"] == "manual"
+    # pull_state should have been cleared so the dashboard doesn't think
+    # a pull is still in flight.
+    assert server._pull_state.running is False
+    assert server._pull_state.ok is False
+
+
 def test_setup_scheduler_logs_configured_event(monkeypatch):
     import server
     from unittest.mock import MagicMock

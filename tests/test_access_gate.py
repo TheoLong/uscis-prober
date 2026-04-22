@@ -354,3 +354,67 @@ def test_configure_survives_missing_proxyfix(monkeypatch, tmp_path):
     app = Flask("proxyless")
     # Must not raise — configure swallows the ImportError.
     assert configure(app, "code", root=tmp_path) is True
+
+
+# =========================================================================
+# Structured logging on the flask_secret lifecycle
+# =========================================================================
+
+import pytest
+import system_log
+
+
+@pytest.fixture
+def _redirect_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "_syslog.json")
+    system_log.clear()
+    return tmp_path
+
+
+def test_flask_secret_read_failure_emits_sys_log(_redirect_log, monkeypatch):
+    tmp_path = _redirect_log
+    secret_file = tmp_path / ".flask_secret"
+    secret_file.write_bytes(b"existing")
+    import pathlib
+    real_read = pathlib.Path.read_bytes
+    def boom(self):
+        if self.name == ".flask_secret":
+            raise IOError("disk full")
+        return real_read(self)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", boom)
+    app = Flask("x")
+    configure(app, "any-code", root=tmp_path)
+    events = [e for e in system_log.read_all()
+              if e["event"] == "flask_secret_read_failed"]
+    assert len(events) == 1
+    assert events[0]["level"] == "warning"
+    assert "disk full" in events[0]["error"]
+
+
+def test_flask_secret_chmod_failure_emits_sys_log(_redirect_log, monkeypatch):
+    tmp_path = _redirect_log
+    import pathlib
+    def boom(self, mode):
+        raise OSError("chmod rejected")
+    monkeypatch.setattr(pathlib.Path, "chmod", boom)
+    app = Flask("x")
+    configure(app, "any-code", root=tmp_path)
+    events = [e for e in system_log.read_all()
+              if e["event"] == "flask_secret_chmod_failed"]
+    assert len(events) == 1
+
+
+def test_flask_secret_write_failure_falls_back_to_ephemeral(_redirect_log, monkeypatch):
+    tmp_path = _redirect_log
+    import pathlib
+    def boom(self, data):
+        raise OSError("read-only filesystem")
+    monkeypatch.setattr(pathlib.Path, "write_bytes", boom)
+    app = Flask("x")
+    # Must not raise — falls back to an in-memory key.
+    configure(app, "any-code", root=tmp_path)
+    assert len(app.secret_key) == 32
+    events = [e for e in system_log.read_all()
+              if e["event"] == "flask_secret_write_failed"]
+    assert len(events) == 1
+    assert events[0]["level"] == "error"

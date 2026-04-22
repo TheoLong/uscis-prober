@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import zipfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -370,8 +371,26 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
     start_iso = _pull_state.started_at
     start_wall = time.time()
     # Snapshot the diff set *before* pulling so we can identify records
-    # that appear as a direct result of this run.
-    before_ids = _update_ids(_all_update_records())
+    # that appear as a direct result of this run. This call can throw if
+    # a case log file on disk is unreadable or malformed in a way
+    # load_case_entries() doesn't already swallow — we keep the pull
+    # going with an empty before-set so a bad file doesn't abort the
+    # whole operation, but we emit a `pull_pre_snapshot_failed` so the
+    # operator can see why notification dedup might be off for this run.
+    try:
+        before_ids = _update_ids(_all_update_records())
+    except Exception as _e:  # noqa: BLE001 — truly catch-all by design
+        before_ids = set()
+        sys_log(
+            "pull_pre_snapshot_failed",
+            level="warning",
+            source="server",
+            trigger=trigger,
+            error=f"{type(_e).__name__}: {_e}"[:300],
+            traceback_tail="".join(
+                traceback.format_exception(type(_e), _e, _e.__traceback__)
+            )[-800:],
+        )
 
     # Structured events collected from all sources during this run.
     steps: list[dict] = []
@@ -486,9 +505,42 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
 
 
 def _spawn_pull_async(trigger: str = "scheduled") -> None:
-    t = threading.Thread(
-        target=_run_pull_subprocess, args=(trigger,), daemon=True,
-    )
+    """Fire `_run_pull_subprocess` on a daemon thread.
+
+    Wraps the call in a last-resort catch so a crash inside the pull
+    runner (or the logging of a crash inside the pull runner) produces a
+    dashboard-visible `pull_thread_crashed` event instead of dying
+    silently on the thread.
+    """
+    def _runner():
+        try:
+            _run_pull_subprocess(trigger)
+        except Exception as e:  # noqa: BLE001 — last line of defence
+            tb_tail = "".join(
+                traceback.format_exception(type(e), e, e.__traceback__)
+            )[-1200:]
+            sys_log(
+                "pull_thread_crashed",
+                level="error",
+                source="server",
+                trigger=trigger,
+                error=f"{type(e).__name__}: {e}"[:300],
+                traceback_tail=tb_tail,
+            )
+            logger.exception("Pull thread crashed outside the usual wrapper.")
+            # Clear the running flag so the dashboard doesn't think a
+            # pull is still in flight.
+            try:
+                global _pull_state
+                with _pull_lock:
+                    _pull_state.running = False
+                    _pull_state.ok = False
+                    _pull_state.last_error = f"thread_crashed: {type(e).__name__}"
+                    _pull_state.finished_at = _now_iso()
+            except Exception:  # pragma: no cover
+                logger.exception("Failed to clear pull_state after thread crash.")
+
+    t = threading.Thread(target=_runner, daemon=True)
     t.start()
 
 
@@ -497,6 +549,30 @@ def _spawn_pull_async(trigger: str = "scheduled") -> None:
 # ---------------------------------------------------------------------------
 
 scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
+
+
+def _on_scheduler_job_error(event) -> None:
+    """Last-resort hook for any scheduler-fired callback that raises.
+
+    `_spawn_pull_async` wraps `_run_pull_subprocess` in a daemon thread and
+    the pull function has its own try/except — so this listener normally
+    never fires. But if APScheduler itself fails to dispatch (e.g. jobstore
+    crash, missed trigger bookkeeping), we still want a dashboard-visible
+    event instead of a silent stderr traceback.
+    """
+    try:
+        tb = getattr(event, "traceback", "") or ""
+        sys_log(
+            "scheduler_job_error",
+            level="error",
+            source="server",
+            job_id=getattr(event, "job_id", None),
+            scheduled_run_time=str(getattr(event, "scheduled_run_time", "")),
+            error=str(getattr(event, "exception", "")),
+            traceback_tail=tb[-1200:] if tb else "",
+        )
+    except Exception:  # pragma: no cover — belt-and-suspenders
+        logger.exception("Scheduler error listener itself failed.")
 
 
 def _setup_scheduler() -> None:
@@ -508,6 +584,10 @@ def _setup_scheduler() -> None:
             name=f"Daily pull @ {hour:02d}:00 {SCHEDULER_TZ}",
             replace_existing=True,
         )
+    # EVENT_JOB_ERROR fires when the callback itself raises. Our pull
+    # wrapper normally catches everything, but this is a safety net.
+    from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
+    scheduler.add_listener(_on_scheduler_job_error, EVENT_JOB_ERROR | EVENT_JOB_MISSED)
     scheduler.start()
     sys_log("scheduler_configured", source="server",
             timezone=SCHEDULER_TZ, hours=list(PULL_HOURS))
@@ -547,6 +627,54 @@ def _no_cache(resp):
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     return resp
+
+
+@app.errorhandler(Exception)
+def _catch_all_exception(exc):
+    """Catch-all for any route that raises without its own try/except.
+
+    Emits one `route_unhandled_exception` sys_log event with the route,
+    method, status the browser will see, and the last ~1200 chars of
+    the traceback. Then returns an opaque JSON body — we deliberately
+    don't leak the traceback to the HTTP response because it may
+    contain file paths or fragments of user data.
+
+    Flask's default behaviour lets HTTPException subclasses (e.g.
+    abort(403)) pass through; we only log true exceptions.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        # Let Flask handle abort(...) / 404 / 405 etc. with its default
+        # response. These are intentional, not crashes.
+        return exc
+
+    try:
+        tb_tail = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )[-1200:]
+    except Exception:  # pragma: no cover — traceback formatting shouldn't fail
+        tb_tail = f"<traceback formatting failed: {type(exc).__name__}>"
+
+    try:
+        path = request.path
+        method = request.method
+    except Exception:  # pragma: no cover — no request context (shouldn't happen)
+        path = "?"
+        method = "?"
+
+    sys_log(
+        "route_unhandled_exception",
+        level="error",
+        source="server",
+        path=path,
+        method=method,
+        error=f"{type(exc).__name__}: {exc}"[:300],
+        traceback_tail=tb_tail,
+    )
+    logger.exception("Unhandled exception in %s %s", method, path)
+    # Opaque response body — the structured event in the system log is
+    # the operator-facing detail; the client just needs to know 500.
+    return jsonify({"ok": False, "error": "internal_error"}), 500
 
 
 def _static_version() -> str:
@@ -893,11 +1021,19 @@ def api_test_email():
 
     try:
         notify_update(auth, recipient, sample, EVENT_CODE_LABELS)
-    except Exception:
+    except Exception as e:
         # Full traceback is in server logs — don't echo it to the caller,
         # where SMTP errors routinely include the email address or
-        # auth-failure reasons that shouldn't reach the browser.
+        # auth-failure reasons that shouldn't reach the browser. A
+        # categorised dashboard event is logged by the mailer (smtp_*
+        # family); here we only log the top-level failure so the route
+        # itself is traceable even if the mailer's log somehow missed.
         logger.exception("Test email failed")
+        sys_log(
+            "test_email_failed", level="error", source="server",
+            to=recipient, sample_id=sample.get("id"),
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
         return jsonify({"ok": False, "error": "send_failed"}), 500
     return jsonify({
         "ok": True,
@@ -938,16 +1074,58 @@ def main() -> None:
     try:
         config = load_config()
         optional_access_code = (config.get("auth") or {}).get("optional_access_code") or ""
-    except Exception:
+    except Exception as e:
+        # Config load failing at startup means the operator can't reach
+        # the dashboard without a restart. Log loudly AND continue with
+        # an unarmed access gate — at least they can still open the site
+        # and see the error banner.
+        sys_log(
+            "server_config_load_failed_at_startup", level="error",
+            source="server",
+            error=f"{type(e).__name__}: {e}"[:200],
+            traceback_tail="".join(
+                traceback.format_exception(type(e), e, e.__traceback__)
+            )[-800:],
+        )
+        logger.exception("Failed to load config at startup; access gate disabled.")
         optional_access_code = ""
-    configure_access_gate(app, optional_access_code, root=ROOT)
 
-    _setup_scheduler()
-    logger.info(
-        "Scheduler started: daily pulls at %s (%s)",
-        ", ".join(f"{h:02d}:00" for h in PULL_HOURS),
-        SCHEDULER_TZ,
-    )
+    try:
+        configure_access_gate(app, optional_access_code, root=ROOT)
+    except Exception as e:
+        # Access gate wiring failure leaves the app without auth. Log
+        # and re-raise — this one IS fatal because a publicly-reachable
+        # dashboard without an access gate is worse than a dead dashboard.
+        sys_log(
+            "access_gate_configure_failed", level="error", source="server",
+            error=f"{type(e).__name__}: {e}"[:200],
+            traceback_tail="".join(
+                traceback.format_exception(type(e), e, e.__traceback__)
+            )[-800:],
+        )
+        raise
+
+    try:
+        _setup_scheduler()
+    except Exception as e:
+        # Scheduler-start failure means no automatic pulls will fire.
+        # The web UI still works (manual pulls, viewing snapshots); log
+        # loudly and keep serving rather than crash the dashboard.
+        sys_log(
+            "scheduler_setup_failed", level="error", source="server",
+            error=f"{type(e).__name__}: {e}"[:200],
+            traceback_tail="".join(
+                traceback.format_exception(type(e), e, e.__traceback__)
+            )[-800:],
+        )
+        logger.exception("Scheduler failed to start; automatic pulls disabled.")
+    else:
+        logger.info(
+            "Scheduler started: daily pulls at %s (%s)",
+            ", ".join(f"{h:02d}:00" for h in PULL_HOURS),
+            SCHEDULER_TZ,
+        )
+
     sys_log(
         "server_startup",
         source="server",
@@ -958,7 +1136,16 @@ def main() -> None:
     # Don't use reloader — it spawns two processes and double-schedules jobs.
     # Bind to all interfaces — production access is gated by the optional
     # access-code middleware (see access_gate.py) when auth.optional_access_code is set.
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+    try:
+        app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+    except Exception as e:
+        # If `app.run` itself blows up (port already bound, etc.) we
+        # still want a dashboard trail even if nothing is listening.
+        sys_log(
+            "server_run_failed", level="error", source="server",
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+        raise
 
 
 if __name__ == "__main__":  # pragma: no cover

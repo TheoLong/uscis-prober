@@ -19,6 +19,21 @@ import server
 
 # -------- common fixtures ------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _redirect_system_log(monkeypatch, tmp_path):
+    """Redirect the real on-disk system log to a per-test tmp file.
+
+    Without this fixture, server tests that call `_run_pull_subprocess`,
+    `_send_notifications_for_new`, or any Flask route that writes a
+    structured event leak into `data/system_log.json` — corrupting local
+    dev state and contaminating later tests. This fixture is autouse, so
+    every test in this file gets isolation for free.
+    """
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "_syslog.json")
+    system_log.clear()
+
+
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     """Flask test client with data dir + config path redirected into tmp."""

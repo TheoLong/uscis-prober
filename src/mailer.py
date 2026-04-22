@@ -14,6 +14,7 @@ import smtplib
 from email.message import EmailMessage
 
 from providers import smtp_host_port
+from system_log import log as sys_log
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,16 @@ def send_email(
     plain: str,
     html: str,
 ) -> None:
+    """Build + send a multipart email via the mailbox's provider SMTP.
+
+    Every distinct failure stage (DNS, TLS handshake, auth, send) emits a
+    categorised `smtp_*` sys_log event before re-raising, so the caller
+    (typically `server._send_notifications_for_new`) sees only the
+    exception and we keep a dashboard-visible breadcrumb of which step
+    failed — valuable because an app-password being wrong looks nothing
+    like the DNS-can't-resolve-smtp.gmail.com case in a traceback but
+    the operator needs to react very differently.
+    """
     msg = EmailMessage()
     msg["From"] = uscis_mfa_email
     msg["To"] = to
@@ -220,14 +231,67 @@ def send_email(
 
     host, port = smtp_host_port(uscis_mfa_email)
     logger.info("SMTP %s → %s : %s", host, to, subject)
-    with smtplib.SMTP(host, port, timeout=30) as smtp:
-        smtp.ehlo()
-        smtp.starttls()
-        # RFC 3207 §4: re-issue EHLO after the TLS handshake because the
-        # server's capability list can change over the encrypted channel.
-        smtp.ehlo()
-        smtp.login(uscis_mfa_email, uscis_mfa_app_password)
-        smtp.send_message(msg)
+
+    try:
+        smtp = smtplib.SMTP(host, port, timeout=30)
+    except Exception as e:
+        sys_log(
+            "smtp_connect_failed", level="error", source="mailer",
+            host=host, port=port, to=to,
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+        raise
+
+    try:
+        try:
+            smtp.ehlo()
+            smtp.starttls()
+            # RFC 3207 §4: re-issue EHLO after the TLS handshake because
+            # the server's capability list can change over the encrypted
+            # channel.
+            smtp.ehlo()
+        except Exception as e:
+            sys_log(
+                "smtp_tls_failed", level="error", source="mailer",
+                host=host, port=port,
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+            raise
+        try:
+            smtp.login(uscis_mfa_email, uscis_mfa_app_password)
+        except smtplib.SMTPAuthenticationError as e:
+            # Auth errors are the single most common real-world SMTP
+            # failure — categorise them separately so the dashboard can
+            # surface "your app password is wrong" instead of a generic
+            # SMTPException.
+            sys_log(
+                "smtp_auth_failed", level="error", source="mailer",
+                host=host, port=port, user=uscis_mfa_email,
+                smtp_code=getattr(e, "smtp_code", None),
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+            raise
+        except Exception as e:
+            sys_log(
+                "smtp_login_failed", level="error", source="mailer",
+                host=host, port=port, user=uscis_mfa_email,
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+            raise
+        try:
+            smtp.send_message(msg)
+        except Exception as e:
+            sys_log(
+                "smtp_send_failed", level="error", source="mailer",
+                host=host, port=port, to=to,
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+            raise
+    finally:
+        try:
+            smtp.quit()
+        except Exception:  # pragma: no cover — teardown best-effort
+            pass
 
 
 def notify_update(

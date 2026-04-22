@@ -227,3 +227,95 @@ def test_describe_notice_without_appointment():
     assert "Receipt" in desc
     assert "X1" in desc
     assert "appt" not in desc
+
+
+# =========================================================================
+# SMTP failure path instrumentation — every stage emits a categorised event
+# so the dashboard can distinguish DNS / TLS / auth / send failures.
+# =========================================================================
+
+import pytest
+import system_log
+
+
+@pytest.fixture(autouse=True)
+def _redirect_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "_syslog.json")
+    system_log.clear()
+
+
+def _send_args(**override):
+    base = {
+        "uscis_mfa_email": "u@gmail.com",
+        "uscis_mfa_app_password": "pw",
+        "to": "to@example.com",
+        "subject": "hi",
+        "plain": "hello",
+        "html": "<p>hello</p>",
+    }
+    base.update(override)
+    return base
+
+
+def test_send_email_connect_failure_emits_smtp_connect_failed(monkeypatch):
+    import mailer
+    def _boom(*a, **k):
+        raise OSError("Name or service not known")
+    monkeypatch.setattr(mailer.smtplib, "SMTP", _boom)
+    with pytest.raises(OSError):
+        mailer.send_email(**_send_args())
+    events = [e for e in system_log.read_all() if e["event"] == "smtp_connect_failed"]
+    assert len(events) == 1
+    assert events[0]["level"] == "error"
+    assert "Name or service not known" in events[0]["error"]
+
+
+def test_send_email_tls_failure_emits_smtp_tls_failed(monkeypatch):
+    import mailer
+    from unittest.mock import MagicMock
+    smtp = MagicMock()
+    smtp.starttls.side_effect = mailer.smtplib.SMTPException("tls broke")
+    monkeypatch.setattr(mailer.smtplib, "SMTP", lambda *a, **k: smtp)
+    with pytest.raises(mailer.smtplib.SMTPException):
+        mailer.send_email(**_send_args())
+    events = [e for e in system_log.read_all() if e["event"] == "smtp_tls_failed"]
+    assert len(events) == 1
+
+
+def test_send_email_auth_failure_emits_smtp_auth_failed(monkeypatch):
+    import mailer
+    from unittest.mock import MagicMock
+    smtp = MagicMock()
+    smtp.login.side_effect = mailer.smtplib.SMTPAuthenticationError(
+        535, b"Username and Password not accepted"
+    )
+    monkeypatch.setattr(mailer.smtplib, "SMTP", lambda *a, **k: smtp)
+    with pytest.raises(mailer.smtplib.SMTPAuthenticationError):
+        mailer.send_email(**_send_args())
+    events = [e for e in system_log.read_all() if e["event"] == "smtp_auth_failed"]
+    assert len(events) == 1
+    assert events[0]["smtp_code"] == 535
+
+
+def test_send_email_send_failure_emits_smtp_send_failed(monkeypatch):
+    import mailer
+    from unittest.mock import MagicMock
+    smtp = MagicMock()
+    smtp.send_message.side_effect = mailer.smtplib.SMTPDataError(
+        451, b"4.3.0 Temporary error"
+    )
+    monkeypatch.setattr(mailer.smtplib, "SMTP", lambda *a, **k: smtp)
+    with pytest.raises(mailer.smtplib.SMTPDataError):
+        mailer.send_email(**_send_args())
+    events = [e for e in system_log.read_all() if e["event"] == "smtp_send_failed"]
+    assert len(events) == 1
+
+
+def test_send_email_success_emits_nothing_on_log(monkeypatch):
+    # Happy path shouldn't produce any smtp_* events — silence is success.
+    import mailer
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(mailer.smtplib, "SMTP", lambda *a, **k: MagicMock())
+    mailer.send_email(**_send_args())
+    events = [e for e in system_log.read_all() if e["event"].startswith("smtp_")]
+    assert events == []

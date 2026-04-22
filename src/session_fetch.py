@@ -592,12 +592,30 @@ def cmd_extract(args) -> int:
             logger.error("%s", e)
             rc = 1
         finally:
+            # Persist whatever session state we ended up with. A failure
+            # here is non-fatal (we'll just re-authenticate next run),
+            # but the operator needs a breadcrumb to distinguish "I
+            # logged in but now my session doesn't persist across runs"
+            # from the other ways that login can fail.
             try:
                 context.storage_state(path=str(STORAGE_STATE_PATH))
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 — best-effort persist
+                sys_log(
+                    "storage_state_persist_failed", level="warning",
+                    source="session_fetch",
+                    cmd="extract",
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
             _hold_browser_open(args)
-            browser.close()
+            try:
+                browser.close()
+            except Exception as e:  # noqa: BLE001 — teardown must never raise
+                sys_log(
+                    "browser_close_failed", level="warning",
+                    source="session_fetch",
+                    cmd="extract",
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
 
     if rc:
         return rc

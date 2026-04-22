@@ -693,12 +693,13 @@ const SYSTEMLOG_EVENT_INFO = {
   notify_failed:               { tone: "bad",   label: "Notification failed" },
   notify_dispatcher_crashed:   { tone: "bad",   label: "Notification dispatcher crashed" },
 
-  // session_fetch CLI lifecycle
-  cli_run_start:               { tone: "info",  label: "session_fetch: run start" },
-  cli_run_finished:            { tone: "ok",    label: "session_fetch: run finished" },
-  cli_run_no_cases:            { tone: "bad",   label: "session_fetch: no cases configured" },
+  // session-fetch CLI lifecycle
+  cli_run_start:               { tone: "info",  label: "CLI run start" },
+  cli_run_finished:            { tone: "ok",    label: "CLI run finished" },
+  cli_run_no_cases:            { tone: "bad",   label: "CLI run — no cases configured" },
   cli_run_session_expired_retry: { tone: "warn", label: "Session expired — retrying" },
   cli_run_session_expired_twice: { tone: "bad", label: "Session expired twice — giving up" },
+  cli_uncaught_exception:      { tone: "bad",   label: "CLI uncaught exception" },
 
   // Case-API events (paired with location-API events below — same tones)
   case_fetch_start:            { tone: "info",  label: "Case fetch start" },
@@ -722,11 +723,17 @@ const SYSTEMLOG_EVENT_INFO = {
 function _eventInfo(entry) {
   const known = SYSTEMLOG_EVENT_INFO[entry.event];
   if (known) return known;
-  // Unknown event — fall back on the entry's own level.
-  const tone = entry.level === "error" ? "bad"
-    : entry.level === "warning" ? "warn"
-    : "info";
-  return { tone, label: entry.event };
+  // Fallback: humanize `snake_case_event_names` into "Snake case event names"
+  // so unknown events still read as a category in the pill instead of a
+  // debug-style identifier. The SYSTEMLOG_EVENT_INFO table is a curated
+  // override for events we want to wordsmith; this default keeps new ones
+  // legible without having to be cataloged first.
+  const tone = _toneForLevel(entry.level);
+  const raw = entry.event || "?";
+  const label = raw
+    .replace(/_/g, " ")
+    .replace(/^./, c => c.toUpperCase());
+  return { tone, label };
 }
 
 function renderSystemLog() {
@@ -1003,8 +1010,12 @@ function _renderFlatSystemLogRow(entry) {
       `</div>`;
   }
 
+  // `.syslog-disclosure-spacer` is an invisible placeholder that reserves
+  // the same width as the real disclosure triangle on nested entries, so
+  // the pill column lines up flat-vs-nested without needing grid layout.
   block.innerHTML =
     `<div class="syslog-head">` +
+      `<span class="syslog-disclosure-spacer" aria-hidden="true"></span>` +
       `<span class="kind-tag kind-${info.tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
       `<span class="syslog-ts">${escapeHtml(when)}</span>` +
@@ -1020,8 +1031,24 @@ function _renderNestedSystemLogRow(entry) {
   // and every nested step, so a pull that looks info-level but contains
   // an error step still visibly surfaces as red at a glance.
   const topLevel = _worstLevelAcross([entry, ...entry.steps]);
-  const tone = _toneForLevel(topLevel);
-  const info = { tone, label: topLevel };
+  // A pull that completed CLEANLY — no errors, no warnings, exit 0, not
+  // timed out — gets the green "ok" tone so the operator can distinguish
+  // "the pull happened and everything worked" from a merely informational
+  // row like `server_startup`. Anything with a warn/error step, a non-zero
+  // exit, or a timeout falls through the standard severity map.
+  const isCleanCompletedPull = (
+    entry.event === "pull"
+    && topLevel === "info"
+    && (entry.exit_code === 0)
+    && !entry.timed_out
+  );
+  const tone = isCleanCompletedPull ? "ok" : _toneForLevel(topLevel);
+  // The pill's label is the event's descriptive name ("Pull"), not the
+  // raw level ("info"). The tone conveys severity; the label conveys
+  // category. This keeps the pill consistent with flat rows, which also
+  // show a descriptive label (e.g. "Server started").
+  const eventInfo = _eventInfo(entry);
+  const info = { tone, label: eventInfo.label || entry.event };
 
   const block = document.createElement("div");
   block.className = `change-block syslog-block syslog-${tone} syslog-nested`;

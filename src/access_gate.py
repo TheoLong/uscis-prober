@@ -25,6 +25,8 @@ from pathlib import Path
 from threading import Lock
 from urllib.parse import quote
 
+from system_log import log as sys_log
+
 from flask import (
     Flask,
     Response,
@@ -100,6 +102,12 @@ def _load_or_create_secret(root: Path, optional_access_code: str) -> bytes:
     """Load (or create) a 32-byte secret key bound to the current access code.
 
     If the code changes, the file is rewritten → old cookies invalidate.
+
+    Every distinct failure mode (corrupt file, chmod rejected, write
+    refused) emits a `flask_secret_*` sys_log event so the operator can
+    tell "I can't load the key because the file is corrupt" from "I
+    can't write a new key because the data dir is read-only" — both
+    silently drop into the same `except` today without a log.
     """
     secret_file = root / ".flask_secret"
     fp = _fingerprint(optional_access_code)
@@ -109,15 +117,37 @@ def _load_or_create_secret(root: Path, optional_access_code: str) -> bytes:
             stored_fp, _, key = raw.partition(b"\n")
             if stored_fp.decode("ascii", errors="replace") == fp and key:
                 return key
-        except Exception:
-            pass
-    key = secrets.token_bytes(32)
-    secret_file.write_bytes(fp.encode("ascii") + b"\n" + key)
+            # Fingerprint mismatch → access code changed; fall through
+            # to regenerate. That's expected, not an error.
+        except Exception as e:  # noqa: BLE001 — could be OS or decode
+            sys_log(
+                "flask_secret_read_failed", level="warning",
+                source="access_gate", path=str(secret_file),
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+            # fall through to regenerate below
+    try:
+        new_key = secrets.token_bytes(32)
+        secret_file.write_bytes(fp.encode("ascii") + b"\n" + new_key)
+    except Exception as e:  # noqa: BLE001 — disk-full, perms, etc.
+        sys_log(
+            "flask_secret_write_failed", level="error",
+            source="access_gate", path=str(secret_file),
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+        # Fall back to an in-memory key so the server still boots; the
+        # operator will see the event and know cookies won't survive a
+        # restart until they fix the disk.
+        return secrets.token_bytes(32)
     try:
         secret_file.chmod(0o600)
-    except OSError:
-        pass
-    return key
+    except OSError as e:
+        sys_log(
+            "flask_secret_chmod_failed", level="warning",
+            source="access_gate", path=str(secret_file),
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+    return new_key
 
 
 # ---------------------------------------------------------------------------

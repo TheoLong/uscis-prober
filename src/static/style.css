@@ -496,7 +496,10 @@ main[hidden] { display: none; }
    strip so the default view stays compact; clicking expands the sub-log
    with one indented line per step. */
 
-.syslog-nested {
+/* Nested envelopes need higher specificity than the plain `.syslog-block`
+   rule — otherwise the shorthand `padding: 10px 14px` wins the cascade tie
+   and the pill column drifts 14px rightward relative to flat rows. */
+.syslog-block.syslog-nested {
   padding: 0;          /* head + body handle their own padding */
   overflow: hidden;    /* keep the rounded corners when children paint */
 }
@@ -518,11 +521,16 @@ main[hidden] { display: none; }
 .syslog-head-expandable:hover {
   background: var(--pill-bg);
 }
-.syslog-disclosure {
+.syslog-disclosure,
+.syslog-disclosure-spacer {
   font-size: 0.7rem;
   color: var(--muted);
   width: 10px;
   display: inline-block;
+  flex-shrink: 0;
+}
+.syslog-disclosure-spacer {
+  visibility: hidden;   /* reserves width only; no glyph */
 }
 .syslog-event-envelope {
   font-weight: 600;
