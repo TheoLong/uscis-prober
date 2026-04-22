@@ -13,7 +13,13 @@ The session persists in `.uscis_session.json` (gitignored). A typical run:
   2. Probe the API first. If it works, we never enter the login flow.
   3. If the API is rejecting the session, re-authenticate exactly once and retry.
 
-Daily snapshots are appended to `data/{formNum}_case.json` as
+Daily snapshots are written to two sibling files per case:
+  - `data/{formNum}_case.json`     — response from the case endpoint
+                                     `/account/case-service/api/cases/{id}`
+  - `data/{formNum}_location.json` — response from the location endpoint
+                                     `/secure-messaging/api/case-service/
+                                     receipt_info/{id}`
+Both files share the same row shape:
 `{ "capturedAt": "YYYY-MM-DDTHH:MM:SSZ", "data": <full API response> }`.
 Each run's timestamp is second-precision ISO-8601 UTC; the diff engine
 slices to the date when it needs day-level grouping.
@@ -128,7 +134,12 @@ def load_auth(
     return {k: auth[k] for k in required}
 
 
-def log_file_for(form_type: str) -> Path:
+def case_log_file_for(form_type: str) -> Path:
+    """Path to the case-API snapshot log for a form type (I-485 → 485_case.json).
+
+    Paired with `location_log_file_for` — the two APIs live in sibling
+    files so their histories and diffs stay independent.
+    """
     m = _FORM_NUM_RE.search(form_type or "")
     if not m:
         raise ValueError(f"Unrecognized form type: {form_type!r}")
@@ -136,11 +147,11 @@ def log_file_for(form_type: str) -> Path:
 
 
 def location_log_file_for(form_type: str) -> Path:
-    """Location snapshots live in a sibling file: `{num}_location.json`.
+    """Path to the location-API snapshot log for a form type (I-485 → 485_location.json).
 
-    Separated from the main case log so the two endpoints can evolve
-    independently and the Raw-JSON panel can show them as distinct tabs
-    without having to demux a merged payload.
+    Mirror of `case_log_file_for`. Separate file so the two endpoints can
+    evolve independently and the Raw-JSON panel can show them as distinct
+    sub-tabs without having to demux a merged payload.
     """
     m = _FORM_NUM_RE.search(form_type or "")
     if not m:
@@ -185,16 +196,20 @@ def _append_to_log_file(path: Path, entry: dict) -> Path:
     return path
 
 
-def append_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
+def append_case_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
     """Append a case-API snapshot entry. Never replaces — multiple runs per
     day each get their own row keyed by the full ISO-8601 timestamp in
     `capturedAt`.
+
+    Mirror of `append_location_snapshot`. The two helpers are deliberately
+    parallel so the call sites read as "fetch case → append case snapshot;
+    fetch location → append location snapshot" with zero asymmetry.
 
     Emits sys_log events when an existing log file is malformed, so a
     silent "start fresh" never happens without a trace.
     """
     return _append_to_log_file(
-        log_file_for(form_type),
+        case_log_file_for(form_type),
         {"capturedAt": captured_at, "data": data},
     )
 
@@ -267,16 +282,16 @@ def _extract_cases(
         )
 
         try:
-            path = append_snapshot(form_type, payload, captured_at)
+            path = append_case_snapshot(form_type, payload, captured_at)
         except ValueError as e:
-            logger.error("  ✗ cannot determine log file: %s", e)
+            logger.error("  ✗ cannot determine case log file: %s", e)
             failures += 1
-            sys_log("snapshot_append_failed", level="error",
+            sys_log("case_snapshot_append_failed", level="error",
                     source="session_fetch", label=label or "?",
                     receipt=receipt, error=str(e))
             continue
         logger.info("  → %s", path.relative_to(ROOT))
-        sys_log("snapshot_appended", source="session_fetch",
+        sys_log("case_snapshot_appended", source="session_fetch",
                 label=label or "?", receipt=receipt,
                 form_type=form_type, file=path.name)
 

@@ -670,28 +670,53 @@ function describeItem(kind, obj) {
 
 // Well-known events and their visual tone. Any event not listed falls
 // through to "info" (or "error"/"warning" if the entry carries that level).
+// Well-known events and their visual tone. Paired case/location events
+// deliberately share the same tone so the operator sees them as a matching
+// family in the expanded pull row — "case snapshot appended" (ok) should
+// look identical to "location snapshot appended" (ok), etc.
 const SYSTEMLOG_EVENT_INFO = {
+  // Top-level envelope + server lifecycle
+  pull:                        { tone: "info",  label: "Pull" },
   server_startup:              { tone: "info",  label: "Server started" },
   scheduler_configured:        { tone: "info",  label: "Scheduler configured" },
-  pull_triggered_manually:     { tone: "info",  label: "Pull triggered (manual)" },
-  pull_started:                { tone: "info",  label: "Pull started" },
-  pull_finished:               { tone: "ok",    label: "Pull finished" },
-  pull_failed:                 { tone: "bad",   label: "Pull failed" },
-  pull_timeout:                { tone: "bad",   label: "Pull timed out" },
-  pull_crashed:                { tone: "bad",   label: "Pull crashed" },
   pull_skipped_already_running:{ tone: "warn",  label: "Pull skipped (already running)" },
+  system_log_cleared:          { tone: "warn",  label: "System log cleared" },
+
+  // Subprocess lifecycle wrapping the pull
+  subprocess_exit_nonzero:     { tone: "bad",   label: "Subprocess exit non-zero" },
+  subprocess_timeout:          { tone: "bad",   label: "Subprocess timeout" },
+  subprocess_crashed:          { tone: "bad",   label: "Subprocess crashed" },
+
+  // Notifications (step-only after the log-consolidation refactor)
   notify_sent:                 { tone: "ok",    label: "Notification sent" },
   notify_skipped:              { tone: "warn",  label: "Notification skipped" },
   notify_failed:               { tone: "bad",   label: "Notification failed" },
   notify_dispatcher_crashed:   { tone: "bad",   label: "Notification dispatcher crashed" },
+
+  // session_fetch CLI lifecycle
   cli_run_start:               { tone: "info",  label: "session_fetch: run start" },
   cli_run_finished:            { tone: "ok",    label: "session_fetch: run finished" },
   cli_run_no_cases:            { tone: "bad",   label: "session_fetch: no cases configured" },
+  cli_run_session_expired_retry: { tone: "warn", label: "Session expired — retrying" },
+  cli_run_session_expired_twice: { tone: "bad", label: "Session expired twice — giving up" },
+
+  // Case-API events (paired with location-API events below — same tones)
   case_fetch_start:            { tone: "info",  label: "Case fetch start" },
   case_fetch_api_error:        { tone: "bad",   label: "Case fetch API error" },
   case_fetch_session_expired:  { tone: "warn",  label: "Case fetch session expired" },
-  snapshot_appended:           { tone: "ok",    label: "Snapshot appended" },
-  snapshot_append_failed:      { tone: "bad",   label: "Snapshot append failed" },
+  case_snapshot_appended:      { tone: "ok",    label: "Case snapshot appended" },
+  case_snapshot_append_failed: { tone: "bad",   label: "Case snapshot append failed" },
+
+  // Location-API events (mirror of the case-API events above)
+  location_fetch_failed:       { tone: "warn",  label: "Location fetch failed" },
+  location_fetch_session_expired: { tone: "warn", label: "Location fetch session expired" },
+  location_snapshot_appended:  { tone: "ok",    label: "Location snapshot appended" },
+  location_snapshot_append_failed: { tone: "warn", label: "Location snapshot append failed" },
+  location_post_fetch_rewarm_failed: { tone: "warn", label: "Location post-fetch dashboard rewarm failed" },
+
+  // Generic, used by both case + location paths via _append_to_log_file
+  snapshot_log_not_array:      { tone: "warn",  label: "Snapshot log wasn't an array" },
+  snapshot_log_invalid_json:   { tone: "warn",  label: "Snapshot log was malformed JSON" },
 };
 
 function _eventInfo(entry) {
@@ -939,15 +964,33 @@ function openClearLogDialog() {
   requestAnimationFrame(() => confirmBtn.focus());
 }
 
+// Skeleton fields present on every entry. These are rendered via the
+// header (not the kv detail list).
+const _SYSLOG_SKELETON = new Set(["ts", "event", "level", "pid", "source"]);
+
+// Envelope-only fields that belong in the collapsed top row of a nested
+// entry (pull, etc.), not repeated in the kv detail block.
+const _SYSLOG_ENVELOPE_EXTRA = new Set([
+  "trigger", "duration_seconds", "exit_code", "timed_out",
+  "started_at", "finished_at", "summary", "steps",
+]);
+
 function renderSystemLogRow(entry) {
+  // Nested envelopes (currently: `pull`) have a `steps` array. These get
+  // a disclosure triangle and an indented sub-log below.  Flat entries
+  // fall through to the original single-row layout.
+  if (Array.isArray(entry.steps) && entry.steps.length > 0) {
+    return _renderNestedSystemLogRow(entry);
+  }
+  return _renderFlatSystemLogRow(entry);
+}
+
+function _renderFlatSystemLogRow(entry) {
   const info = _eventInfo(entry);
   const block = document.createElement("div");
   block.className = `change-block syslog-block syslog-${info.tone}`;
 
-  // Detail fields = everything that isn't the skeleton (ts, event, level, pid, source).
-  const skeleton = new Set(["ts", "event", "level", "pid", "source"]);
-  const detailKeys = Object.keys(entry).filter(k => !skeleton.has(k));
-
+  const detailKeys = Object.keys(entry).filter(k => !_SYSLOG_SKELETON.has(k));
   const when = formatLocalDateTime(new Date(entry.ts), { withSeconds: true });
   const sourceTag = entry.source
     ? `<span class="syslog-source">${escapeHtml(entry.source)}</span>`
@@ -956,16 +999,7 @@ function renderSystemLogRow(entry) {
   let detailsHtml = "";
   if (detailKeys.length) {
     detailsHtml = `<div class="syslog-details">` +
-      detailKeys.map(k => {
-        const v = entry[k];
-        const shown = typeof v === "object" ? JSON.stringify(v) : String(v);
-        return (
-          `<div class="syslog-detail">` +
-            `<span class="syslog-detail-k">${escapeHtml(k)}</span>` +
-            `<span class="syslog-detail-v">${escapeHtml(shown)}</span>` +
-          `</div>`
-        );
-      }).join("") +
+      detailKeys.map(k => _detailKvHtml(k, entry[k])).join("") +
       `</div>`;
   }
 
@@ -979,6 +1013,157 @@ function renderSystemLogRow(entry) {
     detailsHtml;
 
   return block;
+}
+
+function _renderNestedSystemLogRow(entry) {
+  // Top-level tone takes the worst severity between the envelope itself
+  // and every nested step, so a pull that looks info-level but contains
+  // an error step still visibly surfaces as red at a glance.
+  const topLevel = _worstLevelAcross([entry, ...entry.steps]);
+  const tone = _toneForLevel(topLevel);
+  const info = { tone, label: topLevel };
+
+  const block = document.createElement("div");
+  block.className = `change-block syslog-block syslog-${tone} syslog-nested`;
+
+  const when = formatLocalDateTime(new Date(entry.ts), { withSeconds: true });
+  const sourceTag = entry.source
+    ? `<span class="syslog-source">${escapeHtml(entry.source)}</span>`
+    : "";
+
+  // A compact summary strip so the collapsed row answers "did this pull
+  // succeed, how long did it take, did anything new happen?" at a glance.
+  const summary = entry.summary || {};
+  const bits = [];
+  if (entry.trigger) bits.push(entry.trigger);
+  if (typeof entry.duration_seconds === "number")
+    bits.push(`${entry.duration_seconds}s`);
+  // "case" and "location" snapshot counters are rendered as a paired
+  // pair (`3 case · 3 location`) when both are present, so the summary
+  // visibly balances the two APIs instead of treating one as primary.
+  if (typeof summary.case_snapshots === "number")
+    bits.push(`${summary.case_snapshots} case`);
+  if (typeof summary.location_snapshots === "number")
+    bits.push(`${summary.location_snapshots} location`);
+  if (summary.new_diffs_emailed)
+    bits.push(`${summary.new_diffs_emailed} email${summary.new_diffs_emailed === 1 ? "" : "s"}`);
+  if (summary.case_fetch_failures)
+    bits.push(`${summary.case_fetch_failures} case-fail`);
+  if (summary.location_fetch_failures)
+    bits.push(`${summary.location_fetch_failures} location-fail`);
+  if (summary.notify_failures)
+    bits.push(`${summary.notify_failures} email-fail`);
+  if (entry.timed_out) bits.push("timed out");
+  if (entry.exit_code && entry.exit_code !== 0) bits.push(`exit ${entry.exit_code}`);
+  bits.push(`${entry.steps.length} step${entry.steps.length === 1 ? "" : "s"}`);
+
+  const summaryLine = bits.length
+    ? `<span class="syslog-summary">${escapeHtml(bits.join(" · "))}</span>`
+    : "";
+
+  // Envelope-level fields the summary didn't already surface (e.g. started_at,
+  // finished_at) render as a normal kv strip above the steps.
+  const envelopeKvKeys = Object.keys(entry).filter(k =>
+    !_SYSLOG_SKELETON.has(k) && !_SYSLOG_ENVELOPE_EXTRA.has(k),
+  );
+  const envelopeKvHtml = envelopeKvKeys.length
+    ? `<div class="syslog-details syslog-envelope-kv">` +
+      envelopeKvKeys.map(k => _detailKvHtml(k, entry[k])).join("") +
+      `</div>`
+    : "";
+
+  // Disclosure: toggled by clicking the header. Default collapsed — a
+  // pull with 17 steps would otherwise swamp the feed when paged through.
+  const disclosureId = `syslog-steps-${Math.random().toString(36).slice(2, 8)}`;
+
+  block.innerHTML =
+    `<button type="button" class="syslog-head syslog-head-expandable"` +
+        ` aria-expanded="false" aria-controls="${disclosureId}">` +
+      `<span class="syslog-disclosure" aria-hidden="true">▶</span>` +
+      `<span class="kind-tag kind-${tone}">${escapeHtml(info.label)}</span>` +
+      sourceTag +
+      `<span class="syslog-ts">${escapeHtml(when)}</span>` +
+      `<span class="syslog-event syslog-event-envelope">${escapeHtml(entry.event)}</span>` +
+      summaryLine +
+    `</button>` +
+    envelopeKvHtml +
+    `<div class="syslog-steps" id="${disclosureId}" hidden></div>`;
+
+  // Populate the expandable body lazily — cheap, but keeps the first
+  // paint light for pages with many nested rows.
+  const stepsContainer = block.querySelector(".syslog-steps");
+  for (const step of entry.steps) {
+    stepsContainer.appendChild(_renderNestedStepRow(step));
+  }
+
+  // Wire the disclosure toggle.
+  const headBtn = block.querySelector(".syslog-head-expandable");
+  const triangle = block.querySelector(".syslog-disclosure");
+  headBtn.addEventListener("click", () => {
+    const isOpen = !stepsContainer.hidden;
+    stepsContainer.hidden = isOpen;
+    headBtn.setAttribute("aria-expanded", String(!isOpen));
+    triangle.textContent = isOpen ? "▶" : "▼";
+  });
+
+  return block;
+}
+
+function _renderNestedStepRow(step) {
+  const info = _eventInfo(step);
+  const row = document.createElement("div");
+  row.className = `syslog-step syslog-${info.tone}`;
+
+  const when = step.ts
+    ? formatLocalDateTime(new Date(step.ts), { withSeconds: true })
+    : "";
+  const sourceTag = step.source
+    ? `<span class="syslog-source">${escapeHtml(step.source)}</span>`
+    : "";
+
+  const detailKeys = Object.keys(step).filter(k => !_SYSLOG_SKELETON.has(k));
+  const detailsHtml = detailKeys.length
+    ? `<div class="syslog-details syslog-step-details">` +
+      detailKeys.map(k => _detailKvHtml(k, step[k])).join("") +
+      `</div>`
+    : "";
+
+  row.innerHTML =
+    `<div class="syslog-step-head">` +
+      `<span class="kind-tag kind-${info.tone}">${escapeHtml(info.label)}</span>` +
+      sourceTag +
+      (when ? `<span class="syslog-ts">${escapeHtml(when)}</span>` : "") +
+      `<span class="syslog-event">${escapeHtml(step.event || "?")}</span>` +
+    `</div>` +
+    detailsHtml;
+  return row;
+}
+
+// Single renderer for a kv pair — used by both flat rows and nested steps.
+function _detailKvHtml(k, v) {
+  const shown = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+  return (
+    `<div class="syslog-detail">` +
+      `<span class="syslog-detail-k">${escapeHtml(k)}</span>` +
+      `<span class="syslog-detail-v">${escapeHtml(shown)}</span>` +
+    `</div>`
+  );
+}
+
+function _worstLevelAcross(items) {
+  const order = { error: 3, warning: 2, warn: 2, info: 1 };
+  let worst = "info";
+  for (const it of items) {
+    const lvl = (it && it.level) || "info";
+    if ((order[lvl] || 0) > (order[worst] || 0)) worst = lvl;
+  }
+  return worst === "warn" ? "warning" : worst;
+}
+
+function _toneForLevel(level) {
+  if (level === "error") return "bad";
+  if (level === "warning" || level === "warn") return "warn";
+  return "info";
 }
 
 function renderUpdates() {

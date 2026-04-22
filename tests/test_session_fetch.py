@@ -20,14 +20,14 @@ from session_fetch import (
     _hold_browser_open,
     _now_iso_utc,
     append_location_snapshot,
-    append_snapshot,
+    append_case_snapshot,
     cmd_extract,
     cmd_login,
     cmd_run,
     load_auth,
     load_config,
     location_log_file_for,
-    log_file_for,
+    case_log_file_for,
     main,
 )
 
@@ -43,15 +43,15 @@ def test_now_iso_utc_is_z_suffixed_and_second_precision():
     assert len(s) == 20
 
 
-def test_log_file_for_parses_form_number():
-    assert log_file_for("I-485").name == "485_case.json"
-    assert log_file_for("I485").name == "485_case.json"
-    assert log_file_for("Form I-131").name == "131_case.json"
+def test_case_log_file_for_parses_form_number():
+    assert case_log_file_for("I-485").name == "485_case.json"
+    assert case_log_file_for("I485").name == "485_case.json"
+    assert case_log_file_for("Form I-131").name == "131_case.json"
 
 
-def test_log_file_for_raises_on_unrecognized_form():
+def test_case_log_file_for_raises_on_unrecognized_form():
     with pytest.raises(ValueError):
-        log_file_for("bogus")
+        case_log_file_for("bogus")
 
 
 def test_location_log_file_for_uses_sibling_suffix():
@@ -108,27 +108,27 @@ def test_load_auth_reads_config_when_none_passed(tmp_path, monkeypatch):
     assert result["uscis_email"] == "e"
 
 
-# -------- append_snapshot ----------------------------------------------
+# -------- append_case_snapshot ----------------------------------------------
 
-def test_append_snapshot_creates_file_and_appends(tmp_path, monkeypatch):
+def test_append_case_snapshot_creates_file_and_appends(tmp_path, monkeypatch):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
-    path = append_snapshot("I-485", {"a": 1}, "2026-04-18T00:00:00Z")
+    path = append_case_snapshot("I-485", {"a": 1}, "2026-04-18T00:00:00Z")
     assert path.exists()
     data = json.loads(path.read_text())
     assert len(data) == 1
     assert data[0]["capturedAt"] == "2026-04-18T00:00:00Z"
 
     # Second append keeps the first.
-    append_snapshot("I-485", {"a": 2}, "2026-04-19T00:00:00Z")
+    append_case_snapshot("I-485", {"a": 2}, "2026-04-19T00:00:00Z")
     data = json.loads(path.read_text())
     assert len(data) == 2
 
 
-def test_append_snapshot_recovers_from_invalid_json(tmp_path, monkeypatch):
+def test_append_case_snapshot_recovers_from_invalid_json(tmp_path, monkeypatch):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
     p = tmp_path / "485_case.json"
     p.write_text("{broken json")
-    append_snapshot("I-485", {"ok": True}, "2026-04-18T00:00:00Z")
+    append_case_snapshot("I-485", {"ok": True}, "2026-04-18T00:00:00Z")
     data = json.loads(p.read_text())
     assert len(data) == 1
 
@@ -156,11 +156,11 @@ def test_append_location_snapshot_retains_null_payload(tmp_path, monkeypatch):
     assert rows[0]["data"] == {"data": None}
 
 
-def test_append_snapshot_recovers_from_non_list_json(tmp_path, monkeypatch):
+def test_append_case_snapshot_recovers_from_non_list_json(tmp_path, monkeypatch):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
     p = tmp_path / "485_case.json"
     p.write_text('{"not": "a list"}')
-    append_snapshot("I-485", {"ok": True}, "2026-04-18T00:00:00Z")
+    append_case_snapshot("I-485", {"ok": True}, "2026-04-18T00:00:00Z")
     data = json.loads(p.read_text())
     assert isinstance(data, list)
     assert len(data) == 1
@@ -676,26 +676,26 @@ def test_load_auth_emits_missing_keys(syslog_to_tmp):
     assert "uscis_mfa_app_password" in missing
 
 
-def test_append_snapshot_emits_invalid_json_warning(
+def test_append_case_snapshot_emits_invalid_json_warning(
     tmp_path, monkeypatch, syslog_to_tmp,
 ):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
     log_file = tmp_path / "485_case.json"
     log_file.write_text("not { valid json")
-    session_fetch.append_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
+    session_fetch.append_case_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
     events = [e for e in syslog_to_tmp()
               if e["event"] == "snapshot_log_invalid_json"]
     assert len(events) == 1
     assert events[0]["file"] == "485_case.json"
 
 
-def test_append_snapshot_emits_not_array_warning(
+def test_append_case_snapshot_emits_not_array_warning(
     tmp_path, monkeypatch, syslog_to_tmp,
 ):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
     log_file = tmp_path / "485_case.json"
     log_file.write_text('{"this": "is an object, not a list"}')
-    session_fetch.append_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
+    session_fetch.append_case_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
     events = [e for e in syslog_to_tmp()
               if e["event"] == "snapshot_log_not_array"]
     assert len(events) == 1

@@ -118,64 +118,75 @@ def test_log_rotates_when_exceeding_max(monkeypatch):
 
 # -------- server-side integration: sys_log fires from the right places
 
-def test_run_pull_subprocess_logs_started_and_finished(monkeypatch, tmp_path):
-    import subprocess
+def _stub_server_config(monkeypatch, tmp_path, cases=None, auth=None):
     import server
-
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+    data_dir = tmp_path / "data"; data_dir.mkdir(exist_ok=True)
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
+    cfg_path.write_text(json.dumps({
+        "cases": cases if cases is not None else [],
+        "auth": auth or {},
+    }))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
+    return server
 
+
+# After the v2 refactor, one pull produces exactly one `pull` entry in the
+# system log, with all its internal steps attached as `steps[]`. The tests
+# below check both the top-level envelope (event, level, summary, trigger,
+# duration, exit_code) and the step stream inside.
+
+def test_run_pull_subprocess_emits_one_consolidated_entry_on_success(
+    monkeypatch, tmp_path,
+):
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
     from unittest.mock import MagicMock, patch
     proc = MagicMock(returncode=0, stdout="", stderr="")
     with patch.object(subprocess, "run", return_value=proc), \
-         patch.object(server, "_send_notifications_for_new"):
-        server._run_pull_subprocess()
+         patch.object(server, "_send_notifications_for_new", return_value=[]):
+        server._run_pull_subprocess(trigger="manual")
 
-    events = [e["event"] for e in system_log.read_all()]
-    assert "pull_started" in events
-    assert "pull_finished" in events
+    entries = system_log.read_all()
+    pull_entries = [e for e in entries if e["event"] == "pull"]
+    assert len(pull_entries) == 1, f"expected exactly 1 `pull` row, got {len(pull_entries)}"
+    pull = pull_entries[0]
+    assert pull["level"] == "info"
+    assert pull["trigger"] == "manual"
+    assert pull["exit_code"] == 0
+    assert pull["timed_out"] is False
+    assert "steps" in pull and isinstance(pull["steps"], list)
+    assert "summary" in pull and isinstance(pull["summary"], dict)
+    # Legacy events must NOT appear any more — the consolidated entry is it.
+    for legacy in ("pull_started", "pull_finished", "pull_triggered_manually",
+                   "pull_failed", "pull_timeout", "pull_crashed"):
+        assert legacy not in {e["event"] for e in entries}, \
+            f"legacy event {legacy!r} still being emitted"
 
 
-def test_run_pull_subprocess_logs_failure_on_nonzero_exit(monkeypatch, tmp_path):
+def test_run_pull_subprocess_nonzero_exit_flips_level_to_error(monkeypatch, tmp_path):
     import subprocess
-    import server
-
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
-    monkeypatch.setattr(server, "DATA_DIR", data_dir)
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    monkeypatch.setattr(server, "_pull_state", server.PullState())
-
+    server = _stub_server_config(monkeypatch, tmp_path)
     from unittest.mock import MagicMock, patch
-    proc = MagicMock(returncode=1, stdout="", stderr="Missing auth keys")
+    proc = MagicMock(returncode=1, stdout="", stderr="Missing auth keys\nother log line")
     with patch.object(subprocess, "run", return_value=proc):
-        server._run_pull_subprocess()
+        server._run_pull_subprocess(trigger="scheduled")
 
-    events = [e for e in system_log.read_all() if e["event"] == "pull_failed"]
-    assert len(events) == 1
-    assert events[0]["level"] == "error"
-    assert events[0]["exit_code"] == 1
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    assert pull["level"] == "error"
+    assert pull["exit_code"] == 1
+    assert pull["trigger"] == "scheduled"
+    # Non-zero exit appends a `subprocess_exit_nonzero` step with stderr tail.
+    subp_step = [s for s in pull["steps"] if s["event"] == "subprocess_exit_nonzero"]
+    assert len(subp_step) == 1
+    assert subp_step[0]["exit_code"] == 1
+    assert "Missing auth keys" in subp_step[0]["stderr_tail"][0]
 
 
-def test_run_pull_subprocess_logs_timeout(monkeypatch, tmp_path):
+def test_run_pull_subprocess_timeout_embeds_step(monkeypatch, tmp_path):
     import subprocess
-    import server
-
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
-    monkeypatch.setattr(server, "DATA_DIR", data_dir)
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    monkeypatch.setattr(server, "_pull_state", server.PullState())
-
+    server = _stub_server_config(monkeypatch, tmp_path)
     from unittest.mock import patch
     with patch.object(
         subprocess, "run",
@@ -183,53 +194,90 @@ def test_run_pull_subprocess_logs_timeout(monkeypatch, tmp_path):
     ):
         server._run_pull_subprocess()
 
-    timeouts = [e for e in system_log.read_all() if e["event"] == "pull_timeout"]
-    assert len(timeouts) == 1
-    assert timeouts[0]["level"] == "error"
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    assert pull["level"] == "error"
+    assert pull["timed_out"] is True
+    assert any(s["event"] == "subprocess_timeout" for s in pull["steps"])
 
 
-def test_run_pull_subprocess_logs_crash(monkeypatch, tmp_path):
+def test_run_pull_subprocess_crash_embeds_step(monkeypatch, tmp_path):
     import subprocess
-    import server
-
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
-    monkeypatch.setattr(server, "DATA_DIR", data_dir)
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    monkeypatch.setattr(server, "_pull_state", server.PullState())
-
+    server = _stub_server_config(monkeypatch, tmp_path)
     from unittest.mock import patch
     with patch.object(subprocess, "run", side_effect=RuntimeError("boom")):
         server._run_pull_subprocess()
 
-    crashes = [e for e in system_log.read_all() if e["event"] == "pull_crashed"]
-    assert len(crashes) == 1
-    assert crashes[0]["error"] == "boom"
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    assert pull["level"] == "error"
+    crash_steps = [s for s in pull["steps"] if s["event"] == "subprocess_crashed"]
+    assert len(crash_steps) == 1
+    assert crash_steps[0]["error"] == "boom"
 
 
 def test_run_pull_subprocess_logs_skip_when_already_running(monkeypatch, tmp_path):
     import server
     monkeypatch.setattr(server, "_pull_state", server.PullState(running=True))
-    server._run_pull_subprocess()
-    events = [e["event"] for e in system_log.read_all()]
-    assert "pull_skipped_already_running" in events
+    server._run_pull_subprocess(trigger="manual")
+    # Skip is still a standalone flat event — no subprocess ran, no steps
+    # to aggregate. This row is deliberately kept tiny for that reason.
+    events = [e for e in system_log.read_all()]
+    skip_rows = [e for e in events if e["event"] == "pull_skipped_already_running"]
+    assert len(skip_rows) == 1
+    assert skip_rows[0]["trigger"] == "manual"
+    # No `pull` envelope row for a skipped trigger.
+    assert not any(e["event"] == "pull" for e in events)
 
 
-def test_send_notifications_logs_skip_when_auth_missing(monkeypatch, tmp_path):
+def test_subprocess_steps_parsed_from_jsonl_stderr(monkeypatch, tmp_path):
+    # Child processes emit events as prefixed JSONL lines on stderr; the
+    # parent parses those into `steps[]`. This test drives that path end-
+    # to-end with a synthetic stderr stream — no real Playwright launch.
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+    synthetic_stderr = "\n".join([
+        "2026-04-22 22:25:01 INFO session_fetch: Fetching I-485 ...",   # python logging noise
+        f"{system_log._JSONL_PREFIX}"
+        + json.dumps({"ts": "2026-04-22T22:25:01Z", "event": "case_fetch_start",
+                      "level": "info", "source": "session_fetch",
+                      "label": "I-485", "receipt": "IOE1"}),
+        f"{system_log._JSONL_PREFIX}"
+        + json.dumps({"ts": "2026-04-22T22:25:02Z", "event": "case_snapshot_appended",
+                      "level": "info", "source": "session_fetch",
+                      "file": "485_case.json"}),
+    ])
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=0, stdout="", stderr=synthetic_stderr)
+    with patch.object(subprocess, "run", return_value=proc), \
+         patch.object(server, "_send_notifications_for_new", return_value=[]):
+        server._run_pull_subprocess()
+
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    step_events = [s["event"] for s in pull["steps"]]
+    assert "case_fetch_start" in step_events
+    assert "case_snapshot_appended" in step_events
+    # Summary derived from counting events in the step stream.
+    assert pull["summary"]["case_snapshots"] == 1
+    # Python-logging noise is NOT silently added as a step; only structured
+    # JSONL lines become steps.
+    assert all(s["event"] != "Fetching" for s in pull["steps"])
+
+
+def test_send_notifications_returns_skip_step_when_auth_missing(monkeypatch, tmp_path):
     import server
     cfg_path = tmp_path / "config.json"
     cfg_path.write_text(json.dumps({"auth": {}}))
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    server._send_notifications_for_new([{"id": "1", "kind": "event"}])
-    events = [e for e in system_log.read_all() if e["event"] == "notify_skipped"]
-    assert len(events) == 1
-    assert events[0]["reason"] == "auth_missing"
-    assert events[0]["count"] == 1
+    # The function now RETURNS step dicts instead of writing to system_log.
+    steps = server._send_notifications_for_new([{"id": "1", "kind": "event"}])
+    assert len(steps) == 1
+    assert steps[0]["event"] == "notify_skipped"
+    assert steps[0]["reason"] == "auth_missing"
+    assert steps[0]["count"] == 1
+    # Nothing written to the log as a side effect.
+    assert system_log.read_all() == []
 
 
-def test_send_notifications_logs_sent_per_record(monkeypatch, tmp_path):
+def test_send_notifications_returns_sent_step_per_record(monkeypatch, tmp_path):
     import server
     from unittest.mock import patch
     cfg_path = tmp_path / "config.json"
@@ -241,16 +289,17 @@ def test_send_notifications_logs_sent_per_record(monkeypatch, tmp_path):
     }))
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     with patch.object(server, "notify_update"):
-        server._send_notifications_for_new([
-            {"id": "IOE1:2026-03-10", "kind": "event"},
-            {"id": "IOE2:2026-03-10", "kind": "silent_update"},
+        steps = server._send_notifications_for_new([
+            {"id": "IOE1:case:2026-03-10", "kind": "event"},
+            {"id": "IOE2:case:2026-03-10", "kind": "silent_update"},
         ])
-    sent = [e for e in system_log.read_all() if e["event"] == "notify_sent"]
-    assert len(sent) == 2
-    assert {e["record_id"] for e in sent} == {"IOE1:2026-03-10", "IOE2:2026-03-10"}
+    assert {s["event"] for s in steps} == {"notify_sent"}
+    assert {s["record_id"] for s in steps} == {
+        "IOE1:case:2026-03-10", "IOE2:case:2026-03-10",
+    }
 
 
-def test_send_notifications_logs_per_record_failure(monkeypatch, tmp_path):
+def test_send_notifications_returns_failure_step_per_error(monkeypatch, tmp_path):
     import server
     from unittest.mock import patch
     cfg_path = tmp_path / "config.json"
@@ -262,11 +311,42 @@ def test_send_notifications_logs_per_record_failure(monkeypatch, tmp_path):
     }))
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     with patch.object(server, "notify_update", side_effect=RuntimeError("smtp down")):
-        server._send_notifications_for_new([{"id": "1", "kind": "event"}])
-    failed = [e for e in system_log.read_all() if e["event"] == "notify_failed"]
+        steps = server._send_notifications_for_new([{"id": "1", "kind": "event"}])
+    failed = [s for s in steps if s["event"] == "notify_failed"]
     assert len(failed) == 1
     assert failed[0]["level"] == "error"
     assert failed[0]["record_id"] == "1"
+
+
+def test_jsonl_stderr_mode_writes_to_stderr_not_file(
+    monkeypatch, tmp_path, capsys,
+):
+    # When USCIS_LOG_JSONL_STDERR=1, log() must write nothing to LOG_PATH
+    # and instead emit one prefixed JSON line to stderr.
+    monkeypatch.setenv("USCIS_LOG_JSONL_STDERR", "1")
+    # Point LOG_PATH somewhere the test owns so we can assert nothing landed.
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "should_stay_empty.json")
+
+    system_log.log("case_fetch_start", source="session_fetch", receipt="IOE1")
+
+    assert not (tmp_path / "should_stay_empty.json").exists(), \
+        "JSONL mode must not touch the on-disk log"
+    captured = capsys.readouterr().err
+    lines = [ln for ln in captured.splitlines() if ln.startswith(system_log._JSONL_PREFIX)]
+    assert len(lines) == 1
+    parsed = system_log.parse_jsonl_stderr_line(lines[0])
+    assert parsed is not None
+    assert parsed["event"] == "case_fetch_start"
+    assert parsed["source"] == "session_fetch"
+    assert parsed["receipt"] == "IOE1"
+
+
+def test_parse_jsonl_stderr_line_ignores_plain_text():
+    assert system_log.parse_jsonl_stderr_line("2026-04-22 INFO some.logger: hi") is None
+    assert system_log.parse_jsonl_stderr_line("") is None
+    # Well-formed prefix but malformed JSON also returns None.
+    bad = system_log._JSONL_PREFIX + "{not json"
+    assert system_log.parse_jsonl_stderr_line(bad) is None
 
 
 def test_setup_scheduler_logs_configured_event(monkeypatch):

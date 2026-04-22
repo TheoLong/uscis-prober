@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,15 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 LOG_PATH = _ROOT / "data" / "system_log.json"
 MAX_ENTRIES = 5000
+
+# When set to "1", `log()` emits one JSON line per event to stderr *instead*
+# of appending to LOG_PATH. This lets a parent process (e.g. server.py's
+# _run_pull_subprocess) capture a child's events as they happen and bubble
+# them up into a single consolidated parent entry — so one `pull` operation
+# produces ONE row in the dashboard's System log, with its 15+ internal
+# auth / fetch / snapshot events attached as sub-steps, instead of 15+
+# separate flat rows.
+JSONL_STDERR_ENV = "USCIS_LOG_JSONL_STDERR"
 
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
@@ -88,6 +98,17 @@ def log(event: str, *, level: str = "info", source: str | None = None, **details
         except (TypeError, ValueError):
             entry[k] = repr(v)
 
+    if os.environ.get(JSONL_STDERR_ENV) == "1":
+        # JSONL-stderr mode: the parent process will collect these lines
+        # and fold them into a consolidated entry. Do NOT write to disk
+        # ourselves; the parent owns the persistence.
+        try:
+            sys.stderr.write(_JSONL_PREFIX + json.dumps(entry) + "\n")
+            sys.stderr.flush()
+        except Exception:  # pragma: no cover — stderr failures are fatal anyway
+            _logger.exception("system_log jsonl-stderr emit failed for event=%s", event)
+        return
+
     try:
         with _lock:
             entries = _read_file()
@@ -106,6 +127,29 @@ def log(event: str, *, level: str = "info", source: str | None = None, **details
         "error": logging.ERROR,
     }.get(level, logging.INFO)
     _logger.log(py_level, "[systemlog] event=%s %s", event, {k: v for k, v in entry.items() if k not in ("ts", "pid")})
+
+
+# Magic prefix on stderr lines emitted by child processes, so the parent
+# can parse its subprocess's stderr without mistaking `logging` output
+# (which is interleaved) for event JSON. Every JSONL event starts with
+# this prefix; non-matching lines are treated as opaque log text.
+_JSONL_PREFIX = "@@SYSLOG_EVT@@ "
+
+
+def parse_jsonl_stderr_line(line: str) -> dict | None:
+    """Parse a stderr line emitted by a child running in JSONL mode.
+
+    Returns the event dict if the line is a well-formed event, else None.
+    Used by the parent (`server._run_pull_subprocess`) to turn a subprocess
+    stderr stream into `steps[]` for the consolidated pull entry.
+    """
+    if not line.startswith(_JSONL_PREFIX):
+        return None
+    try:
+        obj = json.loads(line[len(_JSONL_PREFIX):])
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 def read_all(limit: int | None = None) -> list[dict]:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -44,10 +45,12 @@ from diff_utils import (
 )
 from mailer import notify_update
 from system_log import (
+    JSONL_STDERR_ENV as _SYSLOG_JSONL_ENV,
     log as sys_log,
     read_all as read_system_log,
     count as count_system_log,
     clear as clear_system_log,
+    parse_jsonl_stderr_line as _parse_syslog_jsonl_line,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,8 +99,8 @@ def load_config() -> dict:
         return json.load(f)
 
 
-def _log_file_for(form_label: str) -> Path | None:
-    """Resolve the snapshot-log path for a form label.
+def _case_log_file_for(form_label: str) -> Path | None:
+    """Resolve the case-API snapshot-log path for a form label.
 
     The regex already constrains the filename to digits only, but we
     verify path containment explicitly so any future relaxation of the
@@ -107,7 +110,7 @@ def _log_file_for(form_label: str) -> Path | None:
 
 
 def _location_log_file_for(form_label: str) -> Path | None:
-    """Resolve the location-snapshot-log path for a form label."""
+    """Resolve the location-API snapshot-log path for a form label."""
     return _log_path_for(form_label, suffix="_location.json")
 
 
@@ -133,11 +136,13 @@ def _load_json_list(path: Path | None) -> list[dict]:
         return []
 
 
-def load_entries(form_label: str) -> list[dict]:
-    return _load_json_list(_log_file_for(form_label))
+def load_case_entries(form_label: str) -> list[dict]:
+    """Case-API snapshot history for a form label (oldest → newest)."""
+    return _load_json_list(_case_log_file_for(form_label))
 
 
 def load_location_entries(form_label: str) -> list[dict]:
+    """Location-API snapshot history for a form label (oldest → newest)."""
     return _load_json_list(_location_log_file_for(form_label))
 
 
@@ -207,7 +212,7 @@ def _all_update_records(config: dict | None = None) -> list[dict]:
         label = c["label"]
         receipt = c["id"]
         merged = _merge_changes(
-            day_changes(load_entries(label)),
+            day_changes(load_case_entries(label)),
             location_day_changes(load_location_entries(label)),
         )
         for change in merged:
@@ -235,58 +240,149 @@ def _notify_recipient(auth: dict) -> str | None:
     return auth.get("notification_email") or auth.get("uscis_mfa_email")
 
 
-def _send_notifications_for_new(new_records: list[dict]) -> None:
+def _send_notifications_for_new(new_records: list[dict]) -> list[dict]:
+    """Send a notification email for each new diff record.
+
+    Returns a list of step-dicts (same shape as other system-log steps)
+    describing what happened — `notify_sent`, `notify_failed`,
+    `notify_skipped`, or `notify_dispatcher_crashed`. The caller folds
+    these into the consolidated `pull` system-log entry.
+
+    The step list replaces the old "emit each event individually" pattern:
+    a pull that sends 3 emails used to produce 3 flat rows in the system
+    log; now it produces 3 `steps` inside a single `pull` row.
+    """
+    steps: list[dict] = []
     if not new_records:
-        return
+        return steps
     try:
         config = load_config()
         auth = (config.get("auth") or {})
         recipient = _notify_recipient(auth)
         if not recipient or not auth.get("uscis_mfa_email") or not auth.get("uscis_mfa_app_password"):
             logger.warning("Email auth missing — skipping %d notification(s).", len(new_records))
-            sys_log("notify_skipped", level="warning", source="server",
-                    reason="auth_missing", count=len(new_records))
-            return
+            steps.append({
+                "ts": _now_iso(), "event": "notify_skipped",
+                "level": "warning", "source": "server",
+                "reason": "auth_missing", "count": len(new_records),
+            })
+            return steps
         for rec in new_records:
             try:
                 notify_update(auth, recipient, rec, EVENT_CODE_LABELS)
                 logger.info("Notified: %s (%s)", rec.get("id"), rec.get("kind"))
-                sys_log("notify_sent", source="server",
-                        record_id=rec.get("id"), kind=rec.get("kind"))
+                steps.append({
+                    "ts": _now_iso(), "event": "notify_sent",
+                    "level": "info", "source": "server",
+                    "record_id": rec.get("id"), "kind": rec.get("kind"),
+                })
             except Exception as e:
                 logger.exception("Notify failed for %s: %s", rec.get("id"), e)
-                sys_log("notify_failed", level="error", source="server",
-                        record_id=rec.get("id"), error=str(e))
+                steps.append({
+                    "ts": _now_iso(), "event": "notify_failed",
+                    "level": "error", "source": "server",
+                    "record_id": rec.get("id"), "error": str(e),
+                })
     except Exception as e:
         logger.exception("Notification dispatcher crashed: %s", e)
-        sys_log("notify_dispatcher_crashed", level="error", source="server",
-                error=str(e))
+        steps.append({
+            "ts": _now_iso(), "event": "notify_dispatcher_crashed",
+            "level": "error", "source": "server", "error": str(e),
+        })
+    return steps
 
 
-def _run_pull_subprocess() -> None:
-    """Invoke session_fetch.py run. Captures tail of stdout+stderr for the UI.
+def _worst_level(steps: list[dict]) -> str:
+    """Return the most severe level across `steps` — error > warning > info."""
+    levels = {s.get("level", "info") for s in steps}
+    if "error" in levels:
+        return "error"
+    if "warning" in levels or "warn" in levels:
+        return "warning"
+    return "info"
 
-    Snapshots the set of diff IDs before and after the pull so that any
-    records appearing as a direct result can be emailed exactly once.
-    The snapshot lives only in this function's scope — restart-safe.
+
+def _pull_summary_from_steps(steps: list[dict]) -> dict:
+    """Derive a compact summary from the step stream for the UI header.
+
+    The summary is what makes the single consolidated entry useful at a
+    glance: cases fetched, failures, new diffs, emails sent. The full
+    detail is still there in `steps` for anyone expanding the row.
+    """
+    def _count(event_name: str) -> int:
+        return sum(1 for s in steps if s.get("event") == event_name)
+
+    return {
+        "case_snapshots": _count("case_snapshot_appended"),
+        "location_snapshots": _count("location_snapshot_appended"),
+        "case_fetch_failures": _count("case_fetch_api_error"),
+        "location_fetch_failures": _count("location_fetch_failed"),
+        "new_diffs_emailed": _count("notify_sent"),
+        "notify_failures": _count("notify_failed"),
+        "session_expired_retries": _count("cli_run_session_expired_retry"),
+    }
+
+
+def _collect_subprocess_steps(stderr_text: str) -> tuple[list[dict], list[str]]:
+    """Split a subprocess's stderr into (structured events, non-event tail).
+
+    The child emits one line per `system_log.log()` call, prefixed with
+    the JSONL sentinel. Any line missing the sentinel is Python-logging
+    text — we keep the last few for the crash-diagnosis step shown if
+    the subprocess exits non-zero.
+    """
+    events: list[dict] = []
+    plain: list[str] = []
+    for line in stderr_text.splitlines():
+        parsed = _parse_syslog_jsonl_line(line)
+        if parsed is not None:
+            events.append(parsed)
+        else:
+            plain.append(line)
+    return events, plain
+
+
+def _run_pull_subprocess(trigger: str = "scheduled") -> None:
+    """Invoke session_fetch.py run and write ONE consolidated system-log entry.
+
+    The child runs with `USCIS_LOG_JSONL_STDERR=1`, which makes every
+    internal `system_log.log(...)` call emit a JSON line to stderr
+    instead of appending to disk. We collect those lines, append
+    notification events, and write a single `pull` entry with the full
+    stream as `steps` so the dashboard can render it as one expandable
+    row rather than 15+ flat rows.
+
+    `trigger` is either "manual" (from POST /api/pull) or "scheduled"
+    (from APScheduler). Recorded on the entry for later filtering.
     """
     global _pull_state
     with _pull_lock:
         if _pull_state.running:
             logger.info("Pull already running; skipping trigger.")
-            sys_log("pull_skipped_already_running", source="server")
+            sys_log("pull_skipped_already_running", source="server",
+                    trigger=trigger)
             return
         _pull_state = PullState(
             running=True,
             started_at=_now_iso(),
         )
 
+    start_iso = _pull_state.started_at
     start_wall = time.time()
-    # Snapshot the diff set *before* pulling.
+    # Snapshot the diff set *before* pulling so we can identify records
+    # that appear as a direct result of this run.
     before_ids = _update_ids(_all_update_records())
-    sys_log("pull_started", source="server", before_diff_count=len(before_ids))
+
+    # Structured events collected from all sources during this run.
+    steps: list[dict] = []
+    plain_stderr_tail: list[str] = []
+    exit_code: int | None = None
+    top_level: str = "info"
+    timed_out = False
+    crashed_error: str | None = None
 
     logger.info("Spawning pull: %s", " ".join(PULL_CMD))
+    child_env = {**os.environ, _SYSLOG_JSONL_ENV: "1"}
     try:
         proc = subprocess.run(
             PULL_CMD,
@@ -294,50 +390,50 @@ def _run_pull_subprocess() -> None:
             capture_output=True,
             text=True,
             timeout=600,
+            env=child_env,
         )
+        exit_code = proc.returncode
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         tail_lines = (stdout + "\n" + stderr).splitlines()[-80:]
+
+        steps, plain_stderr_tail = _collect_subprocess_steps(stderr)
         duration = round(time.time() - start_wall, 2)
+
         with _pull_lock:
             _pull_state.running = False
             _pull_state.finished_at = _now_iso()
-            _pull_state.exit_code = proc.returncode
-            _pull_state.ok = proc.returncode == 0
+            _pull_state.exit_code = exit_code
+            _pull_state.ok = exit_code == 0
             _pull_state.log_tail = tail_lines
-            if proc.returncode != 0:
-                _pull_state.last_error = f"exit={proc.returncode}"
-        logger.info("Pull finished exit=%d", proc.returncode)
+            if exit_code != 0:
+                _pull_state.last_error = f"exit={exit_code}"
+        logger.info("Pull finished exit=%d", exit_code)
 
         # Only email on a successful pull. A failed pull may leave the
-        # snapshot set half-updated; don't treat partial state as news.
-        if proc.returncode == 0:
+        # snapshot set half-updated; partial state isn't news.
+        if exit_code == 0:
             after_records = _all_update_records()
             new_records = [
                 r for r in after_records if r.get("id") not in before_ids
             ]
-            sys_log(
-                "pull_finished",
-                source="server",
-                exit_code=0,
-                duration_seconds=duration,
-                new_diff_count=len(new_records),
-            )
             if new_records:
                 logger.info("Emitting %d notification(s).", len(new_records))
-                _send_notifications_for_new(new_records)
+                steps.extend(_send_notifications_for_new(new_records))
             else:
                 logger.info("No new diffs — no email sent.")
         else:
-            sys_log(
-                "pull_failed",
-                level="error",
-                source="server",
-                exit_code=proc.returncode,
-                duration_seconds=duration,
-                stderr_tail=stderr.splitlines()[-10:],
-            )
+            # Capture the tail of raw stderr so the operator can see
+            # what the subprocess printed right before it died, even if
+            # no structured event covered it.
+            steps.append({
+                "ts": _now_iso(), "event": "subprocess_exit_nonzero",
+                "level": "error", "source": "server",
+                "exit_code": exit_code,
+                "stderr_tail": plain_stderr_tail[-10:],
+            })
     except subprocess.TimeoutExpired:
+        timed_out = True
         duration = round(time.time() - start_wall, 2)
         with _pull_lock:
             _pull_state.running = False
@@ -346,9 +442,13 @@ def _run_pull_subprocess() -> None:
             _pull_state.ok = False
             _pull_state.last_error = "timeout (10min)"
         logger.error("Pull timed out after 10min.")
-        sys_log("pull_timeout", level="error", source="server",
-                duration_seconds=duration)
+        steps.append({
+            "ts": _now_iso(), "event": "subprocess_timeout",
+            "level": "error", "source": "server",
+            "timeout_seconds": 600,
+        })
     except Exception as e:
+        crashed_error = str(e)
         duration = round(time.time() - start_wall, 2)
         with _pull_lock:
             _pull_state.running = False
@@ -356,12 +456,39 @@ def _run_pull_subprocess() -> None:
             _pull_state.ok = False
             _pull_state.last_error = str(e)
         logger.exception("Pull crashed.")
-        sys_log("pull_crashed", level="error", source="server",
-                duration_seconds=duration, error=str(e))
+        steps.append({
+            "ts": _now_iso(), "event": "subprocess_crashed",
+            "level": "error", "source": "server",
+            "error": str(e),
+        })
+
+    # Derive the top-level severity and summary, then emit exactly one
+    # consolidated entry. This is the only row the dashboard operator
+    # sees for this pull; all the gritty detail lives in `steps`.
+    top_level = _worst_level(steps)
+    if exit_code not in (0, None) or timed_out or crashed_error is not None:
+        top_level = "error"
+
+    summary = _pull_summary_from_steps(steps)
+    sys_log(
+        "pull",
+        level=top_level,
+        source="server",
+        trigger=trigger,
+        started_at=start_iso,
+        finished_at=_pull_state.finished_at,
+        duration_seconds=duration,
+        exit_code=exit_code,
+        timed_out=timed_out,
+        summary=summary,
+        steps=steps,
+    )
 
 
-def _spawn_pull_async() -> None:
-    t = threading.Thread(target=_run_pull_subprocess, daemon=True)
+def _spawn_pull_async(trigger: str = "scheduled") -> None:
+    t = threading.Thread(
+        target=_run_pull_subprocess, args=(trigger,), daemon=True,
+    )
     t.start()
 
 
@@ -450,7 +577,7 @@ def api_cases():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     cases = []
     for c in config.get("cases", []):
-        entries = load_entries(c["label"])
+        entries = load_case_entries(c["label"])
         days = bin_by_day(entries)
         latest = days[-1] if days else None
         latest_data = (latest or {}).get("data") or {}
@@ -502,7 +629,7 @@ def _merge_changes(case_changes: list[dict], loc_changes: list[dict]) -> list[di
 
 @app.route("/api/cases/<label>/history")
 def api_case_history(label: str):
-    entries = load_entries(label)
+    entries = load_case_entries(label)
     days = bin_by_day(entries)
     location_entries = load_location_entries(label)
     changes = _merge_changes(day_changes(entries), location_day_changes(location_entries))
@@ -551,7 +678,7 @@ def api_export():
         for c in config.get("cases", []):
             label = c.get("label") or ""
             receipt = c.get("id") or ""
-            path = _log_file_for(label)
+            path = _case_log_file_for(label)
             entries: list = []
             arcname: str | None = None
             if path:
@@ -724,8 +851,10 @@ def api_pull():
     with _pull_lock:
         if _pull_state.running:
             return jsonify({"ok": False, "error": "pull_in_progress"}), 409
-    sys_log("pull_triggered_manually", source="server")
-    _spawn_pull_async()
+    # `trigger="manual"` ends up on the consolidated `pull` system-log
+    # entry as the `trigger` field — no separate `pull_triggered_manually`
+    # row anymore.
+    _spawn_pull_async(trigger="manual")
     return jsonify({"ok": True, "message": "Pull started"})
 
 

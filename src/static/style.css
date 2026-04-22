@@ -489,6 +489,89 @@ main[hidden] { display: none; }
   color: var(--muted);
   font-size: 0.74rem;
 }
+
+/* ---------- nested system-log entries (pull envelope + steps) ----------
+   A pull's 15+ internal events are attached as a `steps[]` array on a
+   single envelope row. The row gets a disclosure triangle and a summary
+   strip so the default view stays compact; clicking expands the sub-log
+   with one indented line per step. */
+
+.syslog-nested {
+  padding: 0;          /* head + body handle their own padding */
+  overflow: hidden;    /* keep the rounded corners when children paint */
+}
+
+.syslog-head-expandable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.syslog-head-expandable:hover {
+  background: var(--pill-bg);
+}
+.syslog-disclosure {
+  font-size: 0.7rem;
+  color: var(--muted);
+  width: 10px;
+  display: inline-block;
+}
+.syslog-event-envelope {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-family: var(--font-sans);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.syslog-summary {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.syslog-envelope-kv {
+  padding: 0 14px 10px;
+  border-bottom: 1px dashed var(--border-soft);
+}
+
+.syslog-steps {
+  padding: 6px 10px 10px 28px;   /* indent so nesting is obvious */
+  background: var(--bg);
+  border-top: 1px solid var(--border-soft);
+}
+.syslog-step {
+  padding: 6px 10px;
+  margin: 4px 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-left-width: 2px;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+}
+.syslog-step.syslog-ok   { border-left-color: var(--ok); }
+.syslog-step.syslog-bad  { border-left-color: var(--bad); background: var(--bad-tint-soft); }
+.syslog-step.syslog-warn { border-left-color: var(--warn); background: var(--warn-tint); }
+.syslog-step.syslog-info { border-left-color: var(--accent); }
+.syslog-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+}
+.syslog-step-details {
+  margin-top: 4px;
+  font-size: 0.74rem;
+}
 .syslog-controls {
   display: flex;
   align-items: flex-start;

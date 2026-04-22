@@ -56,42 +56,42 @@ def _seed_location_log(data_dir: Path, entries: list[dict]) -> None:
 
 # -------- pure helpers ---------------------------------------------------
 
-def test_log_file_for_recognises_form_numbers(monkeypatch, tmp_path):
+def test_case_log_file_for_recognises_form_numbers(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    assert server._log_file_for("I-485").name == "485_case.json"
+    assert server._case_log_file_for("I-485").name == "485_case.json"
 
 
-def test_log_file_for_none_for_unknown_form(monkeypatch, tmp_path):
+def test_case_log_file_for_none_for_unknown_form(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    assert server._log_file_for("???") is None
+    assert server._case_log_file_for("???") is None
 
 
 def test_load_entries_returns_empty_on_missing_file(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    assert server.load_entries("I-485") == []
+    assert server.load_case_entries("I-485") == []
 
 
 def test_load_entries_returns_empty_on_invalid_json(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     (tmp_path / "485_case.json").write_text("{broken")
-    assert server.load_entries("I-485") == []
+    assert server.load_case_entries("I-485") == []
 
 
 def test_load_entries_rejects_non_list_payload(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     (tmp_path / "485_case.json").write_text('{"not": "list"}')
-    assert server.load_entries("I-485") == []
+    assert server.load_case_entries("I-485") == []
 
 
 def test_load_entries_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     (tmp_path / "485_case.json").write_text('[{"capturedAt": "x"}]')
-    assert server.load_entries("I-485") == [{"capturedAt": "x"}]
+    assert server.load_case_entries("I-485") == [{"capturedAt": "x"}]
 
 
 def test_load_entries_unknown_form_is_empty(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    assert server.load_entries("unknown") == []
+    assert server.load_case_entries("unknown") == []
 
 
 def test_now_iso_ends_with_z():
