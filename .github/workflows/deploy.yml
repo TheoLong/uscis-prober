@@ -32,6 +32,25 @@ jobs:
             cd ~/uscis-checker
             git fetch --prune origin
             git reset --hard origin/main
+            # One-time filename migration: pre-commit 54b5c59 used
+            #   data/{num}_logs.json          (case-API snapshots)
+            # and the later location-API work originally added
+            #   data/{num}_location_logs.json
+            # Both were renamed in-repo to {num}_case.json / {num}_location.json
+            # to mirror the API names. Rename any legacy files in place so
+            # the new code picks up existing history on first run. Idempotent
+            # (nullglob makes empty patterns a no-op) — safe to keep across
+            # future deploys.
+            (
+              cd data 2>/dev/null || exit 0
+              shopt -s nullglob
+              for f in *_location_logs.json; do
+                mv -- "$f" "${f%_location_logs.json}_location.json"
+              done
+              for f in *_logs.json; do
+                mv -- "$f" "${f%_logs.json}_case.json"
+              done
+            )
             # Reinstall deps only when requirements.txt changed since last deploy.
             if ! diff -q .last-requirements-hash <(sha256sum requirements.txt) >/dev/null 2>&1; then
               source venv/bin/activate

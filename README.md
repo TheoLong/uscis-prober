@@ -80,7 +80,7 @@ get the credentials your email provider needs.
 **Core principle: snapshot everything, diff nothing away.**
 
 - **Each snapshot is the full API payload**, not a summary string.
-  One row per pull in `data/{formNum}_logs.json`, ISO-8601 timestamped.
+  One row per pull in `data/{formNum}_case.json`, ISO-8601 timestamped.
   No row is ever deleted or overwritten.
 - **Diffs are recomputed on the fly** from that append-only history.
   Restart, reboot, code change — never loses a record, never
@@ -95,7 +95,7 @@ get the credentials your email provider needs.
   after diff-ID snapshotting around each pull → no duplicates, no
   misses, survives restarts.
 - **One-click export.** `/api/export` (or the "Export data" button)
-  bundles every `data/*_logs.json` plus a manifest into a timestamped
+  bundles every `data/*_case.json` plus a manifest into a timestamped
   zip. Useful for sharing with a lawyer or archiving.
 
 ### Design invariants (don't break these)
@@ -300,11 +300,11 @@ python src/session_fetch.py extract
 
 `extract` uses the saved session but **refuses** to re-login — safe to
 iterate with without burning more MFA codes. Success writes one row
-per case into `data/{formNum}_logs.json`.
+per case into `data/{formNum}_case.json`.
 
 ```bash
 ls data/*.json                    # one file per form number
-python -c "import json; print('captures:', len(json.load(open('data/485_logs.json'))))"
+python -c "import json; print('captures:', len(json.load(open('data/485_case.json'))))"
 ```
 
 ### 4. Start the dashboard
@@ -331,7 +331,7 @@ downloads the full zip archive.
 | `No USCIS MFA code … within 180s` | IMAP didn't see the email. Verify the app password works (paste into any IMAP client), IMAP access is on, and the USCIS email actually arrived. |
 | `AuthError: Session is stale and allow_login=False` | Run `python src/session_fetch.py login` to refresh. |
 | `HTTP 429` on `/api/login` | Brute-force guard tripped. Wait 5 min per IP, or restart the server to reset. |
-| Dashboard shows no cases | Check `data/*_logs.json` exists. If empty, the pull step didn't populate them. |
+| Dashboard shows no cases | Check `data/*_case.json` exists. If empty, the pull step didn't populate them. |
 
 ---
 

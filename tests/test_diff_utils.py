@@ -398,3 +398,98 @@ def test_key_notice_falls_back_to_actiontype_when_no_letter_id():
     e1 = _entry("2026-03-10T00:00:00Z", notices=[dict(n)])
     from diff_utils import day_changes
     assert day_changes([e0, e1]) == []
+
+
+# ======================================================================
+# Location-API day changes
+# ======================================================================
+
+def _loc_entry(captured_at: str, payload):
+    """payload is whatever goes under the outer `data` key (i.e. the raw
+    envelope). `None` or a dict like `{"receipt_details": {...}}` are valid."""
+    return {"capturedAt": captured_at, "data": {"data": payload}}
+
+
+def test_location_day_changes_empty_history_produces_no_diffs():
+    from diff_utils import location_day_changes
+    assert location_day_changes([]) == []
+    assert location_day_changes([_loc_entry("2026-04-22T00:00:00Z", None)]) == []
+
+
+def test_location_day_changes_null_to_null_is_silent():
+    from diff_utils import location_day_changes
+    entries = [
+        _loc_entry("2026-04-20T00:00:00Z", None),
+        _loc_entry("2026-04-21T00:00:00Z", None),
+    ]
+    assert location_day_changes(entries) == []
+
+
+def test_location_day_changes_null_to_populated_emits_assigned():
+    from diff_utils import location_day_changes
+    entries = [
+        _loc_entry("2026-04-20T00:00:00Z", None),
+        _loc_entry("2026-04-21T00:00:00Z", {
+            "receipt_details": {
+                "form": "I-765", "location": "SCD", "subtype": "147-C9",
+            },
+        }),
+    ]
+    changes = location_day_changes(entries)
+    assert len(changes) == 1
+    c = changes[0]
+    assert c["kind"] == "location_assigned"
+    assert c["source"] == "location"
+    assert c["scalars"]["location"] == {"from": None, "to": "SCD"}
+    assert c["scalars"]["subtype"] == {"from": None, "to": "147-C9"}
+
+
+def test_location_day_changes_populated_to_different_populated_emits_changed():
+    from diff_utils import location_day_changes
+    entries = [
+        _loc_entry("2026-04-20T00:00:00Z", {
+            "receipt_details": {"form": "I-765", "location": "SCD", "subtype": "147-C9"},
+        }),
+        _loc_entry("2026-04-21T00:00:00Z", {
+            "receipt_details": {"form": "I-765", "location": "NSC", "subtype": "147-C9"},
+        }),
+    ]
+    changes = location_day_changes(entries)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "location_changed"
+    assert changes[0]["scalars"] == {"location": {"from": "SCD", "to": "NSC"}}
+
+
+def test_location_day_changes_populated_to_null_emits_cleared():
+    from diff_utils import location_day_changes
+    entries = [
+        _loc_entry("2026-04-20T00:00:00Z", {
+            "receipt_details": {"form": "I-765", "location": "SCD"},
+        }),
+        _loc_entry("2026-04-21T00:00:00Z", None),
+    ]
+    changes = location_day_changes(entries)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "location_cleared"
+    assert changes[0]["source"] == "location"
+
+
+def test_location_day_changes_skips_same_payload_days():
+    from diff_utils import location_day_changes
+    entries = [
+        _loc_entry("2026-04-20T00:00:00Z", {
+            "receipt_details": {"form": "I-765", "location": "SCD"},
+        }),
+        _loc_entry("2026-04-21T00:00:00Z", {
+            "receipt_details": {"form": "I-765", "location": "SCD"},
+        }),
+    ]
+    assert location_day_changes(entries) == []
+
+
+def test_day_changes_case_source_tagged():
+    from diff_utils import day_changes
+    e0 = _entry("2026-03-09T00:00:00Z")
+    e1 = _entry("2026-03-10T00:00:00Z", closed=True)
+    out = day_changes([e0, e1])
+    assert out and out[0]["source"] == "case"

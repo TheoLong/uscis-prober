@@ -18,6 +18,7 @@ from uscis_api import (
     _parse_case_response,
     fetch_case,
     fetch_case_in_new_tab,
+    fetch_location,
     open_worker_tab,
 )
 
@@ -194,6 +195,62 @@ def test_fetch_case_nav_failure_emits_sys_log(syslog_to_tmp):
     assert len(events) == 1
     assert events[0]["receipt"] == "IOE1"
     assert "ERR_CONNECTION_RESET" in events[0]["error"]
+
+
+def test_fetch_location_returns_parsed_envelope_with_data():
+    body = '{"data": {"form": "I-765", "location": "SCD", "subtype": "147-C9"}}'
+    tab = _tab(body_text=body, status=200)
+    out = fetch_location(tab, "IOE1")
+    assert out["data"]["location"] == "SCD"
+    # Request hit the location endpoint, not the case endpoint.
+    assert "receipt_info/IOE1" in tab.goto.call_args.args[0]
+
+
+def test_fetch_location_returns_null_data_envelope():
+    # USCIS commonly returns {"data": null} for I-485 / I-131 pre-assignment.
+    tab = _tab(body_text='{"data": null}', status=200)
+    out = fetch_location(tab, "IOE1")
+    assert out == {"data": None}
+
+
+def test_fetch_location_401_bubbles_session_expired():
+    tab = _tab(body_text="denied", status=401)
+    with pytest.raises(SessionExpired):
+        fetch_location(tab, "IOE1")
+
+
+def test_fetch_location_non_200_raises_api_error(syslog_to_tmp):
+    tab = _tab(body_text="service unavailable", status=503)
+    with pytest.raises(ApiError):
+        fetch_location(tab, "IOE1")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_location_non_200"]
+    assert len(events) == 1 and events[0]["status"] == 503
+
+
+def test_fetch_location_empty_body_raises(syslog_to_tmp):
+    tab = _tab(body_text="", status=200)
+    with pytest.raises(ApiError):
+        fetch_location(tab, "IOE1")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_location_empty_body"]
+    assert len(events) == 1
+
+
+def test_fetch_location_bad_json_raises(syslog_to_tmp):
+    tab = _tab(body_text="<html>gateway timeout</html>", status=200)
+    with pytest.raises(ApiError):
+        fetch_location(tab, "IOE1")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_location_bad_json"]
+    assert len(events) == 1
+
+
+def test_fetch_location_nav_failure_emits_sys_log(syslog_to_tmp):
+    from playwright.sync_api import Error as PlaywrightError
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightError("net::ERR_CONNECTION_RESET")
+    with pytest.raises(PlaywrightError):
+        fetch_location(tab, "IOE1")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_location_nav_failed"]
+    assert len(events) == 1
 
 
 def test_open_worker_tab_dashboard_timeout_emits_sys_log(syslog_to_tmp):

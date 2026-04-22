@@ -19,12 +19,14 @@ from session_fetch import (
     _extract_cases,
     _hold_browser_open,
     _now_iso_utc,
+    append_location_snapshot,
     append_snapshot,
     cmd_extract,
     cmd_login,
     cmd_run,
     load_auth,
     load_config,
+    location_log_file_for,
     log_file_for,
     main,
 )
@@ -42,14 +44,24 @@ def test_now_iso_utc_is_z_suffixed_and_second_precision():
 
 
 def test_log_file_for_parses_form_number():
-    assert log_file_for("I-485").name == "485_logs.json"
-    assert log_file_for("I485").name == "485_logs.json"
-    assert log_file_for("Form I-131").name == "131_logs.json"
+    assert log_file_for("I-485").name == "485_case.json"
+    assert log_file_for("I485").name == "485_case.json"
+    assert log_file_for("Form I-131").name == "131_case.json"
 
 
 def test_log_file_for_raises_on_unrecognized_form():
     with pytest.raises(ValueError):
         log_file_for("bogus")
+
+
+def test_location_log_file_for_uses_sibling_suffix():
+    assert location_log_file_for("I-485").name == "485_location.json"
+    assert location_log_file_for("I-765").name == "765_location.json"
+
+
+def test_location_log_file_for_raises_on_unrecognized_form():
+    with pytest.raises(ValueError):
+        location_log_file_for("bogus")
 
 
 # -------- load_config / load_auth ---------------------------------------
@@ -114,16 +126,39 @@ def test_append_snapshot_creates_file_and_appends(tmp_path, monkeypatch):
 
 def test_append_snapshot_recovers_from_invalid_json(tmp_path, monkeypatch):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
-    p = tmp_path / "485_logs.json"
+    p = tmp_path / "485_case.json"
     p.write_text("{broken json")
     append_snapshot("I-485", {"ok": True}, "2026-04-18T00:00:00Z")
     data = json.loads(p.read_text())
     assert len(data) == 1
 
 
+def test_append_location_snapshot_stores_full_envelope(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    path = append_location_snapshot(
+        "I-765",
+        {"data": {"form": "I-765", "location": "SCD", "subtype": "147-C9"}},
+        "2026-04-22T18:00:00Z",
+    )
+    assert path.name == "765_location.json"
+    rows = json.loads(path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["capturedAt"] == "2026-04-22T18:00:00Z"
+    assert rows[0]["data"]["data"]["location"] == "SCD"
+
+
+def test_append_location_snapshot_retains_null_payload(tmp_path, monkeypatch):
+    # We deliberately keep `{"data": null}` snapshots so the UI can show
+    # TBD and we can later see the exact moment USCIS flips it to data.
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    path = append_location_snapshot("I-485", {"data": None}, "2026-04-22T18:00:00Z")
+    rows = json.loads(path.read_text())
+    assert rows[0]["data"] == {"data": None}
+
+
 def test_append_snapshot_recovers_from_non_list_json(tmp_path, monkeypatch):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
-    p = tmp_path / "485_logs.json"
+    p = tmp_path / "485_case.json"
     p.write_text('{"not": "a list"}')
     append_snapshot("I-485", {"ok": True}, "2026-04-18T00:00:00Z")
     data = json.loads(p.read_text())
@@ -146,7 +181,101 @@ def test_extract_cases_happy_path(tmp_path, monkeypatch):
         owt.return_value = MagicMock()
         failures = _extract_cases(context, cases, "2026-04-18T00:00:00Z")
     assert failures == 0
-    assert (tmp_path / "485_logs.json").exists()
+    assert (tmp_path / "485_case.json").exists()
+
+
+def test_extract_cases_writes_location_snapshot_when_populated(monkeypatch, tmp_path):
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(session_fetch, "ROOT", tmp_path)
+    context = MagicMock()
+    cases = [{"id": "IOE1", "label": "I-765"}]
+    case_data = {"data": {"formType": "I-765", "receiptNumber": "IOE1"}}
+    loc_data = {"data": {"form": "I-765", "location": "SCD", "subtype": "147-C9"}}
+
+    with patch.object(session_fetch, "open_worker_tab") as owt, \
+         patch.object(session_fetch, "fetch_case", return_value=case_data), \
+         patch.object(session_fetch, "fetch_location", return_value=loc_data):
+        owt.return_value = MagicMock()
+        failures = _extract_cases(context, cases, "2026-04-22T18:00:00Z")
+    assert failures == 0
+    assert (tmp_path / "765_case.json").exists()
+    loc_rows = json.loads((tmp_path / "765_location.json").read_text())
+    assert len(loc_rows) == 1
+    assert loc_rows[0]["data"]["data"]["location"] == "SCD"
+
+
+def test_extract_cases_writes_null_location_snapshot(monkeypatch, tmp_path):
+    # `{"data": null}` is still persisted so the UI can render TBD and we
+    # can later diff the exact moment USCIS starts returning a location.
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(session_fetch, "ROOT", tmp_path)
+    context = MagicMock()
+    cases = [{"id": "IOE1", "label": "I-485"}]
+    case_data = {"data": {"formType": "I-485", "receiptNumber": "IOE1"}}
+
+    with patch.object(session_fetch, "open_worker_tab") as owt, \
+         patch.object(session_fetch, "fetch_case", return_value=case_data), \
+         patch.object(session_fetch, "fetch_location", return_value={"data": None}):
+        owt.return_value = MagicMock()
+        _extract_cases(context, cases, "2026-04-22T18:00:00Z")
+    rows = json.loads((tmp_path / "485_location.json").read_text())
+    assert rows[0]["data"] == {"data": None}
+
+
+def test_extract_cases_location_failure_does_not_count_as_case_failure(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(session_fetch, "ROOT", tmp_path)
+    context = MagicMock()
+    cases = [{"id": "IOE1", "label": "I-485"}]
+    case_data = {"data": {"formType": "I-485", "receiptNumber": "IOE1"}}
+
+    from uscis_api import ApiError
+    with patch.object(session_fetch, "open_worker_tab") as owt, \
+         patch.object(session_fetch, "fetch_case", return_value=case_data), \
+         patch.object(session_fetch, "fetch_location",
+                      side_effect=ApiError("IOE1", 500, "boom")):
+        owt.return_value = MagicMock()
+        failures = _extract_cases(context, cases, "2026-04-22T18:00:00Z")
+    # Case was written; location failure is logged but doesn't fail the run.
+    assert failures == 0
+    assert (tmp_path / "485_case.json").exists()
+    assert not (tmp_path / "485_location.json").exists()
+
+
+def test_extract_cases_location_session_expired_propagates(monkeypatch, tmp_path):
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(session_fetch, "ROOT", tmp_path)
+    from uscis_api import SessionExpired
+    context = MagicMock()
+    cases = [{"id": "IOE1", "label": "I-485"}]
+    case_data = {"data": {"formType": "I-485"}}
+
+    with patch.object(session_fetch, "open_worker_tab") as owt, \
+         patch.object(session_fetch, "fetch_case", return_value=case_data), \
+         patch.object(session_fetch, "fetch_location",
+                      side_effect=SessionExpired("IOE1", 401, "stale")):
+        owt.return_value = MagicMock()
+        with pytest.raises(SessionExpired):
+            _extract_cases(context, cases, "2026-04-22T18:00:00Z")
+
+
+def test_extract_cases_keep_alive_skips_location(monkeypatch, tmp_path):
+    # In keep-alive mode each case has its own tab on the case-endpoint
+    # response — there's no worker tab we can safely redirect, so the
+    # location fetch is deliberately skipped.
+    monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(session_fetch, "ROOT", tmp_path)
+    context = MagicMock()
+    cases = [{"id": "IOE1", "label": "I-485"}]
+    case_data = {"formType": "I-485"}
+
+    with patch.object(session_fetch, "fetch_case_in_new_tab",
+                      return_value=(MagicMock(), case_data)), \
+         patch.object(session_fetch, "fetch_location") as flocation:
+        _extract_cases(context, cases, "2026-04-22T18:00:00Z", keep_alive=True)
+    flocation.assert_not_called()
 
 
 def test_extract_cases_counts_api_error_as_failure(monkeypatch, tmp_path):
@@ -551,20 +680,20 @@ def test_append_snapshot_emits_invalid_json_warning(
     tmp_path, monkeypatch, syslog_to_tmp,
 ):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
-    log_file = tmp_path / "485_logs.json"
+    log_file = tmp_path / "485_case.json"
     log_file.write_text("not { valid json")
     session_fetch.append_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
     events = [e for e in syslog_to_tmp()
               if e["event"] == "snapshot_log_invalid_json"]
     assert len(events) == 1
-    assert events[0]["file"] == "485_logs.json"
+    assert events[0]["file"] == "485_case.json"
 
 
 def test_append_snapshot_emits_not_array_warning(
     tmp_path, monkeypatch, syslog_to_tmp,
 ):
     monkeypatch.setattr(session_fetch, "DATA_DIR", tmp_path)
-    log_file = tmp_path / "485_logs.json"
+    log_file = tmp_path / "485_case.json"
     log_file.write_text('{"this": "is an object, not a list"}')
     session_fetch.append_snapshot("I-485", {"x": 1}, "2026-04-22T00:00:00Z")
     events = [e for e in syslog_to_tmp()

@@ -6,13 +6,17 @@ const state = {
   cases: [],
   histories: {},           // label → history payload
   activeTab: {},           // receiptNumber → tab id
-  rawSelection: {},        // receiptNumber → capturedAt for raw view
+  rawSource: {},           // receiptNumber → "case" | "location" (raw sub-tab)
+  rawSelection: {},        // "{receipt}:{source}" → capturedAt for raw view
   nextRun: null,
   pullRunning: false,
   eventCodeLabels: {},     // e.g. { FTA0: "Database checks received..." }
   view: "cases",           // "cases" | "updates" | "systemlog"
   updates: [],             // flat diff feed
-  systemLog: [],           // flat event log from /api/system-log
+  systemLog: [],           // current page of the event log (oldest-first, as returned by server)
+  systemLogTotal: 0,       // total entries on disk (all pages combined)
+  systemLogPage: 1,        // 1-indexed page (page 1 = newest)
+  systemLogPageSize: 100,
 };
 
 // ---------- boot ----------
@@ -69,21 +73,40 @@ async function refreshAll() {
   await Promise.all([loadCases(), loadUpdates(), loadSystemLog(), pollPullStatus()]);
 }
 
-async function loadSystemLog() {
+async function loadSystemLog(page = state.systemLogPage) {
   try {
-    const res = await fetch("/api/system-log?limit=500");
+    const perPage = state.systemLogPageSize;
+    // Page 1 = newest. Server counts offset from the newest end.
+    const offset = Math.max(0, (page - 1) * perPage);
+    const url = `/api/system-log?limit=${perPage}&offset=${offset}`;
+    const res = await fetch(url);
     const j = await res.json();
     state.systemLog = j.events || [];
+    state.systemLogTotal = typeof j.total === "number" ? j.total : state.systemLog.length;
+    // If the user's current page falls past the end (e.g. after clear / truncation),
+    // snap back to page 1. This keeps the Prev/Next controls sensible.
+    const totalPages = Math.max(1, Math.ceil(state.systemLogTotal / perPage));
+    state.systemLogPage = Math.min(Math.max(1, page), totalPages);
+
     const countEl = document.getElementById("systemlog-count");
-    if (state.systemLog.length) {
+    if (state.systemLogTotal) {
       countEl.hidden = false;
-      countEl.textContent = String(state.systemLog.length);
+      // Cap the badge label at "999+" — a 4-digit number crowds the tab.
+      // Exact total still appears in the subtitle + pagination controls.
+      countEl.textContent = state.systemLogTotal > 999
+        ? "999+"
+        : String(state.systemLogTotal);
     } else {
       countEl.hidden = true;
     }
   } catch (e) {
     console.warn("loadSystemLog failed:", e);
   }
+}
+
+async function gotoSystemLogPage(page) {
+  await loadSystemLog(page);
+  renderSystemLog();
 }
 
 async function loadAndRenderSystemLog() {
@@ -380,12 +403,122 @@ function renderOverview(panel, c) {
   }
   if (factCallouts.children.length) panel.appendChild(factCallouts);
 
+  // --- Current location (dedicated row so it's visible at a glance). ---
+  panel.appendChild(renderLocationRow(c));
+
   // --- Secondary facts: a compact strip, no duplication with header ---
   panel.appendChild(_renderSubFacts(c, latest));
 
   // --- Observed event codes (factual only — no inference, no stage
   // guessing, no community folklore; form-agnostic). ---
   panel.appendChild(renderObservedEventCodes(c));
+}
+
+// Renders "Current location: <SCD — 147-C9>" or a "TBD" badge + info popover
+// explaining what TBD means. The popover mirrors the existing `#export-info-*`
+// pattern (wireInfoBadge) so styling stays consistent with the header.
+function renderLocationRow(c) {
+  const loc = c.location || {};
+  const info = loc.info;
+  const wrap = document.createElement("div");
+  wrap.className = "location-row";
+
+  const k = document.createElement("span");
+  k.className = "location-key";
+  k.textContent = "Current location";
+  wrap.appendChild(k);
+
+  const val = document.createElement("span");
+  val.className = "location-val";
+
+  if (info && (info.location || info.subtype || info.form)) {
+    const parts = [];
+    if (info.location) parts.push(info.location);
+    if (info.subtype)  parts.push(info.subtype);
+    val.textContent = parts.join(" · ");
+    wrap.appendChild(val);
+
+    // Small meta (form / receipt date) as faded sub-text.
+    if (info.receipt_date || info.form) {
+      const sub = document.createElement("span");
+      sub.className = "location-sub";
+      const bits = [];
+      if (info.form) bits.push(info.form);
+      if (info.receipt_date) {
+        // receipt_date comes back as RFC 2822 ("Fri, 20 Feb 2026 00:00:00 GMT"),
+        // which formatDate can't parse on its own — wrap it in a Date first.
+        const parsed = new Date(info.receipt_date);
+        const rendered = isNaN(parsed.getTime())
+          ? info.receipt_date
+          : formatDate(parsed);
+        bits.push(`received ${rendered}`);
+      }
+      sub.textContent = bits.join(" · ");
+      wrap.appendChild(sub);
+    }
+  } else {
+    const tbd = document.createElement("span");
+    tbd.className = "location-tbd";
+    tbd.textContent = "TBD";
+    wrap.appendChild(tbd);
+
+    // Info popover: USCIS returned a null payload (hasn't assigned a
+    // service center yet) — explain *why* so "TBD" is never mysterious.
+    const group = document.createElement("span");
+    group.className = "location-info-group";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "info-badge";
+    btn.textContent = "i";
+    btn.setAttribute("aria-label", "What does TBD mean?");
+    btn.setAttribute("aria-expanded", "false");
+    const pop = document.createElement("div");
+    // Left-anchored variant — the badge sits on the left side of the card,
+    // so the default right-anchor would push the popover off-viewport.
+    pop.className = "info-popover popover-left";
+    pop.hidden = true;
+    pop.setAttribute("role", "tooltip");
+    const capturedAt = loc.capturedAt
+      ? formatLocalDateTime(loc.capturedAt)
+      : null;
+    pop.innerHTML =
+      `<strong>No location available yet.</strong>` +
+      `USCIS's location endpoint returned <code>{"data": null}</code> — typically ` +
+      `this means a service center hasn't been assigned to this case yet. ` +
+      `I-765 (EAD) cases are usually populated first; I-485 and I-131 tend ` +
+      `to stay null until later in the pipeline.` +
+      (capturedAt ? `<br/><br/>Last checked: ${escapeHtml(capturedAt)}.` : "") +
+      (loc.captures
+        ? ` <span class="muted">(${loc.captures} snapshot${loc.captures === 1 ? "" : "s"} on file.)</span>`
+        : "");
+    wireInfoPopover(btn, pop);
+    group.appendChild(btn);
+    group.appendChild(pop);
+    wrap.appendChild(group);
+  }
+
+  return wrap;
+}
+
+// Generic info-badge / popover wiring. Mirrors #export-info-btn behaviour
+// so the UX is consistent: click toggles, outside click or Escape dismisses.
+function wireInfoPopover(btn, pop) {
+  const close = () => {
+    pop.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+  };
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    const open = pop.hidden;
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  document.addEventListener("click", e => {
+    if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") close();
+  });
 }
 
 function _renderSubFacts(c, latest) {
@@ -437,20 +570,36 @@ const KIND_INFO = {
   appointment: { label: "appointment",    tone: "warn" },
   decision:    { label: "decision flag",  tone: "ok" },
   status:      { label: "status change",  tone: "" },
+  location_assigned: { label: "location assigned", tone: "ok",
+                 desc: "USCIS assigned a service center to this case — location API flipped from null to populated." },
+  location_changed:  { label: "location changed",  tone: "warn",
+                 desc: "Service center, subtype, or receipt-level field on the location API changed." },
+  location_cleared:  { label: "location cleared",  tone: "warn",
+                 desc: "Location API stopped returning receipt_details — rare; may indicate a reassignment in flight." },
 };
 
 
 function renderChangeBlock(ch) {
   const block = document.createElement("div");
-  block.className = "change-block";
+  block.className = `change-block${ch.source === "location" ? " change-block-location" : ""}`;
   const info = KIND_INFO[ch.kind] || KIND_INFO.status;
   const kindTag =
     `<span class="kind-tag kind-${info.tone || "n"}" ` +
     `title="${escapeHtml(info.desc || info.label)}">${escapeHtml(info.label)}</span>`;
+  // Badge marks which USCIS endpoint generated this diff. Case diffs are
+  // the common case, so the badge only renders for location entries to
+  // keep the timeline visually quiet.
+  const sourceBadge = ch.source === "location"
+    ? `<span class="source-badge source-location" title="From the location API (/receipt_info)">Location API</span>`
+    : "";
   block.innerHTML =
     `<div class="change-block-head">` +
-      `<span class="change-range">${escapeHtml(formatDate(ch.from))} ` +
-      `<span class="change-arrow">→</span> ${escapeHtml(formatDate(ch.to))}</span>` +
+      // `from` / `to` are the full ISO capturedAt timestamps of the LAST
+      // pull on each day-binned side — show the wall-clock time so the
+      // operator can correlate a diff with the specific pull that saw it.
+      `<span class="change-range">${escapeHtml(formatLocalDateTime(ch.from))} ` +
+      `<span class="change-arrow">→</span> ${escapeHtml(formatLocalDateTime(ch.to))}</span>` +
+      sourceBadge +
       kindTag +
     `</div>`;
 
@@ -559,7 +708,7 @@ function renderSystemLog() {
   const root = document.getElementById("systemlog-feed");
   root.innerHTML = "";
 
-  if (!state.systemLog.length) {
+  if (!state.systemLogTotal) {
     const empty = document.createElement("div");
     empty.className = "updates-empty";
     empty.innerHTML =
@@ -572,24 +721,103 @@ function renderSystemLog() {
     return;
   }
 
+  const perPage = state.systemLogPageSize;
+  const total = state.systemLogTotal;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const page = Math.min(Math.max(1, state.systemLogPage), totalPages);
+  const shown = state.systemLog.length;
+  // Compute the visible window in human 1-based terms: page 1 = newest,
+  // so the window on page 1 is [total-shown+1 .. total] when sorted newest-first.
+  const windowEnd = total - (page - 1) * perPage;         // highest index (newest in window)
+  const windowStart = windowEnd - shown + 1;              // lowest index
+  const countLine = totalPages > 1
+    ? `Page ${page} of ${totalPages} · showing events ${windowStart}–${windowEnd} of ${total}`
+    : `${total} event${total === 1 ? "" : "s"}`;
+
   const head = document.createElement("div");
   head.className = "updates-head syslog-head-row";
   head.innerHTML =
     `<div>` +
       `<h2>System log</h2>` +
       `<div class="updates-sub">` +
-        `${state.systemLog.length} event${state.systemLog.length === 1 ? "" : "s"} · ` +
+        `${escapeHtml(countLine)} · ` +
         `Persisted to <code>data/system_log.json</code>. Newest first.` +
       `</div>` +
     `</div>`;
   head.appendChild(renderSystemLogControls());
   root.appendChild(head);
 
-  // Newest first.
+  // Pagination — rendered BOTH above and below the list so operators
+  // don't have to scroll 100 rows to flip pages.
+  if (totalPages > 1) {
+    root.appendChild(renderSystemLogPagination(page, totalPages, "top"));
+  }
+
+  // Newest first within the current page.
   const rowsNewestFirst = [...state.systemLog].reverse();
   for (const e of rowsNewestFirst) {
     root.appendChild(renderSystemLogRow(e));
   }
+
+  if (totalPages > 1) {
+    root.appendChild(renderSystemLogPagination(page, totalPages, "bottom"));
+  }
+}
+
+function renderSystemLogPagination(page, totalPages, position) {
+  const wrap = document.createElement("nav");
+  wrap.className = `syslog-pagination syslog-pagination-${position}`;
+  wrap.setAttribute("aria-label", "System log pagination");
+
+  const mk = (label, targetPage, opts = {}) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `syslog-page-btn${opts.active ? " active" : ""}`;
+    btn.textContent = label;
+    btn.disabled = !!opts.disabled;
+    if (opts.title) btn.title = opts.title;
+    if (!opts.disabled && !opts.active) {
+      btn.addEventListener("click", () => gotoSystemLogPage(targetPage));
+    }
+    return btn;
+  };
+
+  wrap.appendChild(mk("« First", 1, { disabled: page === 1, title: "First page (newest)" }));
+  wrap.appendChild(mk("‹ Newer", page - 1, { disabled: page === 1 }));
+
+  // Numbered page buttons — show a compact window around the current page
+  // so very large logs (hundreds of pages) don't produce an unreadable bar.
+  const windowSize = 5;
+  let from = Math.max(1, page - Math.floor(windowSize / 2));
+  const to = Math.min(totalPages, from + windowSize - 1);
+  from = Math.max(1, to - windowSize + 1);
+  if (from > 1) {
+    wrap.appendChild(mk("1", 1));
+    if (from > 2) {
+      const ell = document.createElement("span");
+      ell.className = "syslog-page-ellipsis";
+      ell.textContent = "…";
+      wrap.appendChild(ell);
+    }
+  }
+  for (let n = from; n <= to; n++) {
+    wrap.appendChild(mk(String(n), n, { active: n === page }));
+  }
+  if (to < totalPages) {
+    if (to < totalPages - 1) {
+      const ell = document.createElement("span");
+      ell.className = "syslog-page-ellipsis";
+      ell.textContent = "…";
+      wrap.appendChild(ell);
+    }
+    wrap.appendChild(mk(String(totalPages), totalPages));
+  }
+
+  wrap.appendChild(mk("Older ›", page + 1, { disabled: page === totalPages }));
+  wrap.appendChild(mk("Last »", totalPages, {
+    disabled: page === totalPages, title: "Last page (oldest)",
+  }));
+  return wrap;
 }
 
 // Render the two System-log tab controls: "Export log" (one-click download
@@ -788,22 +1016,36 @@ function renderUpdates() {
 
 function renderUpdateRecord(u) {
   const info = KIND_INFO[u.kind] || KIND_INFO.status;
-  const detected = u.detectedOn || (u.to || "").slice(0, 10);
-  const real = u.realUpdateDate;
-  const detectedDisplay = formatDate(detected);
-  const realDisplay = real ? formatDate(real) : "";
-  const dateLine = realDisplay && realDisplay !== detectedDisplay
+  // Prefer the full capturedAt timestamp (`u.to`) for "Detected" so the
+  // operator sees the wall-clock time of the pull that spotted this diff.
+  // `detectedOn` (YYYY-MM-DD) is the legacy day-only field — kept as the
+  // deduplication key but not used for display when `to` is present.
+  const detectedDisplay = u.to
+    ? formatLocalDateTime(u.to)
+    : formatDate(u.detectedOn || "");
+  // `realUpdateDate` is sourced from USCIS's `updatedAt`, which is a date
+  // (no time) — formatDate is still correct here.
+  const realDisplay = u.realUpdateDate ? formatDate(u.realUpdateDate) : "";
+  // Only show the "Update date" tail when it genuinely differs from the
+  // detection date — compare at the day level since realUpdateDate has
+  // no time component.
+  const detectedDay = (u.to || u.detectedOn || "").slice(0, 10);
+  const dateLine = realDisplay && realDisplay !== formatDate(detectedDay)
     ? `Detected ${detectedDisplay} · Update date ${realDisplay}`
     : `Detected ${detectedDisplay}`;
 
   const block = document.createElement("article");
-  block.className = "update-record";
+  block.className = `update-record${u.source === "location" ? " update-record-location" : ""}`;
   block.dataset.id = u.id || "";
+  const sourceBadge = u.source === "location"
+    ? `<span class="source-badge source-location" title="From the location API (/receipt_info)">Location API</span>`
+    : "";
   block.innerHTML =
     `<header class="update-head">` +
       `<div class="update-head-left">` +
         `<span class="update-case">${escapeHtml(u.caseLabel || "?")}</span>` +
         `<span class="update-receipt">${escapeHtml(u.receiptNumber || "")}</span>` +
+        sourceBadge +
       `</div>` +
       `<span class="kind-tag kind-${info.tone || "n"}" ` +
            `title="${escapeHtml(info.desc || info.label)}">${escapeHtml(info.label)}</span>` +
@@ -925,12 +1167,55 @@ function callout(tone, title, body) {
 
 // ---------- raw ----------
 
+const RAW_SOURCES = {
+  case: {
+    label: "Case API",
+    historyKey: "entries",
+    fileSuffix: "_case.json",
+    emptyMsg: "No captures yet.",
+  },
+  location: {
+    label: "Location API",
+    historyKey: "locationEntries",
+    fileSuffix: "_location.json",
+    emptyMsg:
+      "No location snapshots yet — the next pull will start recording this endpoint.",
+  },
+};
+
 function renderRaw(panel, c) {
   panel.innerHTML = "";
-  const hist = state.histories[c.label];
-  const entries = (hist && hist.entries) || [];
+  const hist = state.histories[c.label] || {};
+
+  // Sub-tab nav. Default to "case" but remember the user's choice per card.
+  const activeSource = state.rawSource[c.receiptNumber] || "case";
+  state.rawSource[c.receiptNumber] = activeSource;
+
+  const nav = document.createElement("nav");
+  nav.className = "raw-sources";
+  nav.setAttribute("role", "tablist");
+  for (const [id, meta] of Object.entries(RAW_SOURCES)) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `raw-source${id === activeSource ? " active" : ""}`;
+    btn.dataset.source = id;
+    const count = (hist[meta.historyKey] || []).length;
+    btn.textContent = count ? `${meta.label} (${count})` : meta.label;
+    btn.addEventListener("click", () => {
+      state.rawSource[c.receiptNumber] = id;
+      renderRaw(panel, c);
+    });
+    nav.appendChild(btn);
+  }
+  panel.appendChild(nav);
+
+  const src = RAW_SOURCES[activeSource];
+  const entries = (hist[src.historyKey] || []);
   if (!entries.length) {
-    panel.innerHTML = `<div class="no-changes">No captures yet.</div>`;
+    const empty = document.createElement("div");
+    empty.className = "no-changes";
+    empty.textContent = src.emptyMsg;
+    panel.appendChild(empty);
     return;
   }
 
@@ -947,13 +1232,16 @@ function renderRaw(panel, c) {
     opt.textContent = formatSnapshotLabel(e.capturedAt);
     select.appendChild(opt);
   }
+  // Selection is tracked per (receipt, source) so switching sub-tabs
+  // doesn't wipe the user's picked capture on the other source.
+  const selKey = `${c.receiptNumber}:${activeSource}`;
   const current =
-    state.rawSelection[c.receiptNumber] ||
+    state.rawSelection[selKey] ||
     entries[entries.length - 1].capturedAt;
   select.value = current;
-  state.rawSelection[c.receiptNumber] = current;
+  state.rawSelection[selKey] = current;
   select.addEventListener("change", () => {
-    state.rawSelection[c.receiptNumber] = select.value;
+    state.rawSelection[selKey] = select.value;
     updateRawBody();
   });
   label.appendChild(select);
@@ -970,7 +1258,9 @@ function renderRaw(panel, c) {
   dlAll.title = "Download every capture for this case as a single JSON file";
   dlAll.addEventListener("click", () => {
     const num = (c.label || "").match(/(\d+)/);
-    const fname = num ? `${num[1]}_logs.json` : `${c.receiptNumber}.json`;
+    const fname = num
+      ? `${num[1]}${src.fileSuffix}`
+      : `${c.receiptNumber}${src.fileSuffix}`;
     downloadJson(fname, entries);
   });
   actions.appendChild(dlAll);
@@ -982,7 +1272,7 @@ function renderRaw(panel, c) {
   copyOne.textContent = COPY_IDLE_LABEL;
   copyOne.title = "Copy the currently selected snapshot as JSON to the clipboard";
   copyOne.addEventListener("click", async () => {
-    const ca = state.rawSelection[c.receiptNumber];
+    const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
     const text = JSON.stringify(entry, null, 2);
     const ok = await copyToClipboard(text);
@@ -1004,7 +1294,7 @@ function renderRaw(panel, c) {
   updateRawBody();
 
   function updateRawBody() {
-    const ca = state.rawSelection[c.receiptNumber];
+    const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
     // 4-space indent + syntax highlight — written as HTML so colours work.
     pre.innerHTML = highlightJson(JSON.stringify(entry, null, 4));

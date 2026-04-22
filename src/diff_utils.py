@@ -253,6 +253,123 @@ def compute_change(prev: dict, curr: dict) -> dict:
     }
 
 
+# Fields inside a location receipt_details payload that we surface as
+# scalar diffs on the Changes tab. We deliberately keep this short so the
+# diff block stays readable — internal flags like `milnatz`/`onpt`/
+# `premproc` show up in the raw JSON but aren't usually the interesting
+# signal when a service center gets assigned.
+_WATCHED_LOCATION_SCALARS: tuple[str, ...] = (
+    "location",
+    "subtype",
+    "form",
+    "receipt_date",
+    "premproc",
+    "onpt",
+    "milnatz",
+)
+
+
+def _unwrap_location_entry(entry: dict) -> dict | None:
+    """Return the `receipt_details` dict from a location snapshot, or None.
+
+    Snapshot shape is `{"capturedAt": ..., "data": <envelope>}`, where the
+    envelope is either `{"data": null}` (not yet assigned) or
+    `{"data": {"receipt_details": {...}, "message": "..."}}`.
+    """
+    envelope = entry.get("data")
+    if not isinstance(envelope, dict):
+        return None
+    inner = envelope.get("data")
+    if not isinstance(inner, dict) or not inner:
+        return None
+    details = inner.get("receipt_details")
+    if isinstance(details, dict) and details:
+        return details
+    # Legacy / already-unwrapped shape: treat inner as the details.
+    if any(k in inner for k in ("form", "location", "subtype")):
+        return inner
+    return None
+
+
+def _compute_location_change(prev: dict, curr: dict) -> dict | None:
+    """Diff two day-binned location snapshots. Returns None when unchanged.
+
+    `kind` encodes the most specific signal:
+      - `location_assigned`: prev was null, curr is populated.
+      - `location_cleared`:  prev was populated, curr is null.
+      - `location_changed`:  both populated, some watched field differs.
+    """
+    prev_details = _unwrap_location_entry(prev)
+    curr_details = _unwrap_location_entry(curr)
+
+    if prev_details is None and curr_details is None:
+        return None
+
+    if prev_details is None and curr_details is not None:
+        scalars = {
+            k: {"from": None, "to": curr_details.get(k)}
+            for k in _WATCHED_LOCATION_SCALARS
+            if curr_details.get(k) is not None
+        }
+        return {
+            "from": prev.get("capturedAt"),
+            "to": curr.get("capturedAt"),
+            "scalars": scalars,
+            "kind": "location_assigned",
+            "source": "location",
+        }
+
+    if prev_details is not None and curr_details is None:
+        scalars = {
+            k: {"from": prev_details.get(k), "to": None}
+            for k in _WATCHED_LOCATION_SCALARS
+            if prev_details.get(k) is not None
+        }
+        return {
+            "from": prev.get("capturedAt"),
+            "to": curr.get("capturedAt"),
+            "scalars": scalars,
+            "kind": "location_cleared",
+            "source": "location",
+        }
+
+    # Both populated — diff the watched scalars.
+    scalars: dict[str, dict[str, Any]] = {}
+    for k in _WATCHED_LOCATION_SCALARS:
+        if prev_details.get(k) != curr_details.get(k) and (
+            k in prev_details or k in curr_details
+        ):
+            scalars[k] = {"from": prev_details.get(k), "to": curr_details.get(k)}
+
+    if not scalars:
+        return None
+    return {
+        "from": prev.get("capturedAt"),
+        "to": curr.get("capturedAt"),
+        "scalars": scalars,
+        "kind": "location_changed",
+        "source": "location",
+    }
+
+
+def location_day_changes(entries: list[dict]) -> list[dict]:
+    """Change feed for the location API: one entry per day-pair where the
+    `receipt_details` payload (or its null-vs-populated state) differs.
+
+    Parallel to `day_changes` but operates on location snapshots, which
+    carry a different envelope shape and a much smaller set of interesting
+    scalars. Each change record is tagged with `source="location"` so the
+    merged UI feed can style it distinctively.
+    """
+    days = bin_by_day(entries)
+    feed: list[dict] = []
+    for prev, curr in zip(days, days[1:]):
+        change = _compute_location_change(prev, curr)
+        if change is not None:
+            feed.append(change)
+    return feed
+
+
 def day_changes(entries: list[dict]) -> list[dict]:
     """Full change feed: one entry per day-pair where something differed.
 
@@ -266,6 +383,7 @@ def day_changes(entries: list[dict]) -> list[dict]:
         if not _has_any_diff(change):
             continue
         change["kind"] = classify_change(change)
+        change["source"] = "case"
         feed.append(change)
     return feed
 

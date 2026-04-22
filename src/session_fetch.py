@@ -13,7 +13,7 @@ The session persists in `.uscis_session.json` (gitignored). A typical run:
   2. Probe the API first. If it works, we never enter the login flow.
   3. If the API is rejecting the session, re-authenticate exactly once and retry.
 
-Daily snapshots are appended to `data/{formNum}_logs.json` as
+Daily snapshots are appended to `data/{formNum}_case.json` as
 `{ "capturedAt": "YYYY-MM-DDTHH:MM:SSZ", "data": <full API response> }`.
 Each run's timestamp is second-precision ISO-8601 UTC; the diff engine
 slices to the date when it needs day-level grouping.
@@ -48,6 +48,7 @@ from uscis_api import (
     SessionExpired,
     fetch_case,
     fetch_case_in_new_tab,
+    fetch_location,
     open_worker_tab,
 )
 from uscis_auth import (
@@ -131,18 +132,25 @@ def log_file_for(form_type: str) -> Path:
     m = _FORM_NUM_RE.search(form_type or "")
     if not m:
         raise ValueError(f"Unrecognized form type: {form_type!r}")
-    return DATA_DIR / f"{m.group(1)}_logs.json"
+    return DATA_DIR / f"{m.group(1)}_case.json"
 
 
-def append_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
-    """Append a snapshot entry. Never replaces — multiple runs per day each
-    get their own row keyed by the full ISO-8601 timestamp in `capturedAt`.
+def location_log_file_for(form_type: str) -> Path:
+    """Location snapshots live in a sibling file: `{num}_location.json`.
 
-    Emits sys_log events when an existing log file is malformed, so a
-    silent "start fresh" never happens without a trace.
+    Separated from the main case log so the two endpoints can evolve
+    independently and the Raw-JSON panel can show them as distinct tabs
+    without having to demux a merged payload.
     """
+    m = _FORM_NUM_RE.search(form_type or "")
+    if not m:
+        raise ValueError(f"Unrecognized form type: {form_type!r}")
+    return DATA_DIR / f"{m.group(1)}_location.json"
+
+
+def _append_to_log_file(path: Path, entry: dict) -> Path:
+    """Shared append-with-malformed-recovery used by both case and location logs."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = log_file_for(form_type)
 
     logs: list[dict] = []
     if path.exists():
@@ -170,11 +178,41 @@ def append_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
                 error=f"{type(e).__name__}: {e}"[:200],
             )
 
-    logs.append({"capturedAt": captured_at, "data": data})
+    logs.append(entry)
 
     with open(path, "w") as f:
         json.dump(logs, f, indent=2)
     return path
+
+
+def append_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
+    """Append a case-API snapshot entry. Never replaces — multiple runs per
+    day each get their own row keyed by the full ISO-8601 timestamp in
+    `capturedAt`.
+
+    Emits sys_log events when an existing log file is malformed, so a
+    silent "start fresh" never happens without a trace.
+    """
+    return _append_to_log_file(
+        log_file_for(form_type),
+        {"capturedAt": captured_at, "data": data},
+    )
+
+
+def append_location_snapshot(
+    form_type: str, payload: dict | None, captured_at: str
+) -> Path:
+    """Append a location-API snapshot entry.
+
+    `payload` is the full response body (typically `{"data": null}` or
+    `{"data": {...}}`). Stored verbatim so downstream code can diff the
+    full envelope, including the moment `null` flips to a populated
+    record.
+    """
+    return _append_to_log_file(
+        location_log_file_for(form_type),
+        {"capturedAt": captured_at, "data": payload},
+    )
 
 
 def _extract_cases(
@@ -241,6 +279,62 @@ def _extract_cases(
         sys_log("snapshot_appended", source="session_fetch",
                 label=label or "?", receipt=receipt,
                 form_type=form_type, file=path.name)
+
+        # Location endpoint is best-effort. A failure here must not
+        # count against the case-fetch run (events are the source of
+        # truth). In keep-alive mode we don't have a worker tab — the
+        # per-case tab already navigated to the case endpoint and
+        # would get overwritten if we reused it, so we skip.
+        if probe_tab is not None:
+            try:
+                loc_data = fetch_location(probe_tab, receipt)
+            except SessionExpired:
+                # Session death during location fetch still matters.
+                sys_log("location_fetch_session_expired", level="warning",
+                        source="session_fetch", label=label or "?",
+                        receipt=receipt)
+                raise
+            except (ApiError, Exception) as e:  # noqa: BLE001
+                logger.warning("  ⚠ location fetch failed for %s: %s", receipt, e)
+                sys_log("location_fetch_failed", level="warning",
+                        source="session_fetch", label=label or "?",
+                        receipt=receipt,
+                        error=f"{type(e).__name__}: {e}"[:200])
+            else:
+                try:
+                    lpath = append_location_snapshot(
+                        form_type, loc_data, captured_at
+                    )
+                    logger.info("  → %s", lpath.relative_to(ROOT))
+                    has_data = bool(
+                        isinstance(loc_data, dict)
+                        and loc_data.get("data") is not None
+                    )
+                    sys_log("location_snapshot_appended", source="session_fetch",
+                            label=label or "?", receipt=receipt,
+                            form_type=form_type, file=lpath.name,
+                            has_data=has_data)
+                except ValueError as e:
+                    logger.warning("  ⚠ location log skipped: %s", e)
+                    sys_log("location_snapshot_append_failed", level="warning",
+                            source="session_fetch", label=label or "?",
+                            receipt=receipt, error=str(e))
+
+            # Restore the worker tab to the dashboard context before
+            # the next case-endpoint navigation so Referer remains
+            # consistent (see open_worker_tab docstring).
+            try:
+                probe_tab.goto(
+                    "https://my.uscis.gov/account/applicant",
+                    wait_until="domcontentloaded",
+                    timeout=20_000,
+                )
+            except Exception as e:  # noqa: BLE001 — best-effort dashboard warm-up
+                sys_log(
+                    "location_post_fetch_rewarm_failed", level="warning",
+                    source="session_fetch", receipt=receipt,
+                    error=f"{type(e).__name__}: {e}"[:200],
+                )
 
     return failures
 

@@ -117,6 +117,14 @@ def read_all(limit: int | None = None) -> list[dict]:
     return entries
 
 
+def count() -> int:
+    """Total number of entries currently stored. Cheaper than read_all when
+    the caller only needs the count (e.g. to surface "total vs shown" in
+    the dashboard badge without double-reading a limited slice)."""
+    with _lock:
+        return len(_read_file())
+
+
 def clear() -> None:
     """Wipe the log file. Irreversible — used both by tests and by the
     operator-triggered `POST /api/system-log/clear` endpoint."""

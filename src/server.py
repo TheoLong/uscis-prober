@@ -4,7 +4,7 @@
 """USCIS Prober — long-running local web dashboard.
 
 Launches a Flask app on http://localhost:8080 that:
-  - Reads case snapshots from `data/*_logs.json`
+  - Reads case snapshots from `data/*_case.json`
   - Exposes REST endpoints the UI uses to render visualisations & diffs
   - Runs `session_fetch.py run` in a subprocess on demand (button) and on
     a cron schedule (07:00, 14:00, and 20:00 America/New_York daily)
@@ -39,10 +39,16 @@ from diff_utils import (
     bin_by_day,
     day_changes,
     day_of,
+    location_day_changes,
     summarize_case,
 )
 from mailer import notify_update
-from system_log import log as sys_log, read_all as read_system_log, clear as clear_system_log
+from system_log import (
+    log as sys_log,
+    read_all as read_system_log,
+    count as count_system_log,
+    clear as clear_system_log,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
@@ -97,17 +103,25 @@ def _log_file_for(form_label: str) -> Path | None:
     verify path containment explicitly so any future relaxation of the
     pattern can't silently enable path traversal.
     """
+    return _log_path_for(form_label, suffix="_case.json")
+
+
+def _location_log_file_for(form_label: str) -> Path | None:
+    """Resolve the location-snapshot-log path for a form label."""
+    return _log_path_for(form_label, suffix="_location.json")
+
+
+def _log_path_for(form_label: str, *, suffix: str) -> Path | None:
     m = _FORM_NUM_RE.search(form_label or "")
     if not m:
         return None
-    candidate = (DATA_DIR / f"{m.group(1)}_logs.json").resolve()
+    candidate = (DATA_DIR / f"{m.group(1)}{suffix}").resolve()
     if candidate.parent != DATA_DIR.resolve():  # pragma: no cover — regex forbids traversal today
         return None
     return candidate
 
 
-def load_entries(form_label: str) -> list[dict]:
-    path = _log_file_for(form_label)
+def _load_json_list(path: Path | None) -> list[dict]:
     if not path or not path.exists():
         return []
     try:
@@ -117,6 +131,52 @@ def load_entries(form_label: str) -> list[dict]:
     except json.JSONDecodeError:
         logger.warning("%s is not valid JSON; treating as empty.", path.name)
         return []
+
+
+def load_entries(form_label: str) -> list[dict]:
+    return _load_json_list(_log_file_for(form_label))
+
+
+def load_location_entries(form_label: str) -> list[dict]:
+    return _load_json_list(_location_log_file_for(form_label))
+
+
+def _latest_location_payload(entries: list[dict]) -> dict | None:
+    """Return the most recent location API response body, or None.
+
+    Response envelope is `{"data": null}` or `{"data": {...}}`. We return
+    the full envelope (not the unwrapped `.data`) so the UI can
+    distinguish "USCIS returned null" from "we never fetched".
+    """
+    if not entries:
+        return None
+    return entries[-1].get("data")
+
+
+def _latest_location_info(entries: list[dict]) -> dict | None:
+    """Return the populated `receipt_details` object from the most recent
+    location snapshot, or None when USCIS is still returning null.
+
+    Live envelope shape from `/receipt_info/{receipt}`:
+      - unassigned: `{"data": null}`
+      - assigned:   `{"data": {"receipt_details": {form, location, subtype,
+                    receipt_date, ...}, "message": "..."}}`
+    """
+    payload = _latest_location_payload(entries)
+    if not isinstance(payload, dict):
+        return None
+    inner = payload.get("data")
+    if not isinstance(inner, dict) or not inner:
+        return None
+    details = inner.get("receipt_details")
+    if isinstance(details, dict) and details:
+        return details
+    # Fallback: some snapshots may already be unwrapped. Return `inner`
+    # as-is if it looks like a details record (has at least one of the
+    # known fields). This keeps older test fixtures working.
+    if any(k in inner for k in ("form", "location", "subtype")):
+        return inner
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -134,18 +194,29 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def _all_update_records(config: dict | None = None) -> list[dict]:
-    """Every diff across every configured case, same shape as /api/updates."""
+    """Every diff across every configured case, same shape as /api/updates.
+
+    Includes both case-API diffs and location-API diffs (tagged via
+    `source`). IDs embed the source so case and location diffs detected
+    on the same day produce distinct records — critical for the
+    "new since last pull" email-notification snapshot set.
+    """
     config = config or load_config()
     records: list[dict] = []
     for c in config.get("cases", []):
         label = c["label"]
         receipt = c["id"]
-        for change in day_changes(load_entries(label)):
+        merged = _merge_changes(
+            day_changes(load_entries(label)),
+            location_day_changes(load_location_entries(label)),
+        )
+        for change in merged:
             detected_on = (change.get("to") or "")[:10]
+            source = change.get("source") or "case"
             real_update_date = (change.get("scalars") or {}).get("updatedAt", {}).get("to")
             rec = dict(change)
             rec.update({
-                "id": f"{receipt}:{detected_on}",
+                "id": f"{receipt}:{source}:{detected_on}",
                 "caseLabel": label,
                 "receiptNumber": receipt,
                 "detectedOn": detected_on,
@@ -385,6 +456,10 @@ def api_cases():
         latest_data = (latest or {}).get("data") or {}
         summary = summarize_case(entries, today_iso=today) if entries else {}
 
+        location_entries = load_location_entries(c["label"])
+        location_info = _latest_location_info(location_entries)
+        last_location_entry = location_entries[-1] if location_entries else None
+
         cases.append(
             {
                 "id": c["id"],
@@ -402,22 +477,42 @@ def api_cases():
                 "notices": latest_data.get("notices", []),
                 "latest": latest_data,
                 "summary": summary,
+                "location": {
+                    "info": location_info,            # populated inner data, or None
+                    "captures": len(location_entries),
+                    "capturedAt": (last_location_entry or {}).get("capturedAt"),
+                },
             }
         )
     return jsonify({"cases": cases, "eventCodeLabels": EVENT_CODE_LABELS})
+
+
+def _merge_changes(case_changes: list[dict], loc_changes: list[dict]) -> list[dict]:
+    """Interleave case and location change records in chronological order.
+
+    Both feeds already carry a `source` tag (`case` / `location`) so the
+    UI can style them distinctively. Sort key is the `to` timestamp —
+    the moment the diff was observed — newest last so callers that need
+    newest-first can `reversed()` once.
+    """
+    merged = list(case_changes) + list(loc_changes)
+    merged.sort(key=lambda c: c.get("to") or "")
+    return merged
 
 
 @app.route("/api/cases/<label>/history")
 def api_case_history(label: str):
     entries = load_entries(label)
     days = bin_by_day(entries)
-    changes = day_changes(entries)
+    location_entries = load_location_entries(label)
+    changes = _merge_changes(day_changes(entries), location_day_changes(location_entries))
     return jsonify(
         {
             "label": label,
-            "entries": entries,         # all raw captures
+            "entries": entries,         # all raw case-API captures
             "days": days,               # one entry per UTC day (latest of day)
-            "changes": changes,         # day-to-day diffs (only days that changed)
+            "changes": changes,         # merged case + location diffs, chronological
+            "locationEntries": location_entries,  # raw location-API captures
         }
     )
 
@@ -427,44 +522,22 @@ def api_updates():
     """Flat feed of every diff across every configured case, newest first.
 
     Each record is enriched with:
-      - `id`            stable key `{receipt}:{toDate}` (dedup / email tracking)
+      - `id`            stable key `{receipt}:{source}:{toDate}` (dedup / email tracking)
       - `caseLabel`     e.g. "I-485"
       - `receiptNumber`
+      - `source`        "case" | "location" (which endpoint produced the diff)
       - `detectedOn`    day we observed this diff (YYYY-MM-DD)
       - `realUpdateDate`   actual updatedAt date post-change (may differ from detectedOn)
     Plus the original diff body (scalars / events / notices / documents / kind).
     """
-    config = load_config()
-    records: list[dict] = []
-    for c in config.get("cases", []):
-        label = c["label"]
-        receipt = c["id"]
-        for change in day_changes(load_entries(label)):
-            detected_on = (change.get("to") or "")[:10]
-            real_update_date = (
-                (change.get("scalars") or {})
-                .get("updatedAt", {})
-                .get("to")
-            )
-            rec = dict(change)
-            rec.update(
-                {
-                    "id": f"{receipt}:{detected_on}",
-                    "caseLabel": label,
-                    "receiptNumber": receipt,
-                    "detectedOn": detected_on,
-                    "realUpdateDate": real_update_date,
-                }
-            )
-            records.append(rec)
-
+    records = _all_update_records()
     records.sort(key=lambda r: r.get("to") or "", reverse=True)
     return jsonify({"updates": records, "eventCodeLabels": EVENT_CODE_LABELS})
 
 
 @app.route("/api/export")
 def api_export():
-    """Stream a zip containing every `data/*_logs.json` plus a manifest.
+    """Stream a zip containing every `data/*_case.json` plus a manifest.
 
     The manifest maps each file to its configured case label + receipt
     so the archive is self-describing. Produced in memory — the repo's
@@ -497,11 +570,29 @@ def api_export():
                 except (OSError, json.JSONDecodeError):
                     entries = []
                     arcname = None
+            # Location snapshot log (sibling file; may not exist yet)
+            lpath = _location_log_file_for(label)
+            location_entries: list = []
+            location_arcname: str | None = None
+            if lpath and lpath.exists():
+                try:
+                    raw = lpath.read_bytes()
+                    parsed = json.loads(raw) if raw else []
+                    if isinstance(parsed, list):
+                        location_entries = parsed
+                        location_arcname = lpath.name
+                        z.writestr(location_arcname, raw)
+                except (OSError, json.JSONDecodeError):
+                    location_entries = []
+                    location_arcname = None
+
             manifest["cases"].append({
                 "label": label,
                 "receiptNumber": receipt,
                 "file": arcname,
                 "entries": len(entries),
+                "locationFile": location_arcname,
+                "locationEntries": len(location_entries),
             })
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
         # Note: the system event log is NOT included in this archive. It has
@@ -522,20 +613,66 @@ def api_export():
     )
 
 
+DEFAULT_SYSLOG_PAGE_SIZE = 100
+MAX_SYSLOG_PAGE_SIZE = 500
+
+
 @app.route("/api/system-log")
 def api_system_log():
-    """Return the structured event log (for the dashboard's System log tab).
+    """Return a paginated slice of the structured event log.
 
-    Optional query params:
-      - `limit=N` — return only the last N events (default: all up to MAX_ENTRIES).
+    Pages are counted from the *newest* end:
+      - `offset=0, limit=100` → most recent 100 entries (oldest-first within
+        the slice — the UI reverses for newest-first display).
+      - `offset=100, limit=100` → the 100 entries older than the first page.
+
+    Response shape:
+      {
+        "events": [...],   # oldest-first slice for this page
+        "total": <int>,    # count of all entries on disk
+        "limit": <int>,
+        "offset": <int>,
+      }
+
+    `total` is always the true on-disk count so the UI can compute
+    `ceil(total/limit)` pages and render navigation. It is independent of
+    the slice returned — a `limit=100` fetch against an 888-entry log
+    still reports `total=888`.
+
+    Query params:
+      - `limit=N` (default 100, clamped to [1, 500])
+      - `offset=N` (default 0, clamped to >= 0)
     """
-    try:
-        limit_raw = request.args.get("limit")
-        limit = int(limit_raw) if limit_raw else None
-    except ValueError:
-        limit = None
-    entries = read_system_log(limit=limit)
-    return jsonify({"events": entries})
+    def _positive_int(raw: str | None, default: int, *, max_val: int | None = None) -> int:
+        try:
+            v = int(raw) if raw is not None else default
+        except ValueError:
+            v = default
+        v = max(v, 0)
+        if max_val is not None:
+            v = min(v, max_val)
+        return v
+
+    limit = _positive_int(
+        request.args.get("limit"),
+        DEFAULT_SYSLOG_PAGE_SIZE,
+        max_val=MAX_SYSLOG_PAGE_SIZE,
+    ) or 1  # never zero: an explicit limit=0 would be useless, round up.
+    offset = _positive_int(request.args.get("offset"), 0)
+
+    entries = read_system_log()   # oldest-first on disk
+    total = len(entries)
+    end = max(0, total - offset)
+    start = max(0, end - limit)
+    page_events = entries[start:end]
+    return jsonify(
+        {
+            "events": page_events,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
 
 @app.route("/api/system-log/export")

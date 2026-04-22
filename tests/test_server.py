@@ -47,14 +47,18 @@ def client(monkeypatch, tmp_path):
 
 
 def _seed_log(data_dir: Path, entries: list[dict]) -> None:
-    (data_dir / "485_logs.json").write_text(json.dumps(entries))
+    (data_dir / "485_case.json").write_text(json.dumps(entries))
+
+
+def _seed_location_log(data_dir: Path, entries: list[dict]) -> None:
+    (data_dir / "485_location.json").write_text(json.dumps(entries))
 
 
 # -------- pure helpers ---------------------------------------------------
 
 def test_log_file_for_recognises_form_numbers(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    assert server._log_file_for("I-485").name == "485_logs.json"
+    assert server._log_file_for("I-485").name == "485_case.json"
 
 
 def test_log_file_for_none_for_unknown_form(monkeypatch, tmp_path):
@@ -69,19 +73,19 @@ def test_load_entries_returns_empty_on_missing_file(monkeypatch, tmp_path):
 
 def test_load_entries_returns_empty_on_invalid_json(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    (tmp_path / "485_logs.json").write_text("{broken")
+    (tmp_path / "485_case.json").write_text("{broken")
     assert server.load_entries("I-485") == []
 
 
 def test_load_entries_rejects_non_list_payload(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    (tmp_path / "485_logs.json").write_text('{"not": "list"}')
+    (tmp_path / "485_case.json").write_text('{"not": "list"}')
     assert server.load_entries("I-485") == []
 
 
 def test_load_entries_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    (tmp_path / "485_logs.json").write_text('[{"capturedAt": "x"}]')
+    (tmp_path / "485_case.json").write_text('[{"capturedAt": "x"}]')
     assert server.load_entries("I-485") == [{"capturedAt": "x"}]
 
 
@@ -130,7 +134,7 @@ def test_all_update_records_enriches_id(monkeypatch, tmp_path):
     ])
     records = server._all_update_records()
     assert len(records) == 1
-    assert records[0]["id"] == "IOE1:2026-03-10"
+    assert records[0]["id"] == "IOE1:case:2026-03-10"
     assert records[0]["caseLabel"] == "I-485"
     assert records[0]["detectedOn"] == "2026-03-10"
 
@@ -243,7 +247,7 @@ def test_run_pull_subprocess_success_with_new_diffs_notifies(monkeypatch, tmp_pa
         calls["n"] += 1
         if calls["n"] == 1:
             return []
-        return [{"id": "IOE1:2026-03-10", "kind": "event"}]
+        return [{"id": "IOE1:case:2026-03-10", "kind": "event"}]
 
     monkeypatch.setattr(server, "_all_update_records", _fake_records)
     with patch.object(subprocess, "run", return_value=_fake_proc(0, "", "")), \
@@ -405,13 +409,154 @@ def test_api_history_preserves_uscis_key_order(client, tmp_path):
         # Keys deliberately NOT in alphabetical order:
         "data": {"zeta_first": 1, "alpha_later": 2, "middle_third": 3},
     }]
-    (data_dir / "485_logs.json").write_text(json.dumps(entries))
+    (data_dir / "485_case.json").write_text(json.dumps(entries))
 
     r = client.get("/api/cases/I-485/history")
     body = r.data.decode()
     # Original insertion order must be preserved in the wire bytes.
     assert body.index("zeta_first") < body.index("alpha_later")
     assert body.index("alpha_later") < body.index("middle_third")
+
+
+def test_api_cases_surfaces_populated_location(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    # Live USCIS envelope: {"data": {"receipt_details": {...}, "message": ...}}
+    _seed_location_log(data_dir, [
+        {
+            "capturedAt": "2026-04-22T18:00:00Z",
+            "data": {
+                "data": {
+                    "receipt_details": {
+                        "form": "I-485",
+                        "location": "SCD",
+                        "subtype": "147-C9",
+                    },
+                    "message": "ok",
+                },
+            },
+        },
+    ])
+    r = client.get("/api/cases")
+    case = r.get_json()["cases"][0]
+    assert case["location"]["info"]["location"] == "SCD"
+    assert case["location"]["info"]["subtype"] == "147-C9"
+    assert case["location"]["captures"] == 1
+    assert case["location"]["capturedAt"] == "2026-04-22T18:00:00Z"
+
+
+def test_api_cases_accepts_flat_location_payload_fallback(client, tmp_path):
+    # Defensive: if a future/legacy snapshot is already flat (no receipt_details
+    # wrapper), still surface it.
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_location_log(data_dir, [
+        {
+            "capturedAt": "2026-04-22T18:00:00Z",
+            "data": {"data": {"form": "I-765", "location": "SCD"}},
+        },
+    ])
+    r = client.get("/api/cases")
+    case = r.get_json()["cases"][0]
+    assert case["location"]["info"]["location"] == "SCD"
+
+
+def test_api_cases_exposes_null_location_as_info_none(client, tmp_path):
+    # `{"data": null}` snapshots still count as captures — the dashboard uses
+    # `info: None` to render TBD with its explanatory popover.
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_location_log(data_dir, [
+        {"capturedAt": "2026-04-22T18:00:00Z", "data": {"data": None}},
+    ])
+    r = client.get("/api/cases")
+    case = r.get_json()["cases"][0]
+    assert case["location"]["info"] is None
+    assert case["location"]["captures"] == 1
+
+
+def test_api_cases_location_absent_when_no_log(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    r = client.get("/api/cases")
+    case = r.get_json()["cases"][0]
+    assert case["location"]["info"] is None
+    assert case["location"]["captures"] == 0
+    assert case["location"]["capturedAt"] is None
+
+
+def test_api_case_history_merges_location_changes(client, tmp_path):
+    # A null→populated location transition should appear alongside the
+    # case-API diff in `changes`, chronologically ordered and tagged.
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-04-20T00:00:00Z"),
+        _entry("2026-04-21T00:00:00Z", closed=True),
+    ])
+    _seed_location_log(data_dir, [
+        {"capturedAt": "2026-04-20T00:00:00Z", "data": {"data": None}},
+        {"capturedAt": "2026-04-22T00:00:00Z", "data": {
+            "data": {"receipt_details": {"form": "I-485", "location": "SCD"}}}},
+    ])
+    r = client.get("/api/cases/I-485/history")
+    body = r.get_json()
+    sources = [ch.get("source") for ch in body["changes"]]
+    kinds = [ch.get("kind") for ch in body["changes"]]
+    assert "location" in sources and "case" in sources
+    assert "location_assigned" in kinds
+    # Chronological order — decision diff (04-21) precedes location (04-22).
+    tos = [ch.get("to") for ch in body["changes"]]
+    assert tos == sorted(tos)
+
+
+def test_api_updates_tags_location_records(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-04-20T00:00:00Z"),
+        _entry("2026-04-21T00:00:00Z", closed=True),
+    ])
+    _seed_location_log(data_dir, [
+        {"capturedAt": "2026-04-20T00:00:00Z", "data": {"data": None}},
+        {"capturedAt": "2026-04-22T00:00:00Z", "data": {
+            "data": {"receipt_details": {"form": "I-485", "location": "SCD"}}}},
+    ])
+    r = client.get("/api/updates")
+    records = r.get_json()["updates"]
+    ids = {rec["id"] for rec in records}
+    # Source is embedded in the ID so case + location detected on the same
+    # day stay distinct for email-notification deduping.
+    assert any(i.endswith(":location:2026-04-22") for i in ids)
+    assert any(i.endswith(":case:2026-04-21") for i in ids)
+
+
+def test_api_case_history_includes_location_entries(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_location_log(data_dir, [
+        {"capturedAt": "2026-04-22T18:00:00Z", "data": {"data": None}},
+    ])
+    r = client.get("/api/cases/I-485/history")
+    body = r.get_json()
+    assert len(body["locationEntries"]) == 1
+    assert body["locationEntries"][0]["data"] == {"data": None}
+
+
+def test_api_export_includes_location_log(client, tmp_path):
+    import io, zipfile
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_location_log(data_dir, [
+        {"capturedAt": "2026-04-22T18:00:00Z", "data": {"data": None}},
+    ])
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        names = set(z.namelist())
+        assert "485_location.json" in names
+        manifest = json.loads(z.read("manifest.json"))
+        entry = manifest["cases"][0]
+        assert entry["locationFile"] == "485_location.json"
+        assert entry["locationEntries"] == 1
 
 
 def test_api_case_history_returns_changes(client, tmp_path):
@@ -437,7 +582,7 @@ def test_api_updates_returns_sorted_feed(client, tmp_path):
     assert body["updates"]
     rec = body["updates"][0]
     assert rec["caseLabel"] == "I-485"
-    assert rec["id"] == "IOE1:2026-03-10"
+    assert rec["id"] == "IOE1:case:2026-03-10"
 
 
 def test_api_pull_starts_new_pull(client, monkeypatch):
@@ -479,12 +624,12 @@ def test_api_export_returns_zip_with_manifest(client, tmp_path):
 
     with zipfile.ZipFile(io.BytesIO(r.data)) as z:
         names = set(z.namelist())
-        assert "485_logs.json" in names
+        assert "485_case.json" in names
         assert "manifest.json" in names
         manifest = json.loads(z.read("manifest.json"))
         assert manifest["cases"][0]["label"] == "I-485"
         assert manifest["cases"][0]["receiptNumber"] == "IOE1"
-        assert manifest["cases"][0]["file"] == "485_logs.json"
+        assert manifest["cases"][0]["file"] == "485_case.json"
         assert manifest["cases"][0]["entries"] == 1
         assert "generatedAt" in manifest
 
@@ -504,7 +649,7 @@ def test_api_export_records_missing_logs_in_manifest(client):
 def test_api_export_survives_corrupt_log(client, tmp_path):
     import io, zipfile
     data_dir = tmp_path / "data"
-    (data_dir / "485_logs.json").write_text("{not valid json")
+    (data_dir / "485_case.json").write_text("{not valid json")
     r = client.get("/api/export")
     assert r.status_code == 200
     with zipfile.ZipFile(io.BytesIO(r.data)) as z:
@@ -561,7 +706,7 @@ def test_api_test_email_uses_latest_real_record_when_available(client, tmp_path,
                         lambda auth, to, rec, labels: sent.update({"rec": rec}))
     r = client.post("/api/test-email")
     assert r.status_code == 200
-    assert sent["rec"]["id"] == "IOE1:2026-03-10"
+    assert sent["rec"]["id"] == "IOE1:case:2026-03-10"
 
 
 def test_api_test_email_surfaces_failure(client, monkeypatch):

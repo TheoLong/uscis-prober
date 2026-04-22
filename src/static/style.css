@@ -167,6 +167,14 @@ body {
   font-size: 0.82rem;
   line-height: 1.45;
 }
+/* Left-anchored variant: used when the trigger badge sits on the LEFT of
+   its container (e.g. the inline "Current location" row). The default
+   right-anchored placement would push the popover off the card/viewport
+   in that case. */
+.info-popover.popover-left {
+  right: auto;
+  left: 0;
+}
 .info-popover code {
   font-family: var(--font-mono);
   font-size: 0.78rem;
@@ -253,7 +261,10 @@ main[hidden] { display: none; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  overflow: hidden;
+  /* No overflow clipping — popovers and tooltips inside must be able to
+     extend past the card bounds. None of the card's children use a
+     background that bleeds into the rounded corners, so allowing overflow
+     is visually safe. */
 }
 .case-header {
   display: flex; justify-content: space-between; align-items: flex-start;
@@ -501,6 +512,53 @@ main[hidden] { display: none; }
 }
 .syslog-export-btn:hover { background: var(--bg-elev); }
 
+/* Pagination bar — one bar above and one below the 100-row list so the
+   user doesn't have to scroll either direction to flip pages. */
+.syslog-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px 0;
+}
+.syslog-pagination-top { margin-bottom: 4px; }
+.syslog-pagination-bottom { margin-top: 8px; }
+.syslog-page-btn {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  min-width: 32px;
+  line-height: 1.2;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.syslog-page-btn:hover:not(:disabled):not(.active) {
+  background: var(--bg-elev);
+  color: var(--text);
+  border-color: var(--border);
+}
+.syslog-page-btn.active {
+  color: var(--bg);
+  background: var(--accent-hot);
+  border-color: var(--accent-hot);
+  font-weight: 600;
+  cursor: default;
+}
+.syslog-page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.syslog-page-ellipsis {
+  padding: 0 4px;
+  color: var(--muted-2);
+  font-size: 0.82rem;
+}
+
 .clear-log-control { display: inline-flex; }
 
 .clear-log-btn {
@@ -675,6 +733,77 @@ main[hidden] { display: none; }
 }
 .sub-fact-v.mono { font-family: var(--font-mono); font-size: 0.82rem; }
 
+/* ---------- current location row ---------- */
+.location-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.location-key {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted-2);
+}
+.location-val {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--text);
+  font-weight: 600;
+}
+.location-sub {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.location-tbd {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: var(--bg-elev-2);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+}
+.location-info-group {
+  position: relative;
+  display: inline-flex;
+}
+
+/* ---------- raw sub-source tabs (Case API / Location API) ---------- */
+.raw-sources {
+  display: inline-flex;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 3px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.raw-source {
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  cursor: pointer;
+}
+.raw-source:hover { color: var(--text); }
+.raw-source.active {
+  color: var(--bg);
+  background: var(--accent-hot);
+  font-weight: 600;
+}
+
 /* ---------- timeline ---------- */
 .timeline {
   position: relative;
@@ -760,6 +889,29 @@ main[hidden] { display: none; }
 }
 .change-range { font-family: var(--font-mono); }
 .change-arrow { color: var(--accent-hot); }
+
+/* Location-API diffs are visually distinct — the source changed, not the
+   case events. A left border ties them to the Location API tab colour. */
+.change-block-location {
+  border-left: 3px solid var(--accent-hot);
+}
+.source-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  margin-left: 6px;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-hot);
+  background: rgba(138, 178, 255, 0.12);
+  border: 1px solid var(--accent-hot);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+.update-record-location {
+  border-left: 3px solid var(--accent-hot);
+}
 
 .kind-tag {
   font-size: 0.7rem;

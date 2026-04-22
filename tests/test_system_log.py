@@ -317,9 +317,117 @@ def test_api_system_log_respects_limit(monkeypatch, tmp_path):
         system_log.log("tick", i=i)
     with server.app.test_client() as c:
         r = c.get("/api/system-log?limit=5")
-        events = r.get_json()["events"]
+        body = r.get_json()
+        events = body["events"]
         assert len(events) == 5
+        # The newest 5 entries (indexes 15..19), returned oldest-first.
         assert [e["i"] for e in events] == [15, 16, 17, 18, 19]
+        # `total` reflects the true count on disk regardless of limit.
+        assert body["total"] == 20
+        assert body["limit"] == 5
+        assert body["offset"] == 0
+
+
+def test_api_system_log_paginates_with_offset(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(888):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        # Page 1 (newest 100): indexes 788..887.
+        body = c.get("/api/system-log?limit=100&offset=0").get_json()
+        assert body["total"] == 888
+        assert [e["i"] for e in body["events"]] == list(range(788, 888))
+
+        # Page 2: indexes 688..787.
+        body = c.get("/api/system-log?limit=100&offset=100").get_json()
+        assert [e["i"] for e in body["events"]] == list(range(688, 788))
+
+        # Last (partial) page, page 9 with offset=800: indexes 0..87 —
+        # 888 total, per_page=100 → 9 pages, last has 88 entries.
+        body = c.get("/api/system-log?limit=100&offset=800").get_json()
+        assert [e["i"] for e in body["events"]] == list(range(0, 88))
+        assert len(body["events"]) == 88
+
+
+def test_api_system_log_offset_past_end_returns_empty_slice(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for _ in range(10):
+        system_log.log("tick")
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log?limit=100&offset=9999").get_json()
+        # No crash; total still correct; empty slice.
+        assert body["total"] == 10
+        assert body["events"] == []
+
+
+def test_api_system_log_clamps_limit_to_500(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(700):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log?limit=99999").get_json()
+        # Clamped to MAX_SYSLOG_PAGE_SIZE (500) so a huge `limit` can't DoS
+        # the dashboard by forcing an unbounded JSON serialisation.
+        assert body["limit"] == 500
+        assert len(body["events"]) == 500
+
+
+def test_api_system_log_default_limit_is_page_size(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for _ in range(250):
+        system_log.log("tick")
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log").get_json()
+        # No limit param → default page size = 100.
+        assert body["limit"] == server.DEFAULT_SYSLOG_PAGE_SIZE == 100
+        assert len(body["events"]) == 100
+        assert body["total"] == 250
+
+
+def test_api_system_log_negative_offset_clamped_to_zero(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(5):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log?offset=-9").get_json()
+        assert body["offset"] == 0
+        assert len(body["events"]) == 5
+
+
+def test_system_log_count_matches_read_all(monkeypatch, tmp_path):
+    # `count()` must agree with `len(read_all())` — it's the cheap variant,
+    # not a different counter.
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    assert system_log.count() == 0
+    for i in range(7):
+        system_log.log("tick", i=i)
+    assert system_log.count() == 7
+    assert system_log.count() == len(system_log.read_all())
 
 
 def test_api_system_log_ignores_bad_limit(monkeypatch, tmp_path):
