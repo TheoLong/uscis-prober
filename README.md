@@ -2,21 +2,29 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
-**Pulls the real USCIS API 3×/day and diffs snapshots** to catch the
-silent `updatedAt` bumps and event-code changes that public status
-checkers miss. Self-hosted, one config file.
+**Pulls the real USCIS case + location APIs 3×/day and diffs
+snapshots** to catch silent `updatedAt` bumps, event-code changes,
+and service-center assignments that public status checkers miss.
+Self-hosted, one config file.
 
 ### vs. other case checkers
 
-- **Real API, not scraped status.** Calls
-  `/case-service/api/cases/{id}` and logs full snapshots.
+- **Real API, not scraped status.** Calls two USCIS endpoints per pull:
+  the case endpoint (`/case-service/api/cases/{id}` — full event + notice
+  history) and the location endpoint (`/secure-messaging/api/case-service/
+  receipt_info/{id}` — service center, subtype, receipt date). Logs
+  complete snapshots of both.
+- **Tracks service center assignment, not just events.** I-765s typically
+  get a service center (e.g. `SCD`, `NSC`) before I-485 / I-131; you'll
+  see it the moment USCIS flips the location API from `null` to populated.
 - **Authenticates with your USCIS login.** Playwright-driven sign-in;
   MFA code auto-read from your inbox. No manual steps after setup.
 - **Pulls 3×/day, keeps the full history.** Every snapshot is appended
-  to disk — nothing overwritten. Diffs are recomputed from the full
-  capture history on demand.
+  to disk — nothing overwritten. Case + location histories live in
+  sibling files so their diffs stay independent.
 - **Catches silent updates.** Internal `updatedAt` bumps that never
-  show up in the public status.
+  show up in the public status, plus location changes (SCD → NSC etc.)
+  that are effectively invisible on the public site.
 - **Runs on your machine, easily deployable.** `python src/server.py`
   locally, or drop it on a $15/month AWS/Azure VM. No SaaS.
 
@@ -24,31 +32,29 @@ checkers miss. Self-hosted, one config file.
 
 ## Screenshots
 
-Dashboard — single-case overview. Hero metrics, factual sub-facts, and
-a combined timeline (USCIS event codes + silent updates, newest first).
-No stage inference, no community folklore — form-agnostic:
+Receipt numbers, applicant / representative names, letter IDs, and
+event UUIDs are redacted; everything else (form types, event codes,
+service-center codes, timestamps, counters) is exactly what the
+dashboard renders. Shots show a single case — the live dashboard
+stacks one card per configured receipt.
+
+**Dashboard** — hero metrics, timeline, and the *Current location*
+row (`TBD` with info popover until USCIS assigns a service center,
+then populated inline e.g. `SCD · 147-C9`). Topbar chip shows the
+running build version.
 
 ![Dashboard overview](docs/screenshot-dashboard.png)
 
-Raw JSON — full USCIS payload, pretty-printed with 4-space indentation
-and syntax highlighting (original field order preserved, no re-sorting):
+**Raw JSON** — full USCIS payload with syntax highlighting. Sub-tabs
+split between *Case API* and *Location API* streams so each endpoint's
+history can be inspected independently.
 
 ![Raw JSON view](docs/screenshot-raw-json.png)
 
-Updates feed — every diff across every case, newest first:
+**Updates feed** — one row per diff across every case, newest first.
+Location diffs carry a pink left-border + `LOCATION API` badge.
 
 ![Updates feed](docs/screenshot-updates.png)
-
-System log — structured event history of what the tracker did
-(scheduler fires, pull lifecycle, snapshot appends, notifications).
-Persisted to `data/system_log.json`. Download a copy with **Export
-log** or wipe with **Clear log** (two-step confirm) — both inside
-the System log tab:
-
-![System log](docs/screenshot-system-log.png)
-
-> Receipt numbers and representative names are blurred / redacted in
-> the shots above. The live dashboard shows full case details.
 
 ---
 
@@ -79,24 +85,52 @@ get the credentials your email provider needs.
 
 **Core principle: snapshot everything, diff nothing away.**
 
+- **Two APIs pulled per case, snapshots stored separately.** Each pull
+  hits both endpoints and writes sibling files:
+    - `data/{formNum}_case.json` — case-endpoint response (events,
+      notices, flags).
+    - `data/{formNum}_location.json` — location-endpoint response
+      (service center, subtype, receipt date). Stores the full envelope
+      including `{"data": null}` so the moment USCIS flips a case from
+      unassigned to assigned is a real diff, not an inference.
 - **Each snapshot is the full API payload**, not a summary string.
-  One row per pull in `data/{formNum}_case.json`, ISO-8601 timestamped.
-  No row is ever deleted or overwritten.
+  One row per pull per endpoint, ISO-8601 timestamped. No row is ever
+  deleted or overwritten.
 - **Diffs are recomputed on the fly** from that append-only history.
   Restart, reboot, code change — never loses a record, never
-  double-counts one.
-- **Every change gets classified.** `event` (new case event — FTA0,
-  APR0, etc.), `notice` (Request for Evidence / receipt / appointment
-  letter), `appointment` (biometrics rescheduled), `decision`
-  (`closed` / `actionRequired` flipped), `silent_update` (`updatedAt`
-  date advanced with nothing else visible), or `same_day_refresh`
-  (same-day re-stamp, sync artifact).
-- **Email notifications.** One email per new diff per pull. Before /
-  after diff-ID snapshotting around each pull → no duplicates, no
-  misses, survives restarts.
+  double-counts one. Case-API and location-API diffs are merged into
+  one chronological feed, each tagged with its `source` so the UI can
+  style location rows distinctly.
+- **Every change gets classified.** For the case API: `event` (new
+  event code — FTA0, APR0, etc.), `notice` (Request for Evidence /
+  receipt / appointment letter), `appointment` (biometrics
+  rescheduled), `decision` (`closed` / `actionRequired` flipped),
+  `silent_update` (`updatedAt` date advanced with nothing else
+  visible), or `same_day_refresh` (same-day re-stamp, sync artifact).
+  For the location API: `location_assigned` (null → populated),
+  `location_changed` (service center or subtype changed),
+  `location_cleared` (populated → null — rare).
+- **Email notifications.** One email per new diff per pull, across
+  both APIs. Record IDs embed the source (`{receipt}:case:{date}` /
+  `{receipt}:location:{date}`) so a same-day case + location diff
+  emits two distinct emails, not a collapsed one. Before / after
+  diff-ID snapshotting around each pull → no duplicates, no misses,
+  survives restarts.
+- **One pull → one system-log row.** Each pull produces a single
+  consolidated `pull` entry with its 15+ internal steps (auth, case
+  fetch, location fetch, snapshot append, notify) nested as `steps[]`.
+  Top-level tone = worst-child severity, so an otherwise green pull
+  containing a single failed location fetch still shows up as yellow.
+- **Build version visible in the dashboard.** Top-left chip reads
+  e.g. `2026-04-23.0032` — the commit's authored time in UTC. String
+  comparison between two labels matches chronological order, so you
+  can tell at a glance whether what you just pushed has landed on the
+  VM. `GET /api/version` returns the same info unauthenticated for
+  deploy-verification scripts.
 - **One-click export.** `/api/export` (or the "Export data" button)
-  bundles every `data/*_case.json` plus a manifest into a timestamped
-  zip. Useful for sharing with a lawyer or archiving.
+  bundles every `data/*_case.json`, every `data/*_location.json`, and
+  a manifest into a timestamped zip. Useful for sharing with a lawyer
+  or archiving.
 
 ### Design invariants (don't break these)
 
@@ -275,7 +309,7 @@ python -c "import json; c=json.load(open('config.json')); \
 pytest -q
 ```
 
-Expected: `200+ passed`, 100% line coverage across `src/`. Any failure
+Expected: `350+ passed`, 100% line coverage across `src/`. Any failure
 here means a dependency / install issue — fix it before moving on.
 
 ### 2. First login (one-off; triggers an MFA email)
@@ -299,12 +333,15 @@ python src/session_fetch.py extract
 ```
 
 `extract` uses the saved session but **refuses** to re-login — safe to
-iterate with without burning more MFA codes. Success writes one row
-per case into `data/{formNum}_case.json`.
+iterate with without burning more MFA codes. Success writes two rows
+per case — one to `data/{formNum}_case.json` (case API), one to
+`data/{formNum}_location.json` (location API).
 
 ```bash
-ls data/*.json                    # one file per form number
+ls data/*.json                    # two files per form number + system_log.json
 python -c "import json; print('captures:', len(json.load(open('data/485_case.json'))))"
+python -c "import json; d=json.load(open('data/765_location.json'));\
+  print('765 location latest:', d[-1]['data'])"
 ```
 
 ### 4. Start the dashboard
@@ -457,23 +494,41 @@ changed → restarts the systemd unit → smoke-checks `/login`.
 
 ```
 src/
-├── server.py          Flask app + scheduler. Entry point.
-├── session_fetch.py   CLI: `run` / `login` / `extract`. Spawned as a
-│                      subprocess by server.py on schedule / button.
+├── server.py          Flask app + scheduler + build-version resolver.
+│                      Owns the consolidated pull-envelope logging:
+│                      spawns session_fetch as a subprocess with
+│                      USCIS_LOG_JSONL_STDERR=1, collects the child's
+│                      events, folds in any server-process events via
+│                      thread-local sys_log capture, writes one `pull`
+│                      row.
+├── session_fetch.py   CLI: `run` / `login` / `extract`. Spawned by
+│                      server.py on schedule / button. Writes case +
+│                      location snapshots to disk.
 ├── uscis_auth.py      OpenID Connect + MFA login flow. The *only* module
 │                      that burns an MFA code.
-├── uscis_api.py       /cases/{id} navigation inside an authenticated tab.
+├── uscis_api.py       Two endpoints: case (`/cases/{id}`) and location
+│                      (`/secure-messaging/api/case-service/receipt_info/
+│                      {id}`). Both navigate inside an authenticated tab.
 ├── mfa_mailbox.py     Polls IMAP for the USCIS MFA code. Provider-
 │                      agnostic — host auto-selected from email domain.
 ├── providers.py       Email-domain → IMAP/SMTP host lookup.
-├── diff_utils.py      Pure functions: day-bin, classify diff, infer
-│                      stage, summarize case. Fully recomputable.
+├── diff_utils.py      Pure functions: day-bin, classify case diff,
+│                      classify location diff (assigned/changed/cleared),
+│                      merge the two feeds chronologically, summarize.
 ├── access_gate.py     Optional session-cookie gate + brute-force guard.
 ├── mailer.py          Email formatting + SMTP send (any provider).
+│                      Every failure stage emits a categorised smtp_*
+│                      event that folds into the pull envelope.
+├── system_log.py      Append-only event store with thread-local and
+│                      JSONL-stderr capture modes. Powers the System
+│                      log tab; paginated 100/page.
 └── static/            Dashboard UI (index.html + app.js + style.css).
 
-tests/                 pytest — 100% line coverage on src/.
+tests/                 pytest — 350+ tests, 100% line coverage on src/.
 data/                  Snapshot logs. Gitignored.
+  {num}_case.json      Case-API snapshot history per form.
+  {num}_location.json  Location-API snapshot history per form.
+  system_log.json      Structured event log (rotates at 5000 entries).
 config.json            Your secrets. Gitignored.
 config.example.json    Template.
 ```
@@ -482,19 +537,27 @@ config.example.json    Template.
 
 Beyond the snapshot/diff core:
 
-- **Dashboard views.** Per-case Overview, Timeline, Changes, Raw JSON
-  tabs; a global Updates feed; live countdown to the next scheduled
-  pull.
+- **Dashboard views.** Per-case Overview (with the Current Location
+  row), Changes (merged case + location diffs), Raw JSON (Case API /
+  Location API sub-tabs); a global Updates feed and paginated System
+  log; live countdown to the next scheduled pull; build-version chip
+  in the topbar.
 - **Login isolation.** `uscis_auth.py` is the only module that burns an
   MFA code. `extract` refuses to log in — safe for iterating on
   scraping logic without spamming your inbox.
+- **Comprehensive failure logging.** Every exit/failure point in
+  every module emits a categorised `sys_log` event (SMTP stage-by-
+  stage, Flask secret I/O, scheduler dispatch, pull thread crashes,
+  route exceptions). One pull produces one consolidated envelope even
+  when 20+ internal events fire; failures never disappear silently.
 - **Optional access gate.** Signed session cookie, constant-time code
   comparison, 5-per-5-min brute-force guard, 30-day lifetime. The
   secret key is derived from `optional_access_code` — rotating the
   code invalidates every existing session on restart.
 - **CI/CD.** GitHub Actions runs `pytest` on every push/PR; on `main`
   it SSHes to the VM, `git reset --hard`s, restarts the systemd unit,
-  and smoke-checks `/login`.
+  and smoke-checks `/login`. `GET /api/version` returns the running
+  commit SHA + authored time — useful for deploy-verification scripts.
 
 ### Configuration (`config.json`)
 
