@@ -688,54 +688,11 @@ def test_api_pull_status_never_exposes_log_tail(client, monkeypatch):
     assert "hunter2" not in r.data.decode()
 
 
-def test_api_test_email_requires_auth(client, monkeypatch, tmp_path):
-    # Overwrite config with blank auth
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    r = client.post("/api/test-email")
-    assert r.status_code == 400
-
-
-def test_api_test_email_uses_synthetic_record_when_no_data(client, monkeypatch):
-    sent = {}
-
-    def _notify(auth, to, rec, labels):
-        sent["rec"] = rec
-
-    monkeypatch.setattr(server, "notify_update", _notify)
-    r = client.post("/api/test-email")
-    body = r.get_json()
-    assert body["ok"] is True
-    assert sent["rec"]["id"] == "TEST:sample"
-
-
-def test_api_test_email_uses_latest_real_record_when_available(client, tmp_path, monkeypatch):
-    data_dir = tmp_path / "data"
-    _seed_log(data_dir, [
-        _entry("2026-03-09T00:00:00Z"),
-        _entry("2026-03-10T00:00:00Z", closed=True),
-    ])
-    sent = {}
-    monkeypatch.setattr(server, "notify_update",
-                        lambda auth, to, rec, labels: sent.update({"rec": rec}))
-    r = client.post("/api/test-email")
-    assert r.status_code == 200
-    assert sent["rec"]["id"] == "IOE1:case:2026-03-10"
-
-
-def test_api_test_email_surfaces_failure(client, monkeypatch):
-    monkeypatch.setattr(server, "notify_update",
-                        MagicMock(side_effect=RuntimeError("smtp down with user@example.com")))
-    r = client.post("/api/test-email")
-    assert r.status_code == 500
-    # Error is deliberately generic — must NOT leak the exception text,
-    # which routinely contains the configured email address or auth details.
-    body = r.get_json()
-    assert body["ok"] is False
-    assert body["error"] == "send_failed"
-    assert "smtp down" not in str(body)
-    assert "user@example.com" not in str(body)
+# Note: /api/test-email has been removed. The mailer is now reached only
+# via the pull path's notification dispatch, which runs on the pull
+# thread and folds smtp_* / notify_* events into the pull envelope via
+# thread-local capture. See test_pull_absorbs_server_process_events_via_capture
+# in test_system_log.py for end-to-end coverage of that path.
 
 
 # -------- _static_version fallback ------------------------------------

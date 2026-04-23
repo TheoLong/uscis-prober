@@ -52,6 +52,8 @@ from system_log import (
     count as count_system_log,
     clear as clear_system_log,
     parse_jsonl_stderr_line as _parse_syslog_jsonl_line,
+    push_capture as _syslog_push_capture,
+    pop_capture as _syslog_pop_capture,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -368,6 +370,52 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
             started_at=_now_iso(),
         )
 
+    # Start thread-local capture so any sys_log() call fired from the
+    # server process on this thread (smtp_* from mailer, snapshot_log_*
+    # from load_*_entries, pull_pre_snapshot_failed, etc.) folds into
+    # the pull envelope's steps[] instead of writing a separate flat row.
+    # Other threads (Flask request handlers) are unaffected.
+    #
+    # Wrapped in a try/finally that guarantees pop_capture() even if an
+    # uncaught exception escapes the function body — the outer
+    # `_runner` in _spawn_pull_async still emits `pull_thread_crashed`,
+    # but without the pop the next pull on this thread would silently
+    # inherit the old buffer.
+    thread_captured_steps = _syslog_push_capture()
+    envelope: dict | None = None
+    try:
+        envelope = _run_pull_subprocess_inner(
+            trigger=trigger, thread_captured_steps=thread_captured_steps,
+        )
+    finally:
+        # Always pop — the inner function never pops. This keeps the
+        # capture lifecycle 1:1 with this function call, so an unexpected
+        # crash in the inner body can't poison the next pull on this
+        # thread. If the inner crashed before producing an envelope,
+        # `_spawn_pull_async` already emits `pull_thread_crashed`.
+        _syslog_pop_capture()
+
+    # Emit the consolidated envelope OUTSIDE the capture scope so this
+    # final sys_log() reaches disk instead of being folded into its own
+    # step buffer.
+    if envelope is not None:
+        sys_log(**envelope)
+
+
+def _run_pull_subprocess_inner(
+    *, trigger: str, thread_captured_steps: list[dict],
+) -> dict:
+    """The original pull-runner body, extracted so the outer function can
+    own the capture push/pop in a proper try/finally. Splitting the two
+    keeps the capture lifecycle visibly correct at the call site and
+    avoids accidental `return` paths that bypass cleanup.
+
+    Returns the kwargs for the final envelope `sys_log()` call — the
+    outer function emits it OUTSIDE the capture scope so the envelope
+    itself reaches disk instead of being folded into its own buffer.
+    """
+    global _pull_state
+
     start_iso = _pull_state.started_at
     start_wall = time.time()
     # Snapshot the diff set *before* pulling so we can identify records
@@ -481,27 +529,37 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
             "error": str(e),
         })
 
-    # Derive the top-level severity and summary, then emit exactly one
-    # consolidated entry. This is the only row the dashboard operator
-    # sees for this pull; all the gritty detail lives in `steps`.
-    top_level = _worst_level(steps)
+    # Snapshot the thread-captured server-process events.
+    captured_steps = list(thread_captured_steps)
+
+    # Merge: subprocess steps (from the child's JSONL stderr) + server-
+    # process events captured on this thread + any explicitly-appended
+    # envelope steps (e.g. subprocess_exit_nonzero). Sort by timestamp
+    # so the timeline is cohesive for the dashboard's expanded view.
+    all_steps = list(steps) + captured_steps
+    all_steps.sort(key=lambda s: s.get("ts", ""))
+
+    # Derive the top-level severity and summary. The outer function
+    # emits the envelope AFTER it pops the capture so this final event
+    # reaches disk.
+    top_level = _worst_level(all_steps)
     if exit_code not in (0, None) or timed_out or crashed_error is not None:
         top_level = "error"
 
-    summary = _pull_summary_from_steps(steps)
-    sys_log(
-        "pull",
-        level=top_level,
-        source="server",
-        trigger=trigger,
-        started_at=start_iso,
-        finished_at=_pull_state.finished_at,
-        duration_seconds=duration,
-        exit_code=exit_code,
-        timed_out=timed_out,
-        summary=summary,
-        steps=steps,
-    )
+    summary = _pull_summary_from_steps(all_steps)
+    return {
+        "event": "pull",
+        "level": top_level,
+        "source": "server",
+        "trigger": trigger,
+        "started_at": start_iso,
+        "finished_at": _pull_state.finished_at,
+        "duration_seconds": duration,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "summary": summary,
+        "steps": all_steps,
+    }
 
 
 def _spawn_pull_async(trigger: str = "scheduled") -> None:
@@ -984,63 +1042,6 @@ def api_pull():
     # row anymore.
     _spawn_pull_async(trigger="manual")
     return jsonify({"ok": True, "message": "Pull started"})
-
-
-@app.route("/api/test-email", methods=["POST"])
-def api_test_email():
-    """Send ONE email with the most recent real diff record as sample payload.
-
-    Uses the most recent real update so the mail shows realistic content.
-    If there are no updates at all, sends a synthetic "this is a test" record.
-    """
-    config = load_config()
-    auth = (config.get("auth") or {})
-    recipient = _notify_recipient(auth)
-    if not recipient or not auth.get("uscis_mfa_email") or not auth.get("uscis_mfa_app_password"):
-        return jsonify({"ok": False, "error": "auth missing: uscis_mfa_email, uscis_mfa_app_password"}), 400
-
-    records = _all_update_records(config)
-    if records:
-        sample = max(records, key=lambda r: r.get("to") or "")
-    else:
-        sample = {
-            "id": "TEST:sample",
-            "caseLabel": "I-TEST",
-            "receiptNumber": "IOE0000000000",
-            "kind": "silent_update",
-            "from": "2026-01-01T00:00:00Z",
-            "to": "2026-01-02T00:00:00Z",
-            "detectedOn": "2026-01-02",
-            "realUpdateDate": "2026-01-02",
-            "scalars": {
-                "updatedAt": {"from": "2026-01-01", "to": "2026-01-02"},
-            },
-            "events": {"added": [], "removed": []},
-            "notices": {"added": [], "removed": []},
-        }
-
-    try:
-        notify_update(auth, recipient, sample, EVENT_CODE_LABELS)
-    except Exception as e:
-        # Full traceback is in server logs — don't echo it to the caller,
-        # where SMTP errors routinely include the email address or
-        # auth-failure reasons that shouldn't reach the browser. A
-        # categorised dashboard event is logged by the mailer (smtp_*
-        # family); here we only log the top-level failure so the route
-        # itself is traceable even if the mailer's log somehow missed.
-        logger.exception("Test email failed")
-        sys_log(
-            "test_email_failed", level="error", source="server",
-            to=recipient, sample_id=sample.get("id"),
-            error=f"{type(e).__name__}: {e}"[:200],
-        )
-        return jsonify({"ok": False, "error": "send_failed"}), 500
-    return jsonify({
-        "ok": True,
-        "to": recipient,
-        "sampleId": sample.get("id"),
-        "kind": sample.get("kind"),
-    })
 
 
 @app.route("/api/pull/status")

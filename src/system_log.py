@@ -65,6 +65,58 @@ JSONL_STDERR_ENV = "USCIS_LOG_JSONL_STDERR"
 _lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 
+# Thread-local capture stack. When a thread has one or more active buffers
+# on its stack, `log()` appends to the innermost buffer instead of writing
+# to disk. Used by `_run_pull_subprocess` to fold server-process events
+# (smtp_*, pull_pre_snapshot_failed, etc.) into the consolidated `pull`
+# envelope. Separate threads (Flask request workers) are unaffected — they
+# each have their own `_thread_local.capture_stack`.
+_thread_local = threading.local()
+
+
+def _current_capture_buffer() -> list[dict] | None:
+    """Return the top buffer on this thread's capture stack, or None.
+
+    None means "no active capture; write to disk as normal."
+    """
+    stack = getattr(_thread_local, "capture_stack", None)
+    if stack:
+        return stack[-1]
+    return None
+
+
+def push_capture() -> list[dict]:
+    """Start capturing `log()` calls on this thread. Returns the buffer.
+
+    Pair with exactly one `pop_capture()`. Nested pushes are allowed —
+    the innermost buffer wins. Typical use in a try/finally:
+
+        buf = push_capture()
+        try:
+            ...do work that may emit sys_log events...
+        finally:
+            pop_capture()
+
+    Events appended to the buffer preserve the exact dict `log()` would
+    have written to disk, so callers can embed them as `steps[]` of a
+    parent envelope verbatim.
+    """
+    buf: list[dict] = []
+    stack = getattr(_thread_local, "capture_stack", None)
+    if stack is None:
+        stack = []
+        _thread_local.capture_stack = stack
+    stack.append(buf)
+    return buf
+
+
+def pop_capture() -> list[dict]:
+    """Stop the innermost capture on this thread and return its buffer."""
+    stack = getattr(_thread_local, "capture_stack", None)
+    if not stack:
+        return []
+    return stack.pop()
+
 
 def _now_iso() -> str:
     return (
@@ -109,6 +161,16 @@ def log(event: str, *, level: str = "info", source: str | None = None, **details
             _logger.exception("system_log jsonl-stderr emit failed for event=%s", event)
         return
 
+    buf = _current_capture_buffer()
+    if buf is not None:
+        # This thread has an active capture (e.g. the pull runner has set
+        # one up so server-process events fold into the pull envelope).
+        # Append to the buffer INSTEAD of writing to disk so we don't
+        # double-record the event once as a flat row and once as a step.
+        buf.append(entry)
+        _echo_to_python_logger(entry)
+        return
+
     try:
         with _lock:
             entries = _read_file()
@@ -119,14 +181,23 @@ def log(event: str, *, level: str = "info", source: str | None = None, **details
     except Exception:  # pragma: no cover — belt-and-suspenders
         _logger.exception("system_log.log() failed for event=%s", event)
 
-    # Also echo to the Python logger so events land in journalctl / stderr
-    # for operators tailing the service log.
+    _echo_to_python_logger(entry)
+
+
+def _echo_to_python_logger(entry: dict) -> None:
+    """Mirror a structured event to the Python logger so operators tailing
+    journalctl / stderr see the same thing the dashboard sees."""
     py_level = {
         "warning": logging.WARNING,
         "warn": logging.WARNING,
         "error": logging.ERROR,
-    }.get(level, logging.INFO)
-    _logger.log(py_level, "[systemlog] event=%s %s", event, {k: v for k, v in entry.items() if k not in ("ts", "pid")})
+    }.get(entry.get("level", "info"), logging.INFO)
+    _logger.log(
+        py_level,
+        "[systemlog] event=%s %s",
+        entry.get("event"),
+        {k: v for k, v in entry.items() if k not in ("ts", "pid")},
+    )
 
 
 # Magic prefix on stderr lines emitted by child processes, so the parent

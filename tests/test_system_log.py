@@ -341,6 +341,123 @@ def test_jsonl_stderr_mode_writes_to_stderr_not_file(
     assert parsed["receipt"] == "IOE1"
 
 
+def test_pull_absorbs_server_process_events_via_capture(monkeypatch, tmp_path):
+    # This is the point of thread-local capture: any sys_log() fired on
+    # the pull thread (e.g. smtp_* from mailer, snapshot_log_* from a
+    # file read) must fold into the pull envelope's steps[] rather than
+    # leak to disk as a separate flat row.
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=0, stdout="", stderr="")
+
+    def _fake_notify(new_records):
+        # Simulate the mailer firing its own sys_log on the way up —
+        # this is how smtp_auth_failed / smtp_send_failed reach here in
+        # real life. With thread-local capture they should be absorbed.
+        import system_log
+        system_log.log("smtp_auth_failed", level="error", source="mailer",
+                       host="smtp.gmail.com", port=587, smtp_code=535,
+                       user="u@example.com",
+                       error="SMTPAuthenticationError: 535 ...")
+        return [{
+            "ts": "2026-04-22T20:00:00Z",
+            "event": "notify_failed", "level": "error", "source": "server",
+            "record_id": "IOE1:case:2026-04-22",
+            "error": "SMTPAuthenticationError",
+        }]
+
+    monkeypatch.setattr(server, "_send_notifications_for_new", _fake_notify)
+
+    # Force "new records" so _send_notifications_for_new actually runs.
+    calls = {"n": 0}
+    def _records(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return []  # before-pull snapshot
+        return [{"id": "IOE1:case:2026-04-22"}]  # after-pull
+    monkeypatch.setattr(server, "_all_update_records", _records)
+    monkeypatch.setattr(server, "_update_ids", lambda recs: {r["id"] for r in recs})
+
+    with patch.object(subprocess, "run", return_value=proc):
+        server._run_pull_subprocess(trigger="manual")
+
+    entries = system_log.read_all()
+    # smtp_auth_failed must NOT have leaked to disk as a flat row.
+    flat_smtp = [e for e in entries if e["event"] == "smtp_auth_failed"]
+    assert flat_smtp == [], "smtp_auth_failed leaked outside the pull envelope"
+
+    pull = [e for e in entries if e["event"] == "pull"][0]
+    step_events = [s["event"] for s in pull["steps"]]
+    assert "smtp_auth_failed" in step_events
+    assert "notify_failed" in step_events
+    # Envelope reflects the worst severity (error) from its steps.
+    assert pull["level"] == "error"
+
+
+def test_push_capture_diverts_log_calls_on_same_thread():
+    # With an active capture, log() appends to the buffer instead of
+    # touching the on-disk file. Other threads / processes are unaffected.
+    buf = system_log.push_capture()
+    try:
+        system_log.log("captured_event", level="info", source="test", k="v")
+    finally:
+        system_log.pop_capture()
+    assert len(buf) == 1
+    assert buf[0]["event"] == "captured_event"
+    assert buf[0]["source"] == "test"
+    assert buf[0]["k"] == "v"
+    # Nothing landed on disk.
+    assert system_log.read_all() == []
+
+
+def test_pop_capture_releases_the_stack():
+    system_log.push_capture()
+    system_log.pop_capture()
+    # Events after pop write to disk normally.
+    system_log.log("after_pop", level="info")
+    assert any(e["event"] == "after_pop" for e in system_log.read_all())
+
+
+def test_capture_is_thread_local(monkeypatch):
+    # Active capture on one thread must not swallow log() calls fired
+    # from another thread. Flask handles requests on worker threads; if
+    # capture leaked across threads a concurrent API hit during a pull
+    # would be silently attached to the pull envelope's steps.
+    import threading
+    buf = system_log.push_capture()
+    from_other_thread = []
+
+    def _other():
+        system_log.log("from_worker_thread", source="test")
+        # Read what landed on disk — the other thread shouldn't see the
+        # capture stack at all.
+        from_other_thread.extend(
+            e["event"] for e in system_log.read_all()
+        )
+
+    t = threading.Thread(target=_other)
+    t.start(); t.join(timeout=3)
+
+    # The capture buffer is empty — the other thread's event bypassed it.
+    assert buf == []
+    # And it DID reach disk.
+    assert "from_worker_thread" in from_other_thread
+    system_log.pop_capture()
+
+
+def test_nested_captures_innermost_wins():
+    outer = system_log.push_capture()
+    inner = system_log.push_capture()
+    system_log.log("inside_inner")
+    system_log.pop_capture()
+    system_log.log("inside_outer")
+    system_log.pop_capture()
+    assert [e["event"] for e in inner] == ["inside_inner"]
+    assert [e["event"] for e in outer] == ["inside_outer"]
+
+
 def test_parse_jsonl_stderr_line_ignores_plain_text():
     assert system_log.parse_jsonl_stderr_line("2026-04-22 INFO some.logger: hi") is None
     assert system_log.parse_jsonl_stderr_line("") is None
@@ -385,29 +502,14 @@ def test_route_unhandled_exception_emits_sys_log(monkeypatch, tmp_path):
 def test_pull_pre_snapshot_failure_emits_sys_log(monkeypatch, tmp_path):
     # If the before-pull snapshot read itself crashes (e.g. a case file
     # with a shape that slips past load_case_entries' gracefulness), we
-    # should emit `pull_pre_snapshot_failed` and KEEP GOING rather than
-    # abort the whole pull.
+    # should embed `pull_pre_snapshot_failed` as a STEP inside the pull
+    # envelope (via thread-local capture) and keep going. Nothing should
+    # appear as a flat top-level row — the envelope owns the narrative
+    # for anything that happens on the pull thread.
     import subprocess
     server = _stub_server_config(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(
-        server, "_all_update_records",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom in pre-snapshot")),
-    )
-
     from unittest.mock import MagicMock, patch
-    proc = MagicMock(returncode=0, stdout="", stderr="")
-    with patch.object(subprocess, "run", return_value=proc), \
-         patch.object(server, "_send_notifications_for_new", return_value=[]):
-        # Note: the notifications call inside _run_pull_subprocess also
-        # uses _all_update_records; it'll crash, but that's caught by
-        # the `if proc.returncode == 0` branch — which is wrapped in the
-        # function's own try/except via the pull envelope. Skip
-        # notifications entirely by patching.
-        pass
-    # Re-patch _all_update_records only for the pre-snapshot call — keep
-    # the post-pull call working so we can assert the pre-snapshot
-    # event appears alongside a normal pull entry.
     calls = {"n": 0}
     def _partial_fail(*a, **k):
         calls["n"] += 1
@@ -416,16 +518,25 @@ def test_pull_pre_snapshot_failure_emits_sys_log(monkeypatch, tmp_path):
         return []
     monkeypatch.setattr(server, "_all_update_records", _partial_fail)
 
+    proc = MagicMock(returncode=0, stdout="", stderr="")
     with patch.object(subprocess, "run", return_value=proc):
         server._run_pull_subprocess(trigger="manual")
 
     entries = system_log.read_all()
-    pre_fail = [e for e in entries if e["event"] == "pull_pre_snapshot_failed"]
-    assert len(pre_fail) == 1
-    assert "boom in pre-snapshot" in pre_fail[0]["error"]
-    # The pull still completed and wrote its consolidated entry.
+    # pull_pre_snapshot_failed must NOT appear as a flat row — it's
+    # captured into the envelope's steps[] via thread-local capture.
+    flat_pre_fail = [e for e in entries if e["event"] == "pull_pre_snapshot_failed"]
+    assert flat_pre_fail == [], \
+        "pull_pre_snapshot_failed leaked to disk as a flat row"
+
     pulls = [e for e in entries if e["event"] == "pull"]
     assert len(pulls) == 1
+    pull = pulls[0]
+    step_events = [s["event"] for s in pull["steps"]]
+    assert "pull_pre_snapshot_failed" in step_events, \
+        "pre-snapshot failure wasn't folded into the pull envelope"
+    # Envelope severity reflects the warning step.
+    assert pull["level"] == "warning"
 
 
 def test_pull_thread_crash_emits_sys_log(monkeypatch, tmp_path):

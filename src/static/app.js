@@ -680,7 +680,7 @@ const SYSTEMLOG_EVENT_INFO = {
   server_startup:              { tone: "info",  label: "Server started" },
   scheduler_configured:        { tone: "info",  label: "Scheduler configured" },
   pull_skipped_already_running:{ tone: "warn",  label: "Pull skipped (already running)" },
-  system_log_cleared:          { tone: "warn",  label: "System log cleared" },
+  system_log_cleared:          { tone: "info",  label: "System log cleared" },
 
   // Subprocess lifecycle wrapping the pull
   subprocess_exit_nonzero:     { tone: "bad",   label: "Subprocess exit non-zero" },
