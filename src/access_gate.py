@@ -276,7 +276,12 @@ def configure(app: Flask, optional_access_code: str | None, *, root: Path) -> bo
     app.permanent_session_lifetime = timedelta(days=SESSION_DAYS)
 
     # Routes that don't require auth.
-    OPEN_PATHS = {"/login", "/api/login", "/api/auth/status", "/favicon.ico"}
+    # /api/version is intentionally open so deploy-verification scripts
+    # (and the topbar chip on the login page) can read the running
+    # commit SHA without authenticating. The value is the same info
+    # anyone can read on GitHub — we're not leaking anything sensitive.
+    OPEN_PATHS = {"/login", "/api/login", "/api/auth/status",
+                  "/api/version", "/favicon.ico"}
     OPEN_PREFIXES = ("/static/",)
 
     def _client_ip() -> str:
