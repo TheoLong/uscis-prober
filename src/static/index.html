@@ -15,6 +15,12 @@
       <h1>
         <img src="/static/logo.svg" alt="" class="brand-logo" width="28" height="28" />
         USCIS Prober
+        <!-- Build-version chip — short SHA rendered as a small pill next
+             to the title. Populated from /api/pull/status.version every
+             3s, so a fresh deploy updates the chip automatically on the
+             next poll without a hard refresh. Tooltip carries full SHA,
+             commit date, and server boot time. -->
+        <a id="version-chip" class="version-chip" href="#" title="" hidden></a>
       </h1>
       <span class="subtitle" id="summary-line">loading…</span>
     </div>

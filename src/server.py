@@ -188,6 +188,110 @@ def _latest_location_info(entries: list[dict]) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Build version
+# ---------------------------------------------------------------------------
+
+def _version_label_from_iso(commit_iso: str | None) -> str | None:
+    """Derive a sortable date-time version label from a commit's ISO date.
+
+    `2026-04-22T20:32:28-04:00` → `2026-04-22.2032` (UTC).
+
+    The label is:
+      - **Sortable** — lexicographic comparison matches chronological order
+        (`2026-04-22.2032` < `2026-04-22.2145`). The operator can eyeball
+        "newer or older?" without remembering commit counts or hashes.
+      - **Unique per commit-minute** — two commits in the same minute
+        would collide, but that's vanishingly rare in a solo-dev repo.
+      - **Derived from the commit's own timestamp** — NOT the boot time.
+        Restarting the server with the same code doesn't bump the label.
+    """
+    if not commit_iso:
+        return None
+    try:
+        # Parse even timezone-offset ISO strings. Normalize to UTC so the
+        # label is stable regardless of the developer's local clock.
+        dt = datetime.fromisoformat(commit_iso).astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%d.%H%M")
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_version() -> dict:
+    """Capture build-version metadata once at import time.
+
+    Returns:
+      - `label`:       human-readable sortable version like `2026-04-22.2032`
+                       derived from the commit's authored time (UTC). The
+                       operator can tell newer vs. older at a glance.
+      - `sha`:         short commit hash (`fcb03e0`) — disambiguates when
+                       two commits share the same minute.
+      - `full_sha`:    40-char hash.
+      - `commit_date`: raw ISO-8601 when this commit was authored.
+      - `boot_time`:   when the server process started (useful for
+                       spotting a no-code-change restart).
+
+    Tries git rev-parse first (works on both dev boxes and the deployed
+    VM, since the deploy script uses `git reset --hard`). Falls back to
+    a static `.version` file written at deploy time.
+    """
+    result = {
+        "label": None,
+        "sha": "unknown",
+        "full_sha": "unknown",
+        "commit_date": None,
+        "boot_time": datetime.now(timezone.utc).replace(microsecond=0)
+                     .isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        import subprocess as _subproc
+        sha = _subproc.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(ROOT), stderr=_subproc.DEVNULL, timeout=2,
+        ).decode().strip()
+        if sha:
+            result["sha"] = sha
+        full = _subproc.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ROOT), stderr=_subproc.DEVNULL, timeout=2,
+        ).decode().strip()
+        if full:
+            result["full_sha"] = full
+        date = _subproc.check_output(
+            ["git", "log", "-1", "--format=%cI"],
+            cwd=str(ROOT), stderr=_subproc.DEVNULL, timeout=2,
+        ).decode().strip()
+        if date:
+            result["commit_date"] = date
+            result["label"] = _version_label_from_iso(date)
+    except Exception:
+        # Fallback: a static `.version` file written by the deploy script.
+        # Format: "{label}\n{short}\n{full}\n{iso_commit_date}\n"
+        # Any line optional.
+        version_file = ROOT / ".version"
+        if version_file.exists():
+            try:
+                lines = version_file.read_text().splitlines()
+                if len(lines) >= 1 and lines[0].strip():
+                    result["label"] = lines[0].strip()
+                if len(lines) >= 2 and lines[1].strip():
+                    result["sha"] = lines[1].strip()
+                if len(lines) >= 3 and lines[2].strip():
+                    result["full_sha"] = lines[2].strip()
+                if len(lines) >= 4 and lines[3].strip():
+                    result["commit_date"] = lines[3].strip()
+                    if result["label"] is None:
+                        result["label"] = _version_label_from_iso(
+                            lines[3].strip()
+                        )
+            except Exception:
+                pass
+    return result
+
+
+VERSION = _resolve_version()
+
+
+# ---------------------------------------------------------------------------
 # Pull runner (subprocess)
 # ---------------------------------------------------------------------------
 
@@ -1058,7 +1162,23 @@ def api_pull_status():
         "hours": list(PULL_HOURS),
     }
     state["server_time"] = _now_iso()
+    # Piggy-back build-version metadata on the status poll so the UI
+    # always has an up-to-date chip without a second request. The
+    # dedicated `/api/version` endpoint below is for ad-hoc scripts.
+    state["version"] = VERSION
     return jsonify(state)
+
+
+@app.route("/api/version")
+def api_version():
+    """Return build-version metadata for the currently running code.
+
+    Shape: { sha, full_sha, commit_date, boot_time }. Resolved once at
+    import time via `git rev-parse` (or `.version` fallback). Useful for
+    deploy-verification scripts that want to confirm a specific SHA is
+    live without having to SSH into the VM.
+    """
+    return jsonify(VERSION)
 
 
 # ---------------------------------------------------------------------------

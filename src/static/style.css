@@ -69,6 +69,33 @@ body {
   display: block;
   flex-shrink: 0;
 }
+
+/* Build-version chip — the short SHA of the currently deployed commit,
+   rendered next to the title. Click to copy the full SHA; hover for the
+   commit + boot metadata in the tooltip. */
+.version-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  text-decoration: none;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.version-chip:hover {
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border-color: var(--border);
+}
+.version-chip[hidden] { display: none; }
+
 .subtitle { color: var(--muted); font-size: 0.85rem; }
 .topbar-right { display: flex; align-items: center; gap: 16px; }
 

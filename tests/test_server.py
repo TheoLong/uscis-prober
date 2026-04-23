@@ -695,6 +695,124 @@ def test_api_pull_status_never_exposes_log_tail(client, monkeypatch):
 # in test_system_log.py for end-to-end coverage of that path.
 
 
+# =========================================================================
+# Build-version resolution + /api/version endpoint
+# =========================================================================
+
+def test_version_label_format_is_utc_date_time():
+    # Commit authored 20:32 EDT = 00:32 UTC the next day — the label is
+    # ALWAYS in UTC so a developer's timezone doesn't change the string.
+    label = server._version_label_from_iso("2026-04-22T20:32:28-04:00")
+    assert label == "2026-04-23.0032"
+
+
+def test_version_label_handles_utc_z_suffix():
+    # Some git configs emit `Z` instead of `+00:00`.
+    label = server._version_label_from_iso("2026-04-22T20:32:28+00:00")
+    assert label == "2026-04-22.2032"
+
+
+def test_version_label_returns_none_for_bad_input():
+    assert server._version_label_from_iso(None) is None
+    assert server._version_label_from_iso("") is None
+    assert server._version_label_from_iso("not a date") is None
+
+
+def test_version_label_is_lexicographically_sortable():
+    # The whole point of the format: string comparison = chronological.
+    labels = [
+        server._version_label_from_iso("2026-04-22T20:32:28-04:00"),
+        server._version_label_from_iso("2026-04-23T01:45:00+00:00"),
+        server._version_label_from_iso("2026-04-22T14:05:00+00:00"),
+        server._version_label_from_iso("2026-04-25T08:30:00+00:00"),
+    ]
+    # Sorted as strings must match sorted by time.
+    assert sorted(labels) == [
+        "2026-04-22.1405",
+        "2026-04-23.0032",
+        "2026-04-23.0145",
+        "2026-04-25.0830",
+    ]
+
+
+def test_resolve_version_from_git(monkeypatch):
+    # Stub out git subprocess calls so we're testing the parsing/mapping,
+    # not whether pytest's CWD happens to be a git repo.
+    import subprocess
+    def _fake_output(cmd, **kwargs):
+        if cmd[:3] == ["git", "rev-parse", "--short"]:
+            return b"abc1234\n"
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return b"abc12340deadbeefcafe1111abc12340deadbeef\n"
+        if cmd[:2] == ["git", "log"]:
+            return b"2026-04-22T20:32:28-04:00\n"
+        raise AssertionError(f"unexpected cmd {cmd}")
+    monkeypatch.setattr(subprocess, "check_output", _fake_output)
+    v = server._resolve_version()
+    assert v["sha"] == "abc1234"
+    assert v["full_sha"] == "abc12340deadbeefcafe1111abc12340deadbeef"
+    assert v["commit_date"] == "2026-04-22T20:32:28-04:00"
+    assert v["label"] == "2026-04-23.0032"
+    assert v["boot_time"].endswith("Z")
+
+
+def test_resolve_version_falls_back_to_dotversion_file(monkeypatch, tmp_path):
+    # Simulate a prod box where git is missing but the deploy script
+    # wrote a .version file. The fallback must read every field it can.
+    import subprocess
+    monkeypatch.setattr(subprocess, "check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no git")))
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    (tmp_path / ".version").write_text(
+        "2026-04-22.2032\n"
+        "abc1234\n"
+        "abc12340deadbeefcafe1111abc12340deadbeef\n"
+        "2026-04-22T20:32:28-04:00\n"
+    )
+    v = server._resolve_version()
+    assert v["label"] == "2026-04-22.2032"
+    assert v["sha"] == "abc1234"
+    assert v["full_sha"] == "abc12340deadbeefcafe1111abc12340deadbeef"
+    assert v["commit_date"] == "2026-04-22T20:32:28-04:00"
+
+
+def test_resolve_version_returns_unknown_when_nothing_available(
+    monkeypatch, tmp_path,
+):
+    # No git, no .version file — server must still boot with a sane dict.
+    import subprocess
+    monkeypatch.setattr(subprocess, "check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    v = server._resolve_version()
+    assert v["sha"] == "unknown"
+    assert v["full_sha"] == "unknown"
+    assert v["label"] is None
+    assert v["boot_time"].endswith("Z")
+
+
+def test_api_version_endpoint_returns_version_dict(client, monkeypatch):
+    # Route reflects whatever server.VERSION is at request time.
+    fake = {"label": "2026-04-23.0032", "sha": "abc1234",
+            "full_sha": "abc12340...", "commit_date": "2026-04-22T20:32:28-04:00",
+            "boot_time": "2026-04-23T00:49:15Z"}
+    monkeypatch.setattr(server, "VERSION", fake)
+    r = client.get("/api/version")
+    assert r.status_code == 200
+    assert r.get_json() == fake
+
+
+def test_pull_status_includes_version(client, monkeypatch):
+    fake = {"label": "2026-04-23.0032", "sha": "abc1234", "full_sha": "full",
+            "commit_date": "2026-04-22T20:32:28-04:00", "boot_time": "..."}
+    monkeypatch.setattr(server, "VERSION", fake)
+    r = client.get("/api/pull/status")
+    body = r.get_json()
+    # Piggy-backed on status so the UI gets version updates via its
+    # existing 3s poll loop — no separate fetch required.
+    assert body["version"] == fake
+
+
 # -------- _static_version fallback ------------------------------------
 
 def test_static_version_falls_back_on_missing_files(monkeypatch):

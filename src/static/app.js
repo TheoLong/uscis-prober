@@ -17,6 +17,7 @@ const state = {
   systemLogTotal: 0,       // total entries on disk (all pages combined)
   systemLogPage: 1,        // 1-indexed page (page 1 = newest)
   systemLogPageSize: 100,
+  versionSha: null,        // last-seen short SHA from /api/pull/status
 };
 
 // ---------- boot ----------
@@ -148,11 +149,61 @@ async function loadHistory(label) {
   state.histories[label] = await res.json();
 }
 
+// Short SHA rendered in the topbar + tooltip with the full build metadata.
+// Updated every 3s from /api/pull/status so a deploy that restarts the VM
+// flips the chip automatically without a hard-refresh. If the SHA changes
+// between polls, we show a small toast so the operator knows the code
+// running in their tab no longer matches what's on the server.
+function updateVersionChip(version) {
+  const chip = document.getElementById("version-chip");
+  if (!chip || !version) return;
+
+  const label = version.label;          // sortable date-time like `2026-04-22.2032`
+  const sha = version.sha || "unknown";
+  const full = version.full_sha || sha;
+  const commitDate = version.commit_date || "";
+  const bootTime = version.boot_time || "";
+
+  // Detect rollover by SHA (authoritative) not label (two commits in the
+  // same minute could share a label).
+  const prev = state.versionSha;
+  state.versionSha = sha;
+
+  // Primary chip text: the date-time label (`2026-04-22.2032`) if we
+  // have it. Lexicographic comparison between two labels tells the
+  // operator which is newer — e.g. `2026-04-23.1105` > `2026-04-22.2032`.
+  // Falls back to short SHA on a box without git.
+  chip.textContent = label || sha;
+  chip.hidden = false;
+  chip.title = [
+    label ? `Version:  ${label} (UTC)` : "",
+    `Commit:   ${full}`,
+    commitDate ? `Authored: ${commitDate}` : "",
+    bootTime ? `Booted:   ${bootTime}` : "",
+    "",
+    "Click to copy full SHA",
+  ].filter(Boolean).join("\n");
+  chip.href = "#";
+  chip.onclick = async (ev) => {
+    ev.preventDefault();
+    const ok = await copyToClipboard(full);
+    const originalText = chip.textContent;
+    chip.textContent = ok ? "copied ✓" : "copy failed";
+    setTimeout(() => { chip.textContent = originalText; }, 1500);
+  };
+
+  if (prev && prev !== sha) {
+    toast(`Server rolled over → ${label || sha}`, "ok");
+  }
+}
+
+
 async function pollPullStatus() {
   try {
     const res = await fetch("/api/pull/status");
     const s = await res.json();
     state.nextRun = s.next_run ? new Date(s.next_run) : null;
+    if (s.version) updateVersionChip(s.version);
     const wasRunning = state.pullRunning;
     state.pullRunning = !!s.running;
     const btn = document.getElementById("pull-btn");
