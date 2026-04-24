@@ -60,7 +60,12 @@ from uscis_api import (
 from uscis_auth import (
     AuthError,
     STORAGE_STATE_PATH,
+    TraceCollector,
+    TRACE_ON_SUCCESS_ENV,
     ensure_authenticated,
+    make_trace_dir,
+    rotate_full_traces,
+    write_mfa_artefacts,
 )
 from system_log import log as sys_log
 
@@ -272,6 +277,25 @@ def _extract_cases(
                     receipt=receipt, status=getattr(e, "status", None),
                     error=str(e))
             continue
+        except Exception as e:  # noqa: BLE001 — last-resort isolation
+            # Any other exception (TypeError from bad response JSON,
+            # KeyError, AttributeError, Playwright Error from a dead
+            # tab) must NOT kill the whole pull — the remaining cases
+            # still have a chance. Surface it with a full traceback so
+            # the category can be diagnosed.
+            logger.exception("  ✗ unexpected error fetching %s", receipt)
+            failures += 1
+            import traceback as _tb  # local to keep top-of-file clean
+            sys_log(
+                "case_fetch_unexpected_error", level="error",
+                source="session_fetch", label=label or "?",
+                receipt=receipt,
+                error=f"{type(e).__name__}: {e}"[:300],
+                traceback_tail="".join(
+                    _tb.format_exception(type(e), e, e.__traceback__)
+                )[-1200:],
+            )
+            continue
 
         form_type = (
             (data.get("data") or data).get("formType")
@@ -403,18 +427,35 @@ def cmd_run(args) -> int:
         sys_log("cli_run_no_cases", level="error", source="session_fetch")
         return 1
 
+    # Policy: every pull starts from a clean slate. Any persisted
+    # session cookies from a prior run are wiped BEFORE the pull begins,
+    # so each pull exercises the full OIDC + MFA flow and produces a
+    # comparable trace. No session reuse, no hidden state.
+    if STORAGE_STATE_PATH.exists():
+        try:
+            STORAGE_STATE_PATH.unlink()
+            sys_log(
+                "storage_state_wiped_at_start", source="session_fetch",
+                path=STORAGE_STATE_PATH.name,
+            )
+        except OSError as e:
+            sys_log(
+                "storage_state_wipe_failed", level="warning",
+                source="session_fetch",
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+
     captured_at = _now_iso_utc()
     logger.info("USCIS Case Snapshot — %s (%d cases)", captured_at, len(cases))
     sys_log("cli_run_start", source="session_fetch",
             case_count=len(cases), captured_at=captured_at,
-            headless=args.headless, keep_alive=args.keep_alive,
-            storage_state_exists=STORAGE_STATE_PATH.exists())
+            headless=args.headless, keep_alive=args.keep_alive)
 
     failures = 0
     with sync_playwright() as pw:
         # Browser + context + page construction is a distinct failure
-        # surface (chromium binary missing, corrupt storage_state, etc.)
-        # that must not silently manifest as a top-level traceback.
+        # surface (chromium binary missing, chromium crash, etc.) that
+        # must not silently manifest as a top-level traceback.
         try:
             browser = pw.chromium.launch(headless=args.headless)
         except Exception as e:
@@ -427,35 +468,55 @@ def cmd_run(args) -> int:
             raise
 
         try:
-            context = browser.new_context(
-                storage_state=str(STORAGE_STATE_PATH)
-                if STORAGE_STATE_PATH.exists()
-                else None
-            )
+            # No storage_state — every pull is a fresh context.
+            context = browser.new_context()
             page = context.new_page()
         except Exception as e:
             sys_log(
                 "browser_context_failed", level="error",
                 source="session_fetch",
                 error=f"{type(e).__name__}: {e}"[:200],
-                storage_state_exists=STORAGE_STATE_PATH.exists(),
             )
             browser.close()
             raise
 
+        # Start Playwright's native tracing immediately. Every request,
+        # response, DOM snapshot, console log, and source-linked action
+        # is captured from this point onward. Whether the zip gets
+        # persisted depends on outcome + debug mode — decision made in
+        # the outer `finally` below.
+        collector = TraceCollector()
+        trace_on_success = os.environ.get(
+            TRACE_ON_SUCCESS_ENV, "",
+        ).lower() in ("1", "true", "yes")
+        tracing_started = False
+        try:
+            context.tracing.start(
+                screenshots=True, snapshots=True, sources=True,
+            )
+            tracing_started = True
+        except Exception as e:  # pragma: no cover — best-effort
+            sys_log(
+                "tracing_start_failed", level="warning",
+                source="session_fetch",
+                error=f"{type(e).__name__}: {e}"[:200],
+            )
+
+        pull_had_error = False
         try:
             try:
-                ensure_authenticated(context, page, auth, allow_login=True)
+                ensure_authenticated(
+                    context, page, auth, allow_login=True,
+                    collector=collector,
+                )
             except AuthError as e:
-                # ensure_authenticated already emitted an
-                # `auth_ensure_result` event with snapshot — re-emit a
-                # cli-level marker so the run-level event is easy to
-                # correlate in the dashboard timeline.
                 sys_log(
                     "cli_run_auth_failed", level="error",
                     source="session_fetch",
                     error=f"AuthError: {e}"[:200],
                 )
+                collector.should_keep = True
+                pull_had_error = True
                 raise
 
             try:
@@ -470,7 +531,10 @@ def cmd_run(args) -> int:
                     receipt=getattr(e, "receipt", None),
                 )
                 try:
-                    ensure_authenticated(context, page, auth, allow_login=True)
+                    ensure_authenticated(
+                        context, page, auth, allow_login=True,
+                        collector=collector,
+                    )
                 except AuthError as ae:
                     sys_log(
                         "cli_run_auth_failed", level="error",
@@ -478,31 +542,78 @@ def cmd_run(args) -> int:
                         phase="post_session_expired_retry",
                         error=f"AuthError: {ae}"[:200],
                     )
+                    collector.should_keep = True
+                    pull_had_error = True
                     raise
                 try:
                     failures = _extract_cases(
                         context, cases, captured_at, keep_alive=args.keep_alive
                     )
                 except SessionExpired as e2:
-                    # Session died AGAIN after a fresh login — give up.
                     sys_log(
                         "cli_run_session_expired_twice", level="error",
                         source="session_fetch",
                         receipt=getattr(e2, "receipt", None),
                     )
+                    collector.should_keep = True
+                    pull_had_error = True
                     raise
+            if failures:
+                # Per-case fetch failures don't raise out of _extract_cases
+                # (per-case isolation), but they still count as "something
+                # went wrong" for trace-persistence purposes.
+                collector.should_keep = True
+        except Exception:
+            pull_had_error = True
+            raise
         finally:
-            # Persist whatever session state we ended up with. Failures
-            # here are non-fatal but must be visible so we don't lose a
-            # working session silently.
-            try:
-                context.storage_state(path=str(STORAGE_STATE_PATH))
-            except Exception as e:
-                sys_log(
-                    "storage_state_persist_failed", level="warning",
-                    source="session_fetch",
-                    error=f"{type(e).__name__}: {e}"[:200],
-                )
+            # Policy: NO session persistence. Each pull is independent;
+            # the next run will do a fresh OIDC + MFA login from zero.
+            # Any cookies Chromium accumulated live only for this
+            # process's lifetime.
+
+            # Decide: keep the trace if the pull failed, OR if debug
+            # mode asked us to keep every trace. Otherwise discard —
+            # call tracing.stop() with no path so Playwright drops the
+            # in-memory buffer without writing anything.
+            should_keep = collector.should_keep or trace_on_success
+            if tracing_started:
+                try:
+                    if should_keep:
+                        outcome = "fail" if pull_had_error else "ok"
+                        trigger = os.environ.get(
+                            "USCIS_PULL_TRIGGER", "pull",
+                        )
+                        trace_dir = make_trace_dir(outcome, trigger)
+                        collector.trace_dir = trace_dir
+                        context.tracing.stop(
+                            path=str(trace_dir / "trace.zip"),
+                        )
+                        # Sidecar: MFA wire-level events + raw emails.
+                        mfa_dir = write_mfa_artefacts(
+                            trace_dir,
+                            collector.mfa_events,
+                            collector.mfa_emails,
+                        )
+                        sys_log(
+                            "trace_saved", source="session_fetch",
+                            outcome=outcome,
+                            dir=trace_dir.name,
+                            has_mfa_trace=bool(mfa_dir),
+                            mfa_event_count=len(collector.mfa_events),
+                            mfa_email_count=len(collector.mfa_emails),
+                        )
+                        rotate_full_traces()
+                    else:
+                        # Discard: stop with no path → zero disk use.
+                        context.tracing.stop()
+                except Exception as e:  # pragma: no cover — teardown
+                    sys_log(
+                        "tracing_stop_failed", level="warning",
+                        source="session_fetch",
+                        error=f"{type(e).__name__}: {e}"[:200],
+                    )
+
             _hold_browser_open(args)
             try:
                 browser.close()
@@ -688,7 +799,12 @@ def main() -> int:
         # Propagate argparse / load_auth SystemExit untouched.
         raise
     except BaseException as e:
-        tb_tail = "".join(traceback.format_exception(e))[-1200:]
+        # traceback.format_exception signature differs between 3.9 (requires
+        # type + value + tb) and 3.10+ (accepts the exception instance alone).
+        # Use the 3.9-compatible form so this works across deploy targets.
+        tb_tail = "".join(
+            traceback.format_exception(type(e), e, e.__traceback__)
+        )[-1200:]
         sys_log(
             "cli_uncaught_exception", level="error", source="session_fetch",
             cmd=cmd,

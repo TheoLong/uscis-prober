@@ -121,15 +121,23 @@ def fetch_latest_code(
     since: datetime | None = None,
     max_wait_seconds: int = 180,
     poll_interval_seconds: int = 5,
+    collector=None,
 ) -> str:
     """Poll the inbox for a USCIS 6-digit MFA code newer than `since`.
 
-    Raises TimeoutError if no matching email arrives within `max_wait_seconds`.
-    On timeout the error message AND a durable `mfa_fetch_timeout`
-    system-log event both contain per-branch reason counters, the IMAP
-    host we queried, the SEARCH query string we used, and the UIDs the
-    last cycle returned — enough to triage the next failure entirely
-    from the dashboard.
+    Raises TimeoutError if no matching email arrives within
+    `max_wait_seconds`. On timeout the error message AND a durable
+    `mfa_fetch_timeout` system-log event both contain per-branch
+    reason counters, the IMAP host queried, the SEARCH query string,
+    and the UIDs the last cycle returned.
+
+    When `collector` (a TraceCollector) is supplied, every IMAP
+    command + response + timing + gate check is recorded as a
+    wire-level event, and every raw email fetched is stored in the
+    collector's email dict keyed by UID. Persisted only when the
+    caller asks (e.g. on failure or trace_successful_pulls=true) —
+    gives absolute replay/diagnosis capability without a second
+    MFA cycle.
     """
     since = since or (datetime.now(timezone.utc) - timedelta(minutes=2))
     deadline = time.time() + max_wait_seconds
@@ -158,6 +166,11 @@ def fetch_latest_code(
 
     # Aggregate reason counts across every poll cycle of this fetch.
     tally: dict[str, int] = {}
+    # Reasons we've already surfaced as an early-warning event. Keeps
+    # noise down (one event per distinct failure reason, not per
+    # cycle) while still catching e.g. bad-app-password in seconds
+    # instead of at the full timeout.
+    reasons_surfaced: set[str] = set()
     # Keep the latest cycle's SEARCH query and returned UIDs so the
     # timeout event records what we actually saw at the end.
     last_search_query: str | None = None
@@ -174,11 +187,48 @@ def fetch_latest_code(
             uscis_mfa_app_password,
             since,
             tally=tally,
+            collector=collector,
+            cycle=cycle_count,
         )
         if search_query is not None:
             last_search_query = search_query
         if returned_uids is not None:
             last_returned_uids = returned_uids
+
+        # Surface any NEW failure reason as a warning on its first
+        # occurrence. Fast feedback for IMAP-side problems (bad app
+        # password, provider outage, SSL handshake failure) so
+        # operators don't have to wait for the full deadline to see
+        # *what* went wrong. Benign reasons (no match yet, stale
+        # message, wrong subject) are suppressed — a healthy fetch
+        # cycles through those every time.
+        benign = {
+            REASON_IMAP_SEARCH_EMPTY,
+            REASON_STALE,
+            REASON_SUBJECT_MISMATCH,
+            REASON_ACCEPTED,
+        }
+        for reason, count in tally.items():
+            if reason in reasons_surfaced:
+                continue
+            if reason in benign:
+                reasons_surfaced.add(reason)
+                continue
+            sys_log(
+                "mfa_fetch_cycle_error",
+                level="warning",
+                source="auth",
+                imap_host=imap_host,
+                cycle=cycle_count,
+                reason=reason,
+                reason_count=count,
+                note=(
+                    "First cycle observing this failure mode — "
+                    "surfacing early so the operator doesn't have "
+                    "to wait for the full fetch timeout."
+                ),
+            )
+            reasons_surfaced.add(reason)
 
         if code:
             elapsed = round(time.time() - started_at, 2)
@@ -234,6 +284,8 @@ def _check_inbox_once(
     since: datetime,
     *,
     tally: dict[str, int] | None = None,
+    collector=None,
+    cycle: int = 0,
 ) -> tuple[str | None, str | None, list[str] | None]:
     """One sweep of the inbox. Accepted when every gate passes:
 
@@ -268,111 +320,169 @@ def _check_inbox_once(
         if tally is not None:
             tally[reason] = tally.get(reason, 0) + 1
 
+    def rec(event: str, **fields) -> None:
+        """Wire-level trace recorder. No-op when no collector."""
+        if collector is not None:
+            collector.record_mfa_event(event, cycle=cycle, **fields)
+
     # --- host lookup ---
     try:
         host, port = imap_host_port(uscis_mfa_email)
     except Exception as e:  # pragma: no cover — provider lookup is static
         logger.warning("mfa/provider lookup failed: %s: %s", type(e).__name__, e)
         bump(REASON_PROVIDER_LOOKUP_FAILED)
+        rec("provider_lookup_failed",
+            error=f"{type(e).__name__}: {e}"[:200])
         return None, None, None
 
+    rec("imap_connect_started", host=host, port=port)
     search_query: str | None = None
     returned_uids: list[str] = []
 
     # --- IMAP session ---
+    t0 = time.time()
     try:
         mail = imaplib.IMAP4_SSL(host, port)
     except Exception as e:
         logger.warning("mfa/IMAP connect failed: %s: %s", type(e).__name__, e)
         bump(REASON_IMAP_CONNECT_FAILED)
+        rec("imap_connect_failed", host=host, port=port,
+            duration_ms=int((time.time() - t0) * 1000),
+            error=f"{type(e).__name__}: {e}"[:200])
         return None, None, None
+    rec("imap_connect_ok", host=host, port=port,
+        duration_ms=int((time.time() - t0) * 1000))
 
     try:
         with mail:
             # --- login ---
+            t0 = time.time()
             try:
                 mail.login(uscis_mfa_email, uscis_mfa_app_password)
             except Exception as e:
                 logger.error("mfa/IMAP login failed: %s: %s",
                              type(e).__name__, e)
                 bump(REASON_IMAP_LOGIN_FAILED)
+                rec("imap_login_failed",
+                    duration_ms=int((time.time() - t0) * 1000),
+                    error=f"{type(e).__name__}: {e}"[:200])
                 return None, None, None
+            rec("imap_login_ok",
+                duration_ms=int((time.time() - t0) * 1000))
 
             # --- select INBOX ---
+            t0 = time.time()
             try:
-                sel_status, _ = mail.select("INBOX", readonly=True)
+                sel_status, sel_data = mail.select("INBOX", readonly=True)
             except Exception as e:
                 logger.error("mfa/IMAP select INBOX failed: %s: %s",
                              type(e).__name__, e)
                 bump(REASON_IMAP_SELECT_FAILED)
+                rec("imap_select_failed", mailbox="INBOX",
+                    duration_ms=int((time.time() - t0) * 1000),
+                    error=f"{type(e).__name__}: {e}"[:200])
                 return None, None, None
             if sel_status != "OK":
                 logger.error("mfa/IMAP select INBOX returned %s", sel_status)
                 bump(REASON_IMAP_SELECT_FAILED)
+                rec("imap_select_failed", mailbox="INBOX", status=sel_status,
+                    duration_ms=int((time.time() - t0) * 1000))
                 return None, None, None
+            # sel_data[0] is typically the message count as bytes.
+            try:
+                msg_count = int((sel_data[0] or b"0").decode("ascii"))
+            except Exception:
+                msg_count = None
+            rec("imap_select_ok", mailbox="INBOX",
+                message_count=msg_count,
+                duration_ms=int((time.time() - t0) * 1000))
 
             # --- build + run search ---
-            # Server-side filter is FROM + SUBJECT only. No SINCE —
-            # see the docstring at the top of this function for why.
             search_query = (
                 f'(FROM "{USCIS_SENDER}" '
                 f'SUBJECT "{USCIS_MFA_SUBJECT}")'
             )
+            rec("imap_search_started", query=search_query)
+            t0 = time.time()
             try:
                 status, data = mail.search(None, search_query)
             except Exception as e:
                 logger.error("mfa/IMAP search errored: %s: %s",
                              type(e).__name__, e)
                 bump(REASON_IMAP_SEARCH_FAILED)
+                rec("imap_search_failed", query=search_query,
+                    duration_ms=int((time.time() - t0) * 1000),
+                    error=f"{type(e).__name__}: {e}"[:200])
                 return None, search_query, returned_uids
 
             if status != "OK":
                 logger.warning("mfa/IMAP search non-OK status=%s query=%r",
                                status, search_query)
                 bump(REASON_IMAP_SEARCH_FAILED)
+                rec("imap_search_failed", query=search_query, status=status,
+                    duration_ms=int((time.time() - t0) * 1000))
                 return None, search_query, returned_uids
 
             if not data or not data[0]:
                 logger.info("mfa/IMAP search empty: query=%r", search_query)
                 bump(REASON_IMAP_SEARCH_EMPTY)
+                rec("imap_search_empty", query=search_query,
+                    duration_ms=int((time.time() - t0) * 1000))
                 return None, search_query, returned_uids
 
             all_ids = data[0].split()
-            # Without SINCE the inbox can return every historical USCIS
-            # MFA email.  Bound the scan to the most recent 50 — the
-            # MFA we want is seconds old, and reverse-UID iteration
-            # already returns on first match.  This is pure defense
-            # against unbounded mailbox growth.
             ids = all_ids[-MAX_SEARCH_IDS_SCANNED:]
             returned_uids = [x.decode("ascii", errors="replace") for x in ids]
             logger.info(
                 "mfa/IMAP search returned %d total uid(s), scanning last %d: %s",
                 len(all_ids), len(ids), returned_uids,
             )
+            rec("imap_search_ok", query=search_query,
+                total_uids=len(all_ids), scanning_uids=len(ids),
+                uids=returned_uids,
+                duration_ms=int((time.time() - t0) * 1000))
 
             # --- walk newest-first through returned IDs ---
             for num in reversed(ids):
                 uid_s = num.decode("ascii", errors="replace")
 
+                t0 = time.time()
                 try:
                     status, msg_data = mail.fetch(num, "(RFC822)")
                 except Exception as e:
                     logger.warning("mfa/uid=%s fetch errored: %s: %s",
                                    uid_s, type(e).__name__, e)
                     bump(REASON_FETCH_FAILED)
+                    rec("imap_fetch_failed", uid=uid_s,
+                        duration_ms=int((time.time() - t0) * 1000),
+                        error=f"{type(e).__name__}: {e}"[:200])
                     continue
                 if status != "OK" or not msg_data or not msg_data[0]:
                     logger.warning("mfa/uid=%s fetch non-OK: status=%s",
                                    uid_s, status)
                     bump(REASON_FETCH_FAILED)
+                    rec("imap_fetch_failed", uid=uid_s, status=status,
+                        duration_ms=int((time.time() - t0) * 1000))
                     continue
 
+                raw_bytes = msg_data[0][1] or b""
+                rec("imap_fetch_ok", uid=uid_s,
+                    bytes=len(raw_bytes),
+                    duration_ms=int((time.time() - t0) * 1000))
+                # Persist every raw email considered (accepted OR
+                # rejected). A regex break on an unanticipated template
+                # is diagnosable only with the actual body in hand.
+                if collector is not None:
+                    collector.record_mfa_email(uid_s, raw_bytes)
+
                 try:
-                    msg = email.message_from_bytes(msg_data[0][1])
+                    msg = email.message_from_bytes(raw_bytes)
                 except Exception as e:  # pragma: no cover — email lib is lenient
                     logger.warning("mfa/uid=%s message parse failed: %s",
                                    uid_s, e)
                     bump(REASON_PARSE_FAILED)
+                    rec("email_parse_failed", uid=uid_s,
+                        error=f"{type(e).__name__}: {e}"[:200])
                     continue
 
                 # Gate 2: subject match
@@ -381,7 +491,11 @@ def _check_inbox_once(
                     logger.info("mfa/uid=%s reject subject_mismatch: %r",
                                 uid_s, subject[:80])
                     bump(REASON_SUBJECT_MISMATCH)
+                    rec("gate_subject_match", uid=uid_s, passed=False,
+                        subject=subject[:200])
                     continue
+                rec("gate_subject_match", uid=uid_s, passed=True,
+                    subject=subject[:200])
 
                 # Gate 3: freshness (second-granularity)
                 raw_date = msg["Date"]
@@ -391,6 +505,9 @@ def _check_inbox_once(
                     logger.info("mfa/uid=%s reject bad_date_header: %r (%s)",
                                 uid_s, raw_date, e)
                     bump(REASON_BAD_DATE_HEADER)
+                    rec("gate_date_header", uid=uid_s, passed=False,
+                        raw_date=str(raw_date)[:200],
+                        error=f"{type(e).__name__}: {e}"[:200])
                     continue
                 if msg_date.tzinfo is None:
                     msg_date = msg_date.replace(tzinfo=timezone.utc)
@@ -400,7 +517,13 @@ def _check_inbox_once(
                         uid_s, msg_date.isoformat(), since.isoformat(),
                     )
                     bump(REASON_STALE)
+                    rec("gate_freshness", uid=uid_s, passed=False,
+                        msg_date=msg_date.isoformat(),
+                        since=since.isoformat())
                     continue
+                rec("gate_freshness", uid=uid_s, passed=True,
+                    msg_date=msg_date.isoformat(),
+                    since=since.isoformat())
 
                 # Gate 4: extract the 6-digit code
                 body = _extract_body(msg)
@@ -413,13 +536,23 @@ def _check_inbox_once(
                         msg_date.isoformat(), len(body),
                     )
                     bump(REASON_NO_CODE_EXTRACTED)
+                    rec("gate_code_extraction", uid=uid_s, passed=False,
+                        body_length=len(body))
                     continue
+                rec("gate_code_extraction", uid=uid_s, passed=True,
+                    body_length=len(body), code_length=len(code))
 
                 logger.info(
                     "mfa/uid=%s ACCEPTED: date=%s body_len=%d",
                     uid_s, msg_date.isoformat(), len(body),
                 )
                 bump(REASON_ACCEPTED)
+                rec("code_accepted", uid=uid_s,
+                    subject=subject[:200],
+                    from_=(msg.get("From") or "")[:200],
+                    date=msg_date.isoformat(),
+                    body_length=len(body),
+                    code_length=len(code))
                 return code, search_query, returned_uids
 
             return None, search_query, returned_uids

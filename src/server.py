@@ -31,6 +31,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import playwright as _pw_module
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -60,6 +62,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 CONFIG_PATH = ROOT / "config.json"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Path mirrored from uscis_auth.STORAGE_STATE_PATH so the storage
+# accounting doesn't need to import the auth module (which would
+# pull in Playwright at Flask-route time).
+STORAGE_SESSION_PATH = ROOT / ".uscis_session.json"
 
 SCHEDULER_TZ = "America/New_York"
 # Cron hours for the automatic pull (24h, America/New_York).
@@ -70,6 +76,165 @@ SCHEDULER_TZ = "America/New_York"
 PULL_HOURS: tuple[int, ...] = (7, 14, 20)
 
 PULL_CMD = [sys.executable, str(Path(__file__).resolve().parent / "session_fetch.py"), "run"]
+
+# Retry policy for a pull. `retry` + `retry_wait_seconds` are REQUIRED
+# top-level keys in config.json — see config.example.json for the
+# canonical template. Out-of-range values are clamped to these caps
+# so a typo like `retry_wait_seconds: 6000` doesn't wedge a pull for
+# 100 minutes.
+RETRY_MAX_COUNT = 5
+RETRY_MAX_WAIT_SECONDS = 600
+
+
+class ConfigError(RuntimeError):
+    """Raised when a required config.json field is missing or invalid."""
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Validated retry settings for a single pull.
+
+    `retry` is the number of *additional* attempts after the initial
+    failure — so `retry=0` means no retry, `retry=2` means two retries
+    (3 total attempts), and so on. `retry_wait_seconds` is the delay
+    between attempts.
+    """
+    retry: int
+    retry_wait_seconds: float
+
+    @property
+    def total_attempts(self) -> int:
+        return self.retry + 1
+
+
+def _clamp(value, lo, hi):
+    return max(lo, min(hi, value))
+
+
+def load_retry_policy(config: dict | None = None) -> RetryPolicy:
+    """Read the retry policy from config.json.
+
+    Both `retry` and `retry_wait_seconds` are REQUIRED — missing keys
+    raise `ConfigError` with a message that points the operator to
+    config.example.json. This is deliberate: retry behaviour is
+    load-bearing (especially for the 20:00 ET pull that often hits
+    anti-bot throttling), so silently falling back to implicit defaults
+    would hide misconfiguration from the operator who set up the VM.
+
+    Non-numeric values also raise (catching typos at load time instead
+    of masking them as "0 retries"). Out-of-range values are clamped
+    with a warning so a well-meaning but inflated number can't make a
+    pull sleep for an hour.
+    """
+    if config is None:
+        config = load_config()  # propagate FileNotFoundError / JSONDecodeError
+
+    if "retry" not in config:
+        raise ConfigError(
+            "config.json is missing required key `retry` (int, >=0). "
+            "See config.example.json for the canonical template — "
+            "recommended values are retry=2 and retry_wait_seconds=180."
+        )
+    if "retry_wait_seconds" not in config:
+        raise ConfigError(
+            "config.json is missing required key `retry_wait_seconds` "
+            "(number of seconds between retry attempts, >=0). "
+            "See config.example.json — recommended value is 180."
+        )
+
+    raw_retry = config["retry"]
+    raw_wait = config["retry_wait_seconds"]
+
+    try:
+        retry = int(raw_retry)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"config.retry={raw_retry!r} is not an integer."
+        )
+
+    try:
+        wait = float(raw_wait)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"config.retry_wait_seconds={raw_wait!r} is not numeric."
+        )
+
+    if retry < 0:
+        raise ConfigError(
+            f"config.retry={retry} must be >= 0 (0 disables retry)."
+        )
+    if wait < 0:
+        raise ConfigError(
+            f"config.retry_wait_seconds={wait} must be >= 0."
+        )
+
+    clamped_retry = _clamp(retry, 0, RETRY_MAX_COUNT)
+    if clamped_retry != retry:
+        logger.warning("config.retry=%d above cap %d; clamped to %d.",
+                       retry, RETRY_MAX_COUNT, clamped_retry)
+
+    clamped_wait = _clamp(wait, 0.0, float(RETRY_MAX_WAIT_SECONDS))
+    if clamped_wait != wait:
+        logger.warning("config.retry_wait_seconds=%s above cap %d; "
+                       "clamped to %s.", wait, RETRY_MAX_WAIT_SECONDS,
+                       clamped_wait)
+
+    return RetryPolicy(retry=clamped_retry, retry_wait_seconds=clamped_wait)
+
+
+# Storage quota. Clamped to [0.01, 100] GB. A 0 limit would mean
+# "immediately over quota" on every pull so we require > 0.
+STORAGE_MIN_GB = 0.01
+STORAGE_MAX_GB = 100.0
+
+
+def load_storage_limit_bytes(config: dict | None = None) -> int:
+    """Read `storage_limit_gb` from config.json and return bytes.
+
+    REQUIRED field. Missing or non-numeric raises ConfigError.
+    Used both by the live storage bar (/api/storage) and the pull
+    post-condition check that fires `storage_limit_exceeded`.
+    """
+    if config is None:
+        config = load_config()
+    if "storage_limit_gb" not in config:
+        raise ConfigError(
+            "config.json is missing required key `storage_limit_gb` "
+            "(number of GB before storage alerts fire). See "
+            "config.example.json — recommended value is 1.0."
+        )
+    raw = config["storage_limit_gb"]
+    try:
+        gb = float(raw)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"config.storage_limit_gb={raw!r} is not numeric."
+        )
+    if gb < STORAGE_MIN_GB or gb > STORAGE_MAX_GB:
+        raise ConfigError(
+            f"config.storage_limit_gb={gb} out of range "
+            f"[{STORAGE_MIN_GB}, {STORAGE_MAX_GB}]."
+        )
+    return int(gb * 1024 * 1024 * 1024)
+
+
+def load_trace_successful_pulls(config: dict | None = None) -> bool:
+    """Read `trace_successful_pulls` (bool) from config.json.
+
+    Optional field — default is `false`. Traces are only written on
+    auth failures. The UI's debug-mode pill flips this field on
+    demand (via /api/debug-mode) to capture a trace on every pull
+    for verification; it's not a field the operator edits by hand.
+    Missing or absent = false; invalid type = ConfigError.
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("trace_successful_pulls", False)
+    if not isinstance(raw, bool):
+        raise ConfigError(
+            f"config.trace_successful_pulls={raw!r} must be a boolean."
+        )
+    return raw
 
 _FORM_NUM_RE = re.compile(r"I-?(\d+)")
 
@@ -347,6 +512,200 @@ def _notify_recipient(auth: dict) -> str | None:
     return auth.get("notification_email") or auth.get("uscis_mfa_email")
 
 
+# Storage-alert dedup state — small sidecar file so we don't emit
+# duplicate `storage_limit_exceeded` events (and send duplicate
+# emails) on every pull while usage remains above the limit. Once
+# usage drops back below 90 % of the limit the dedup is re-armed.
+STORAGE_ALERT_STATE_PATH = DATA_DIR / ".storage_alert_state.json"
+STORAGE_REARM_RATIO = 0.9
+
+
+def _read_storage_alert_state() -> dict:
+    try:
+        if STORAGE_ALERT_STATE_PATH.exists():
+            return json.loads(STORAGE_ALERT_STATE_PATH.read_text())
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("storage_alert_state read failed: %s", e)
+    return {}
+
+
+def _write_storage_alert_state(state: dict) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STORAGE_ALERT_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, STORAGE_ALERT_STATE_PATH)
+    except Exception as e:  # pragma: no cover — best-effort
+        logger.warning("storage_alert_state write failed: %s", e)
+
+
+def _check_storage_limit_and_alert() -> list[dict]:
+    """Post-pull storage-quota check.
+
+    Compares total bytes (via /api/storage's same collector) against
+    `storage_limit_gb`. If over and we haven't already alerted for
+    this crossing, emits `storage_limit_exceeded` (error) and sends
+    an email.
+
+    De-dup rule: once alerted we don't alert again until usage drops
+    below STORAGE_REARM_RATIO × limit. This means a hovering-around-
+    the-line configuration doesn't spam. The state is persisted to
+    `data/.storage_alert_state.json` so it survives restarts.
+
+    Returns a list of sys_log step dicts (empty when no alert fired)
+    so the caller can fold them into the pull envelope.
+    """
+    steps: list[dict] = []
+    try:
+        limit_bytes = load_storage_limit_bytes()
+    except ConfigError as e:
+        steps.append({
+            "ts": _now_iso(), "event": "storage_limit_check_skipped",
+            "level": "warning", "source": "server",
+            "reason": "config_missing",
+            "error": str(e),
+        })
+        return steps
+
+    categories = _collect_storage_categories()
+    total = sum(c["bytes"] for c in categories)
+
+    state = _read_storage_alert_state()
+    already_alerted = bool(state.get("alerted_at"))
+    rearm_threshold = int(limit_bytes * STORAGE_REARM_RATIO)
+
+    if total <= limit_bytes:
+        # Under limit. Clear the dedup state if we've dropped far
+        # enough below so the next breach triggers a fresh alert.
+        if already_alerted and total < rearm_threshold:
+            _write_storage_alert_state({})
+            steps.append({
+                "ts": _now_iso(),
+                "event": "storage_alert_rearmed",
+                "level": "info", "source": "server",
+                "total_bytes": total,
+                "limit_bytes": limit_bytes,
+                "rearm_threshold": rearm_threshold,
+            })
+        return steps
+
+    # Over limit. Emit event + email once per crossing.
+    if already_alerted:
+        return steps  # Still over but we've already told the operator.
+
+    sys_log(
+        "storage_limit_exceeded",
+        level="error", source="server",
+        total_bytes=total,
+        limit_bytes=limit_bytes,
+        over_by_bytes=total - limit_bytes,
+        categories=[{"key": c["key"], "bytes": c["bytes"]}
+                    for c in categories],
+    )
+    # Record a step so the pull envelope surfaces the crossing.
+    steps.append({
+        "ts": _now_iso(), "event": "storage_limit_exceeded",
+        "level": "error", "source": "server",
+        "total_bytes": total, "limit_bytes": limit_bytes,
+    })
+
+    # Try to email the operator.
+    try:
+        _send_storage_alert_email(total, limit_bytes, categories)
+        steps.append({
+            "ts": _now_iso(), "event": "storage_alert_email_sent",
+            "level": "info", "source": "server",
+        })
+    except Exception as e:
+        logger.exception("Failed to send storage-limit alert email: %s", e)
+        steps.append({
+            "ts": _now_iso(), "event": "storage_alert_email_failed",
+            "level": "warning", "source": "server",
+            "error": f"{type(e).__name__}: {e}"[:200],
+        })
+
+    _write_storage_alert_state({
+        "alerted_at": _now_iso(),
+        "alerted_bytes": total,
+        "limit_bytes": limit_bytes,
+    })
+    return steps
+
+
+def _send_storage_alert_email(
+    total_bytes: int, limit_bytes: int, categories: list[dict],
+) -> None:
+    """Email the operator that storage has crossed its configured
+    limit. Uses the same recipient / SMTP path as the diff-update
+    emails. Missing credentials fall back to a no-op with a warning —
+    the storage event in the log is still authoritative."""
+    try:
+        cfg = load_config()
+    except Exception as e:
+        logger.warning("Storage alert: config load failed (%s)", e)
+        return
+    auth = cfg.get("auth") or {}
+    uscis_mfa_email = auth.get("uscis_mfa_email")
+    pw = auth.get("uscis_mfa_app_password")
+    recipient = _notify_recipient(auth)
+    if not (uscis_mfa_email and pw and recipient):
+        logger.warning("Storage alert: missing auth creds; skipping email.")
+        return
+
+    def _human(b: int) -> str:
+        for unit, size in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+            if b >= size:
+                return f"{b/size:.2f} {unit}"
+        return f"{b} B"
+
+    subject = (
+        f"[USCIS Tracker] Storage limit reached — "
+        f"{_human(total_bytes)} of {_human(limit_bytes)}"
+    )
+    rows_plain = "\n".join(
+        f"  {c['label']:<24} {_human(c['bytes']):>10}  ({c['file_count']} files)"
+        for c in categories
+    )
+    rows_html = "".join(
+        f"<tr><td>{c['label']}</td>"
+        f"<td style='text-align:right'>{_human(c['bytes'])}</td>"
+        f"<td style='text-align:right;color:#888'>{c['file_count']} files</td></tr>"
+        for c in categories
+    )
+    plain = (
+        f"USCIS Case Prober: storage usage has crossed the configured "
+        f"limit.\n\n"
+        f"Total: {_human(total_bytes)}\n"
+        f"Limit: {_human(limit_bytes)} "
+        f"(over by {_human(total_bytes - limit_bytes)})\n\n"
+        f"Breakdown:\n{rows_plain}\n\n"
+        f"Open the dashboard and clear the System log, or raise "
+        f"`storage_limit_gb` in config.json."
+    )
+    html = (
+        f"<h3>USCIS Case Prober — storage limit reached</h3>"
+        f"<p><strong>Total</strong>: {_human(total_bytes)}<br>"
+        f"<strong>Limit</strong>: {_human(limit_bytes)} "
+        f"(over by {_human(total_bytes - limit_bytes)})</p>"
+        f"<table style='border-collapse:collapse'>"
+        f"<thead><tr><th>Category</th><th>Size</th><th>Files</th></tr>"
+        f"</thead><tbody>{rows_html}</tbody></table>"
+        f"<p style='color:#888'>Open the dashboard and clear the "
+        f"System log, or raise <code>storage_limit_gb</code> in "
+        f"config.json.</p>"
+    )
+
+    from mailer import send_email  # local to keep module start-up cheap
+    send_email(
+        uscis_mfa_email=uscis_mfa_email,
+        uscis_mfa_app_password=pw,
+        to=recipient,
+        subject=subject,
+        plain=plain,
+        html=html,
+    )
+
+
 def _send_notifications_for_new(new_records: list[dict]) -> list[dict]:
     """Send a notification email for each new diff record.
 
@@ -545,92 +904,228 @@ def _run_pull_subprocess_inner(
         )
 
     # Structured events collected from all sources during this run.
+    # Across retries we accumulate steps from every attempt, each
+    # annotated with `attempt: N` (1-indexed) so the dashboard can group
+    # them visually without losing the whole attempt's trace.
     steps: list[dict] = []
-    plain_stderr_tail: list[str] = []
+    # Per-attempt plain-stderr tails (non-event lines — Python
+    # tracebacks, prints). Preserved across retries so a crash
+    # signature on attempt 1 isn't lost when attempt 2 starts.
+    per_attempt_stderr: list[list[str]] = []
     exit_code: int | None = None
     top_level: str = "info"
     timed_out = False
     crashed_error: str | None = None
 
-    logger.info("Spawning pull: %s", " ".join(PULL_CMD))
-    child_env = {**os.environ, _SYSLOG_JSONL_ENV: "1"}
     try:
-        proc = subprocess.run(
-            PULL_CMD,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env=child_env,
+        policy = load_retry_policy()
+    except ConfigError as e:
+        # Surface the specific missing/invalid field as a top-level
+        # error step instead of crashing the pull thread. This puts an
+        # actionable message in the dashboard System-log tab the next
+        # time the operator opens it.
+        sys_log(
+            "pull_config_error", level="error", source="server",
+            trigger=trigger,
+            error=str(e),
         )
-        exit_code = proc.returncode
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
-        tail_lines = (stdout + "\n" + stderr).splitlines()[-80:]
-
-        steps, plain_stderr_tail = _collect_subprocess_steps(stderr)
-        duration = round(time.time() - start_wall, 2)
-
-        with _pull_lock:
-            _pull_state.running = False
-            _pull_state.finished_at = _now_iso()
-            _pull_state.exit_code = exit_code
-            _pull_state.ok = exit_code == 0
-            _pull_state.log_tail = tail_lines
-            if exit_code != 0:
-                _pull_state.last_error = f"exit={exit_code}"
-        logger.info("Pull finished exit=%d", exit_code)
-
-        # Only email on a successful pull. A failed pull may leave the
-        # snapshot set half-updated; partial state isn't news.
-        if exit_code == 0:
-            after_records = _all_update_records()
-            new_records = [
-                r for r in after_records if r.get("id") not in before_ids
-            ]
-            if new_records:
-                logger.info("Emitting %d notification(s).", len(new_records))
-                steps.extend(_send_notifications_for_new(new_records))
-            else:
-                logger.info("No new diffs — no email sent.")
-        else:
-            # Capture the tail of raw stderr so the operator can see
-            # what the subprocess printed right before it died, even if
-            # no structured event covered it.
-            steps.append({
-                "ts": _now_iso(), "event": "subprocess_exit_nonzero",
-                "level": "error", "source": "server",
-                "exit_code": exit_code,
-                "stderr_tail": plain_stderr_tail[-10:],
-            })
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        duration = round(time.time() - start_wall, 2)
-        with _pull_lock:
-            _pull_state.running = False
-            _pull_state.finished_at = _now_iso()
-            _pull_state.exit_code = -1
-            _pull_state.ok = False
-            _pull_state.last_error = "timeout (10min)"
-        logger.error("Pull timed out after 10min.")
-        steps.append({
-            "ts": _now_iso(), "event": "subprocess_timeout",
-            "level": "error", "source": "server",
-            "timeout_seconds": 600,
-        })
-    except Exception as e:
-        crashed_error = str(e)
-        duration = round(time.time() - start_wall, 2)
         with _pull_lock:
             _pull_state.running = False
             _pull_state.finished_at = _now_iso()
             _pull_state.ok = False
             _pull_state.last_error = str(e)
-        logger.exception("Pull crashed.")
+        return {
+            "event": "pull",
+            "level": "error",
+            "source": "server",
+            "trigger": trigger,
+            "started_at": start_iso,
+            "finished_at": _pull_state.finished_at,
+            "duration_seconds": round(time.time() - start_wall, 2),
+            "exit_code": None,
+            "timed_out": False,
+            "attempts": 0,
+            "summary": {
+                "case_snapshots": 0, "location_snapshots": 0,
+                "case_fetch_failures": 0, "location_fetch_failures": 0,
+                "new_diffs_emailed": 0, "notify_failures": 0,
+                "session_expired_retries": 0, "attempts": 0,
+            },
+            "steps": list(thread_captured_steps),
+        }
+    attempt_num = 0
+
+    # Retry loop. Each iteration is one full subprocess run. We stop
+    # early on success, a timeout, a subprocess crash, or when retries
+    # are exhausted. Only auth failures (identified by the presence of
+    # the `cli_run_auth_failed` step) trigger a retry — a per-case API
+    # blip or a mail error is not retry-worthy at this layer.
+    while attempt_num < policy.total_attempts:
+        attempt_num += 1
+        attempt_started_wall = time.time()
+
+        if attempt_num > 1:
+            # Announce that we're about to retry BEFORE sleeping so the
+            # dashboard shows a live "retry pending" row rather than a
+            # dead-air gap.
+            sys_log(
+                "auth_retry_waiting",
+                source="server",
+                attempt_after=attempt_num - 1,
+                attempt_next=attempt_num,
+                wait_seconds=policy.retry_wait_seconds,
+            )
+            time.sleep(policy.retry_wait_seconds)
+            sys_log(
+                "auth_retry_starting",
+                source="server",
+                attempt=attempt_num,
+                total_attempts=policy.total_attempts,
+            )
+
+        attempt_steps: list[dict] = []
+        attempt_plain_tail: list[str] = []
+        attempt_exit: int | None = None
+        attempt_timed_out = False
+        attempt_crash: str | None = None
+
+        logger.info("Spawning pull (attempt %d/%d): %s",
+                    attempt_num, policy.total_attempts, " ".join(PULL_CMD))
+        # Propagate trace-on-success into the child so the auth module
+        # can decide whether to persist traces for successful logins.
+        # Read fresh from config each attempt so a live config edit
+        # takes effect on the next retry without a restart.
+        try:
+            trace_on_success = load_trace_successful_pulls()
+        except ConfigError:
+            trace_on_success = False
+        child_env = {
+            **os.environ,
+            _SYSLOG_JSONL_ENV: "1",
+            "USCIS_TRACE_ON_SUCCESS": "1" if trace_on_success else "0",
+            # Trigger label lands in the trace directory name so an
+            # operator can tell at a glance whether a saved trace came
+            # from a scheduled pull vs a manual click.
+            "USCIS_PULL_TRIGGER": trigger or "pull",
+        }
+        try:
+            proc = subprocess.run(
+                PULL_CMD,
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=child_env,
+            )
+            attempt_exit = proc.returncode
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
+            tail_lines = (stdout + "\n" + stderr).splitlines()[-80:]
+
+            attempt_steps, attempt_plain_tail = _collect_subprocess_steps(
+                stderr
+            )
+            per_attempt_stderr.append(attempt_plain_tail)
+            if attempt_exit != 0:
+                attempt_steps.append({
+                    "ts": _now_iso(), "event": "subprocess_exit_nonzero",
+                    "level": "error", "source": "server",
+                    "exit_code": attempt_exit,
+                    "stderr_tail": attempt_plain_tail[-10:],
+                    # Include every prior attempt's tail too so the
+                    # operator can compare "what attempt 1 printed vs
+                    # what attempt 2 printed" without hunting through
+                    # the stream.
+                    "all_attempts_stderr_tails": [
+                        t[-10:] for t in per_attempt_stderr
+                    ],
+                })
+        except subprocess.TimeoutExpired:
+            attempt_timed_out = True
+            attempt_exit = -1
+            attempt_steps.append({
+                "ts": _now_iso(), "event": "subprocess_timeout",
+                "level": "error", "source": "server",
+                "timeout_seconds": 600,
+            })
+        except Exception as e:
+            attempt_crash = str(e)
+            attempt_steps.append({
+                "ts": _now_iso(), "event": "subprocess_crashed",
+                "level": "error", "source": "server",
+                "error": str(e),
+            })
+
+        # Tag each step with its attempt number for dashboard grouping.
+        for s in attempt_steps:
+            s.setdefault("attempt", attempt_num)
+
+        steps.extend(attempt_steps)
+        exit_code = attempt_exit
+        timed_out = attempt_timed_out or timed_out
+        if attempt_crash is not None:
+            crashed_error = attempt_crash
+
+        logger.info("Pull attempt %d finished exit=%s",
+                    attempt_num, attempt_exit)
+
+        # Success: stop retrying, send notifications, break out.
+        if attempt_exit == 0:
+            break
+
+        # Classify the failure. Auth failures are retry-worthy; anything
+        # else (timeout, crash, non-auth subprocess failure) is not — we
+        # want to avoid hammering USCIS on a malformed config or a
+        # genuinely broken code path.
+        auth_failed = any(
+            s.get("event") == "cli_run_auth_failed" for s in attempt_steps
+        )
+        retryable = auth_failed and not attempt_timed_out and attempt_crash is None
+
+        if attempt_num >= policy.total_attempts or not retryable:
+            break
+
+    # Post-loop: update _pull_state once with the final attempt's result.
+    duration = round(time.time() - start_wall, 2)
+    with _pull_lock:
+        _pull_state.running = False
+        _pull_state.finished_at = _now_iso()
+        _pull_state.exit_code = exit_code
+        _pull_state.ok = exit_code == 0 and not timed_out and crashed_error is None
+        _pull_state.log_tail = []
+        if crashed_error is not None:
+            _pull_state.last_error = crashed_error
+        elif timed_out:
+            _pull_state.last_error = "timeout (10min)"
+        elif exit_code not in (0, None):
+            _pull_state.last_error = f"exit={exit_code}"
+        else:
+            _pull_state.last_error = None
+
+    # Only email on a successful pull. A failed pull may leave the
+    # snapshot set half-updated; partial state isn't news.
+    if exit_code == 0 and not timed_out and crashed_error is None:
+        after_records = _all_update_records()
+        new_records = [
+            r for r in after_records if r.get("id") not in before_ids
+        ]
+        if new_records:
+            logger.info("Emitting %d notification(s).", len(new_records))
+            steps.extend(_send_notifications_for_new(new_records))
+        else:
+            logger.info("No new diffs — no email sent.")
+
+    # Post-pull storage-quota check. Runs on every pull (success or
+    # failure) because the bulk of the growth is per-pull snapshots
+    # + per-failure traces, both of which need to be bounded.
+    try:
+        steps.extend(_check_storage_limit_and_alert())
+    except Exception as e:
+        logger.exception("storage-limit check crashed: %s", e)
         steps.append({
-            "ts": _now_iso(), "event": "subprocess_crashed",
-            "level": "error", "source": "server",
-            "error": str(e),
+            "ts": _now_iso(), "event": "storage_limit_check_crashed",
+            "level": "warning", "source": "server",
+            "error": f"{type(e).__name__}: {e}"[:200],
         })
 
     # Snapshot the thread-captured server-process events.
@@ -651,6 +1146,12 @@ def _run_pull_subprocess_inner(
         top_level = "error"
 
     summary = _pull_summary_from_steps(all_steps)
+    # Attempts is max(attempt) seen in steps; missing tag defaults to 1.
+    attempts_run = max(
+        (s.get("attempt", 1) for s in all_steps if isinstance(s.get("attempt", 1), int)),
+        default=attempt_num or 1,
+    )
+    summary["attempts"] = attempts_run
     return {
         "event": "pull",
         "level": top_level,
@@ -661,6 +1162,7 @@ def _run_pull_subprocess_inner(
         "duration_seconds": duration,
         "exit_code": exit_code,
         "timed_out": timed_out,
+        "attempts": attempts_run,
         "summary": summary,
         "steps": all_steps,
     }
@@ -1034,6 +1536,129 @@ DEFAULT_SYSLOG_PAGE_SIZE = 100
 MAX_SYSLOG_PAGE_SIZE = 500
 
 
+@app.route("/api/storage")
+def api_storage():
+    """Return a per-category breakdown of disk usage under data/ plus
+    the configured storage limit.
+
+    Response shape:
+      {
+        "total_bytes":      <int>,
+        "limit_bytes":      <int>,
+        "limit_exceeded":   <bool>,
+        "limit_ratio":      <float>,   # 0.0-1.0+ (can exceed 1 when over)
+        "categories": [
+          {"key": str, "label": str, "bytes": int, "file_count": int}
+        ]
+      }
+
+    Categories are disjoint and cover the full data/ tree plus the
+    config / session files. Used by both the topbar storage chart and
+    the post-pull limit check.
+    """
+    try:
+        limit_bytes = load_storage_limit_bytes()
+    except ConfigError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # Walk collects every bucket; total_bytes uses ALL of them so
+    # quota checks are accurate. Display categories filter out
+    # `other` (sub-kilobyte flotsam from the data dir walk — stale
+    # tmp files, .DS_Store, etc) since those add visual noise
+    # without conveying useful information.
+    categories_all = _collect_storage_categories()
+    total = sum(c["bytes"] for c in categories_all)
+    display = [c for c in categories_all if c["key"] != "other"]
+    limit_exceeded = total > limit_bytes
+    ratio = (total / limit_bytes) if limit_bytes > 0 else 0.0
+    return jsonify({
+        "total_bytes": total,
+        "limit_bytes": limit_bytes,
+        "limit_exceeded": limit_exceeded,
+        "limit_ratio": ratio,
+        "categories": display,
+    })
+
+
+_CASE_FILE_RE = re.compile(r"^(\d+)_(case|location)\.json$")
+
+
+def _collect_storage_categories() -> list[dict]:
+    """Walk the data directory + top-level state files, bucketing each
+    file into one of a small set of categories. Returns a list sorted
+    by bytes descending so the UI can display largest-first.
+
+    Case + location snapshots are grouped per form number into a
+    single bucket per case (e.g. `case_485` labelled "I-485") —
+    matching how an operator thinks about the data, not how it's
+    stored.
+    """
+    buckets: dict[str, dict] = {}
+
+    def _bump(key: str, label: str, size: int) -> None:
+        b = buckets.get(key)
+        if b is None:
+            b = buckets[key] = {
+                "key": key, "label": label, "bytes": 0, "file_count": 0,
+            }
+        b["bytes"] += size
+        b["file_count"] += 1
+
+    def _safe_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except OSError:
+            return 0
+
+    if DATA_DIR.exists():
+        for root, _dirs, files in os.walk(DATA_DIR):
+            root_p = Path(root)
+            rel = root_p.relative_to(DATA_DIR)
+            for name in files:
+                full = root_p / name
+                size = _safe_size(full)
+                top = rel.parts[0] if rel.parts else ""
+                # System-log bucket is the aggregate of every
+                # diagnostics artefact (the event log itself, full
+                # traces, storage-alert dedup state). Rationale:
+                # these are the things Clear log wipes; grouping
+                # them matches operator mental model.
+                if top == "full_traces":
+                    _bump("system_log", "System log", size)
+                    continue
+                if not rel.parts:
+                    if name == "system_log.json":
+                        _bump("system_log", "System log", size)
+                        continue
+                    if name == ".storage_alert_state.json":
+                        _bump("system_log", "System log", size)
+                        continue
+                    m = _CASE_FILE_RE.match(name)
+                    if m:
+                        num = m.group(1)
+                        _bump(f"case_{num}", f"I-{num}", size)
+                        continue
+                _bump("other", "Other", size)
+
+    # Session state + config files live at the repo root, not inside
+    # data/. They're tied to the server's operational life; bundle
+    # them into the system_log bucket so the storage breakdown only
+    # ever shows three conceptual groups: per-case data, system log,
+    # and other.
+    if STORAGE_SESSION_PATH.exists():
+        _bump("system_log", "System log",
+              _safe_size(STORAGE_SESSION_PATH))
+    if CONFIG_PATH.exists():
+        _bump("other", "Other", _safe_size(CONFIG_PATH))
+
+    # Return every non-empty bucket. Filtering for display (hiding
+    # the always-tiny `other` bucket) happens in the API handler —
+    # the storage-limit check still needs to see every byte.
+    categories = [b for b in buckets.values() if b["bytes"] > 0]
+    categories.sort(key=lambda c: c["bytes"], reverse=True)
+    return categories
+
+
 @app.route("/api/system-log")
 def api_system_log():
     """Return a paginated slice of the structured event log.
@@ -1094,46 +1719,418 @@ def api_system_log():
 
 @app.route("/api/system-log/export")
 def api_system_log_export():
-    """Return the system log as a downloadable JSON file.
+    """Return the system log + every persisted trace as a zip archive.
 
-    Separate from `/api/export` (the cases archive) because the system log
-    contains diagnostic details (email addresses, case labels, scheduler
-    fires) that the operator may want to keep local even when sharing a
-    case archive for external review.
+    Bundle contents:
+      - `system_log.json`        : the full event log (pretty-printed)
+      - `full_traces/<dir>/...`  : every saved pull trace, exactly as
+                                   laid out on disk (trace.zip +
+                                   mfa_trace/ per pull)
+
+    This is the "send me everything you have for debugging" download
+    — the companion to the Clear log button, which wipes the same
+    set. Separate from `/api/export` (case snapshots) because these
+    diagnostics contain email bodies, HTTP bodies, etc. that the
+    operator may want to hand-review before sharing.
     """
     entries = read_system_log()
-    body = json.dumps(entries, indent=2)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
-    filename = f"uscis-system-log-{stamp}.json"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 1. system log, pretty-printed at the root.
+        zf.writestr("system_log.json", json.dumps(entries, indent=2))
+
+        # 2. every persisted trace directory. Arcname is relative to
+        #    DATA_DIR so the zip's tree is `full_traces/<dir>/...` —
+        #    no leading `data/` prefix.
+        traces_dir = (DATA_DIR / "full_traces").resolve()
+        if traces_dir.exists():
+            data_root = DATA_DIR.resolve()
+            for entry in sorted(traces_dir.rglob("*")):
+                if not entry.is_file():
+                    continue
+                rel = entry.relative_to(data_root)
+                zf.write(entry, arcname=str(rel).replace("\\", "/"))
+
+    buf.seek(0)
+    filename = f"uscis-diagnostics-{stamp}.zip"
     return Response(
-        body,
-        mimetype="application/json",
+        buf.getvalue(),
+        mimetype="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
 @app.route("/api/system-log/clear", methods=["POST"])
 def api_system_log_clear():
-    """Wipe the system log. Two-step confirmation is enforced client-side.
+    """Wipe the system log AND every persisted trace.
 
-    Server-side we require the body to carry `{"confirm": true}` so a stray
-    curl / XSRF probe cannot clear the log by accident.
+    This is the "reset diagnostics" button. `data/full_traces/` is
+    wiped alongside `data/system_log.json` so a clear produces a
+    consistent blank slate — otherwise orphaned trace files would
+    linger without any event pointing at them, inflating storage
+    with unreferenced artefacts.
+
+    Two-step confirmation is enforced client-side. Server-side we
+    require `{"confirm": true}` so a stray curl / XSRF probe cannot
+    clear anything by accident.
     """
     body = request.get_json(silent=True) or {}
     if body.get("confirm") is not True:
         return jsonify({"ok": False, "error": "confirmation_required"}), 400
 
     prior = len(read_system_log())
+    errors: list[str] = []
+
     try:
         clear_system_log()
     except OSError as exc:  # pragma: no cover — filesystem should not fail
         return jsonify({"ok": False, "error": str(exc)}), 500
 
-    # Record the clear itself so there's always an audit breadcrumb of who
-    # wiped what and when. (This single entry is the only thing the fresh
-    # log contains after the POST returns.)
-    sys_log("system_log_cleared", source="server", prior_entry_count=prior)
-    return jsonify({"ok": True, "priorEntryCount": prior})
+    traces_removed = _wipe_tree_contents(DATA_DIR / "full_traces", errors)
+
+    sys_log(
+        "system_log_cleared", source="server",
+        prior_entry_count=prior,
+        traces_removed=traces_removed,
+        clear_errors=errors or None,
+    )
+    return jsonify({
+        "ok": True,
+        "priorEntryCount": prior,
+        "tracesRemoved": traces_removed,
+        "errors": errors,
+    })
+
+
+def _wipe_tree_contents(root: Path, errors: list[str]) -> int:
+    """Delete every file and subdirectory inside `root` (but keep
+    `root` itself). Returns the count of files removed.
+
+    Errors are collected into the shared `errors` list rather than
+    raised, so a permission glitch on one file doesn't abort the
+    rest of the wipe. The directory itself is preserved so the
+    next trace write doesn't race with mkdir on a lazy creator.
+    """
+    if not root.exists():
+        return 0
+    removed = 0
+    try:
+        for child in list(root.iterdir()):
+            try:
+                if child.is_dir():
+                    for sub in list(child.rglob("*")):
+                        if sub.is_file() or sub.is_symlink():
+                            try:
+                                sub.unlink()
+                                removed += 1
+                            except OSError as e:
+                                errors.append(f"unlink {sub}: {e}")
+                    # Remove directories bottom-up.
+                    for sub in sorted(
+                        child.rglob("*"),
+                        key=lambda p: len(p.parts), reverse=True,
+                    ):
+                        if sub.is_dir():
+                            try:
+                                sub.rmdir()
+                            except OSError as e:
+                                errors.append(f"rmdir {sub}: {e}")
+                    try:
+                        child.rmdir()
+                    except OSError as e:
+                        errors.append(f"rmdir {child}: {e}")
+                else:
+                    try:
+                        child.unlink()
+                        removed += 1
+                    except OSError as e:
+                        errors.append(f"unlink {child}: {e}")
+            except OSError as e:  # pragma: no cover
+                errors.append(f"walk {child}: {e}")
+    except OSError as e:  # pragma: no cover
+        errors.append(f"iter {root}: {e}")
+    return removed
+
+
+@app.route("/api/debug-mode", methods=["GET", "POST"])
+def api_debug_mode():
+    """Read / toggle `trace_successful_pulls` in config.json.
+
+    GET  → {"enabled": bool}
+    POST {"enabled": bool} → persists the change to config.json.
+    When enabled, the next pull writes the full trace (Playwright
+    trace.zip + MFA sidecar) even on success, so an operator can
+    verify the capture system against a healthy pull.
+
+    Writes are atomic: config.json is rewritten in full via a tmp
+    file + os.replace to avoid a half-written config during a crash.
+    """
+    if request.method == "GET":
+        try:
+            enabled = load_trace_successful_pulls()
+        except ConfigError as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"enabled": enabled})
+
+    body = request.get_json(silent=True) or {}
+    desired = body.get("enabled")
+    if not isinstance(desired, bool):
+        return jsonify({"ok": False, "error": "enabled_must_be_bool"}), 400
+
+    try:
+        cfg = load_config()
+    except Exception as e:  # pragma: no cover — defensive
+        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+
+    prior = cfg.get("trace_successful_pulls")
+    cfg["trace_successful_pulls"] = desired
+
+    try:
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:  # pragma: no cover — filesystem should not fail
+        return jsonify({"ok": False, "error": f"config_write_failed: {e}"}), 500
+
+    # The toggle is a lightweight UI action — no system-log entry.
+    # The next pull will carry `trace_successful_pulls` through its
+    # env already, so the effect is audible without a separate event.
+    _ = prior  # silence unused; kept to prove atomic read/write above.
+    return jsonify({"ok": True, "enabled": desired})
+
+
+@app.route("/api/full-trace/<dir_name>/<path:subpath>")
+def api_full_trace(dir_name: str, subpath: str):
+    """Serve a single file from `data/full_traces/<dir>/<subpath>`.
+
+    The subpath is allowed to contain one level of nesting so the
+    `mfa_trace/events.jsonl` and `mfa_trace/email_<uid>.eml` files
+    are reachable without a separate route. Path-traversal-safe:
+    every component is restricted to `[A-Za-z0-9._-]`, and the
+    resolved target must resolve inside the traces directory.
+
+    CORS allow-* is enabled so trace.playwright.dev can fetch
+    trace.zip cross-origin when the operator drops the URL into the
+    viewer. The only files served are sandboxed under full_traces/,
+    so this doesn't expand the app's attack surface.
+    """
+    if not _is_safe_name_part(dir_name):
+        return jsonify({"ok": False, "error": "invalid_dir"}), 400
+    parts = subpath.split("/")
+    if len(parts) > 2:
+        return jsonify({"ok": False, "error": "invalid_path_depth"}), 400
+    for part in parts:
+        if not _is_safe_name_part(part):
+            return jsonify({"ok": False, "error": "invalid_component"}), 400
+
+    base = (DATA_DIR / "full_traces").resolve()
+    try:
+        target = (base / dir_name / subpath).resolve()
+    except Exception:
+        return jsonify({"ok": False, "error": "resolve_failed"}), 400
+    if base not in target.parents and target != base:
+        return jsonify({"ok": False, "error": "path_escape"}), 400
+    if not target.is_file():
+        return jsonify({"ok": False, "error": "not_found"}), 404
+
+    leaf = target.name
+    if leaf == "trace.zip":
+        resp = Response(target.read_bytes(), mimetype="application/zip")
+    elif leaf.endswith(".jsonl"):
+        resp = Response(target.read_bytes(), mimetype="application/x-ndjson")
+    elif leaf.endswith(".eml"):
+        resp = Response(target.read_bytes(), mimetype="message/rfc822")
+    elif leaf.endswith(".json"):
+        resp = Response(target.read_bytes(), mimetype="application/json")
+    elif leaf.endswith(".png"):
+        resp = Response(target.read_bytes(), mimetype="image/png")
+    else:
+        resp = Response(target.read_bytes(),
+                        mimetype="application/octet-stream")
+    # trace.playwright.dev fetches the zip cross-origin; without CORS
+    # the fetch is blocked and the viewer shows an empty timeline.
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+# Allowed chars for trace-dir / file-name URL components. Anything
+# outside this set is rejected before the path is resolved.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _is_safe_name_part(name: str) -> bool:
+    return bool(name) and bool(_SAFE_NAME_RE.match(name)) and ".." not in name
+
+
+# Playwright ships its trace viewer as a static Vite bundle inside the
+# installed Python package. Serving it from our origin means the
+# viewer can fetch `trace.zip` without CORS/mixed-content issues, AND
+# we don't depend on trace.playwright.dev being reachable from the
+# VM's network (corporate firewall, air-gapped deploys, etc).
+_PW_VIEWER_DIR = (
+    Path(_pw_module.__file__).parent
+    / "driver" / "package" / "lib" / "vite" / "traceViewer"
+)
+
+
+@app.route("/trace-viewer/")
+@app.route("/trace-viewer/<path:filename>")
+def trace_viewer(filename: str = "index.html"):
+    """Serve the Playwright trace viewer (self-hosted).
+
+    The viewer reads its target trace from a `?trace=<url>` query
+    param. The frontend constructs that URL against our own
+    `/api/full-trace/<dir>/trace.zip` route so the fetch stays on
+    the same origin — no CORS, no mixed-content blocking, works
+    identically on localhost and HTTPS production.
+    """
+    # Guard: only allow files that actually exist in the viewer dir.
+    if ".." in filename:
+        return jsonify({"ok": False, "error": "invalid_path"}), 400
+    return send_from_directory(_PW_VIEWER_DIR, filename)
+
+
+@app.route("/api/mfa-trace/<dir_name>/summary")
+def api_mfa_trace_summary(dir_name: str):
+    """Summarise a trace's MFA artefacts for the pop-out viewer.
+
+    Returns:
+      {
+        "events":  [ {ts, event, cycle, ...extras}, ... ],
+        "emails":  [ {uid, subject, from, date, size, preview}, ... ],
+      }
+
+    Bodies of emails are NOT returned here — use
+    `/api/mfa-trace/<dir>/email/<uid>` to fetch a specific one on
+    demand. Keeps the summary cheap to paint even for busy pulls
+    with many cycles.
+    """
+    if not _is_safe_name_part(dir_name):
+        return jsonify({"ok": False, "error": "invalid_dir"}), 400
+    base = (DATA_DIR / "full_traces" / dir_name / "mfa_trace").resolve()
+    parent = (DATA_DIR / "full_traces" / dir_name).resolve()
+    if not parent.is_dir():
+        return jsonify({"ok": False, "error": "trace_not_found"}), 404
+    if not base.is_dir():
+        return jsonify({"events": [], "emails": []})
+
+    events: list[dict] = []
+    events_path = base / "events.jsonl"
+    if events_path.is_file():
+        try:
+            for line in events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except OSError as e:
+            return jsonify({"ok": False, "error": f"read: {e}"}), 500
+
+    emails: list[dict] = []
+    import email as _email_lib
+    for eml in sorted(base.glob("email_*.eml")):
+        uid = eml.stem[len("email_"):]
+        try:
+            raw = eml.read_bytes()
+            msg = _email_lib.message_from_bytes(raw)
+            body = _extract_plain_body(msg)
+            emails.append({
+                "uid": uid,
+                "subject": (msg["Subject"] or "")[:300],
+                "from": (msg["From"] or "")[:200],
+                "date": msg["Date"] or "",
+                "size": len(raw),
+                "preview": body[:280],
+            })
+        except Exception as e:  # pragma: no cover — best-effort
+            emails.append({
+                "uid": uid,
+                "subject": "", "from": "", "date": "",
+                "size": eml.stat().st_size,
+                "preview": f"<parse error: {type(e).__name__}>",
+            })
+
+    return jsonify({"events": events, "emails": emails})
+
+
+@app.route("/api/mfa-trace/<dir_name>/email/<uid>")
+def api_mfa_trace_email(dir_name: str, uid: str):
+    """Return headers + both renderings of one archived email.
+
+    Response shape:
+      {
+        "headers": {"subject", "from", "to", "date"},
+        "text":    <plain-text body, always present — may be empty>,
+        "html":    <HTML body if the message had a text/html part,
+                   else null>,
+      }
+    """
+    if not _is_safe_name_part(dir_name) or not _is_safe_name_part(uid):
+        return jsonify({"ok": False, "error": "invalid_path"}), 400
+    path = (DATA_DIR / "full_traces" / dir_name / "mfa_trace" / f"email_{uid}.eml")
+    if not path.is_file():
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    import email as _email_lib
+    try:
+        raw = path.read_bytes()
+        msg = _email_lib.message_from_bytes(raw)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"parse: {e}"}), 500
+    return jsonify({
+        "headers": {
+            "subject": msg["Subject"] or "",
+            "from": msg["From"] or "",
+            "to": msg["To"] or "",
+            "date": msg["Date"] or "",
+        },
+        "html": _extract_email_part(msg, "text/html"),
+        # Raw RFC822 source — the thing you'd grep to build a new
+        # regex against a redesigned template. Decoded best-effort;
+        # replacement characters for any undecodable bytes.
+        "raw": raw.decode("utf-8", errors="replace"),
+    })
+
+
+def _extract_plain_body(msg) -> str:
+    """Summary-friendly plain-text body. Used by the emails-list
+    `preview` field in /api/mfa-trace/<dir>/summary — prefers the
+    text/plain part, falls back to tag-stripped HTML, else empty."""
+    text = _extract_email_part(msg, "text/plain")
+    if text:
+        return text
+    html = _extract_email_part(msg, "text/html")
+    if html:
+        return re.sub(r"<[^>]+>", " ", html)
+    return ""
+
+
+def _extract_email_part(msg, want_ctype: str) -> str | None:
+    """Return the decoded body of the first part matching `want_ctype`
+    (e.g. "text/plain" or "text/html"), or None if not present."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() != want_ctype:
+                continue
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                return payload.decode(charset, errors="replace")
+            except Exception:
+                return payload.decode("utf-8", errors="replace")
+        return None
+    # Single-part — serve only if its content-type matches.
+    if msg.get_content_type() != want_ctype:
+        return None
+    payload = msg.get_payload(decode=True) or b""
+    charset = msg.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except Exception:
+        return payload.decode("utf-8", errors="replace")
 
 
 @app.route("/api/pull", methods=["POST"])

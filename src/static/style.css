@@ -477,13 +477,51 @@ main[hidden] { display: none; }
 .syslog-bad  { border-left: 3px solid var(--bad); background: var(--bad-tint-soft); }
 .syslog-warn { border-left: 3px solid var(--warn); background: var(--warn-tint); }
 .syslog-info { border-left: 3px solid var(--accent); }
-.syslog-head {
+/* Content band between the header grid and the kv strip.
+ * Houses the per-row summary ("343 entries cleared", or a pull's
+ * "manual · 29.16s · 3 case · …") and — for pull envelopes — the
+ * trace-open buttons. Keeps these out of the header grid so
+ * columns line up cleanly across rows. */
+.syslog-envelope-content {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  padding: 0 14px 10px;
+  /* Visual cue: slight left-inset matching the kv details strip. */
+}
+.syslog-envelope-content .syslog-summary {
+  /* Override the margin-left:auto from the old header styling —
+   * summary sits at the start of the content band now, not pushed
+   * to the right. */
+  margin-left: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.syslog-envelope-content .trace-open-group {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+/* Five-column grid so every row aligns regardless of pill length:
+ *   col 1 — disclosure triangle OR invisible spacer of same width
+ *   col 2 — pill (natural width, left-aligned inside a fixed cell)
+ *   col 3 — source badge (e.g. `server`, `session_fetch`, `auth`)
+ *   col 4 — event identifier (flex-grow so it consumes slack)
+ *   col 5 — timestamp, right-aligned
+ * Each syslog-head is its own grid; the column widths are fixed in
+ * CSS so every row lands on the same invisible rails.
+ */
+.syslog-head {
+  display: grid;
+  grid-template-columns: 16px 220px 110px 1fr auto;
+  align-items: center;
+  gap: 10px;
   font-size: 0.84rem;
 }
+.syslog-head > .kind-tag { justify-self: start; }
+.syslog-head > .syslog-source { justify-self: start; }
+.syslog-head > .syslog-event { justify-self: start; min-width: 0; }
+.syslog-head > .syslog-ts { justify-self: end; }
 .syslog-source {
   font-family: var(--font-mono);
   font-size: 0.72rem;
@@ -532,10 +570,8 @@ main[hidden] { display: none; }
 }
 
 .syslog-head-expandable {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
+  /* Layout comes from .syslog-head (display: grid).  This rule
+   * only adds the button-specific chrome on top. */
   width: 100%;
   padding: 10px 14px;
   border: 0;
@@ -571,6 +607,12 @@ main[hidden] { display: none; }
   margin-left: auto;
   color: var(--muted);
   font-size: 0.78rem;
+  /* Allow the summary to shrink so trace buttons on the right
+   * don't get pushed off the row when the pull has many steps. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .syslog-envelope-kv {
@@ -627,6 +669,9 @@ main[hidden] { display: none; }
   cursor: pointer;
   transition: background 0.12s;
   line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
 }
 .syslog-export-btn:hover { background: var(--bg-elev); }
 
@@ -690,6 +735,10 @@ main[hidden] { display: none; }
   font-size: 0.85rem;
   font-weight: 500;
   transition: background 0.12s;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
 }
 .clear-log-btn:hover { background: var(--bad-tint); }
 
@@ -748,6 +797,18 @@ main[hidden] { display: none; }
 .modal-body p { margin: 0 0 10px; }
 .modal-body p:last-child { margin-bottom: 0; }
 .modal-body strong { color: var(--bad); }
+.modal-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  font-size: 0.88rem;
+}
+.modal-list li { margin-bottom: 4px; }
+.modal-list code {
+  font-size: 0.82rem;
+  background: #f3f4f6;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
 .modal-hint {
   color: var(--muted);
   font-size: 0.82rem;
@@ -1281,6 +1342,50 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 }
 
 @media (max-width: 640px) {
+  /* ---------- system log mobile reflow ----------
+   * At phone width the header row can't fit the pill + source + ts
+   * + event + summary + two trace buttons. Allow wrap, and stack
+   * the trace buttons on their own line right-aligned. */
+  .syslog-head-row {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+  }
+  .syslog-head-row > .trace-open-group {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .syslog-summary {
+    /* Let summary wrap (not ellipsis-truncate) on mobile since
+     * there's plenty of vertical room. */
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .trace-open-btn { font-size: 0.7rem; padding: 4px 10px; }
+
+  /* ---------- storage bar mobile ----------
+   * Keep it visible but trim paddings. */
+  .storage-bar-wrap { padding: 4px 12px 6px; }
+
+  /* ---------- MFA modal mobile ----------
+   * Full-viewport to maximise readable area on phones. */
+  .mfa-modal-overlay { padding: 0; }
+  .mfa-modal {
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+  }
+  .mfa-modal-header { flex-wrap: wrap; }
+  .mfa-modal-header h3 { font-size: 0.88rem; }
+  .mfa-modal-tabs { margin-left: 0; }
+  .mfa-modal-close { margin-left: auto; }
+  .mfa-events-table { font-size: 0.72rem; }
+  .mfa-events-table th,
+  .mfa-events-table td { padding: 4px 6px; }
+  .mfa-events-table .mfa-details { word-break: break-all; }
+  .mfa-email-iframe { min-height: 340px; }
+
   /* Topbar already stacks at ≤900px; at phone we just tighten sizes. */
   .topbar { padding: 12px 16px; }
   .topbar-left h1 { font-size: 1.05rem; }
@@ -1406,5 +1511,509 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   .hero-metrics { grid-template-columns: 1fr; }
   .sub-facts { grid-template-columns: 1fr; }
   .case-meta .big { font-size: 0.8rem; }
+}
+
+/* ========== storage bar ==========
+ * Thin stacked bar under the topbar showing disk usage per category.
+ * Designed to be unobtrusive when usage is low and visibly urgent
+ * when it crosses the warn/critical thresholds. Poll cadence is 30s
+ * (see updateStorageBar() in app.js). */
+/* Storage section inside the System tab. Rendered as a card
+ * matching the rest of the page's section styling, above the
+ * system-log feed content. */
+.storage-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px 16px;
+  margin: 0 0 12px;
+  background: var(--bg-elev, #fff);
+  border: 1px solid var(--border-soft, #e5e7eb);
+  border-radius: var(--radius-sm, 8px);
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+}
+.storage-bar-wrap .storage-bar-title {
+  font-size: 0.95rem;
+}
+.storage-bar-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.storage-bar-title { font-weight: 600; color: var(--text, #111827); }
+.storage-bar-total { font-variant-numeric: tabular-nums; }
+.storage-bar-limit { color: var(--muted, #6b7280); }
+.storage-bar-track {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #eef0f3;
+  cursor: default;
+}
+.storage-bar-seg {
+  height: 100%;
+  transition: flex-grow 0.4s ease;
+  min-width: 2px;
+}
+.storage-bar-seg:hover { filter: brightness(1.1); }
+/* Per-category colours — consistent hue per key across renders. */
+/* Per-category colours. Per-case buckets (key="case_<num>") share
+ * a small palette that rotates by form number so each case keeps
+ * a stable colour across renders. */
+.storage-bar-seg[data-key="system_log"],
+.storage-bar-label-swatch[data-key="system_log"]      { background: #10b981; }
+.storage-bar-seg[data-key="full_traces"],
+.storage-bar-label-swatch[data-key="full_traces"]     { background: #f59e0b; }
+.storage-bar-seg[data-key="session_state"],
+.storage-bar-label-swatch[data-key="session_state"]   { background: #8b5cf6; }
+.storage-bar-seg[data-key="config"],
+.storage-bar-label-swatch[data-key="config"]          { background: #64748b; }
+.storage-bar-seg[data-key="other"],
+.storage-bar-label-swatch[data-key="other"]           { background: #94a3b8; }
+
+/* Per-case colour rotation. Key is `case_<num>`. We match by the
+ * last digit of the form number so I-485 / I-765 / I-131 each get
+ * distinct hues. More cases → palette repeats, which is fine. */
+.storage-bar-seg[data-key$="_485"],
+.storage-bar-label-swatch[data-key$="_485"]           { background: #3b82f6; }
+.storage-bar-seg[data-key$="_765"],
+.storage-bar-label-swatch[data-key$="_765"]           { background: #06b6d4; }
+.storage-bar-seg[data-key$="_131"],
+.storage-bar-label-swatch[data-key$="_131"]           { background: #ec4899; }
+/* Fallback for any other case number. */
+.storage-bar-seg[data-key^="case_"],
+.storage-bar-label-swatch[data-key^="case_"]          { background: #6366f1; }
+/* Re-assert the explicit ones above this fallback. */
+.storage-bar-seg[data-key="case_485"],
+.storage-bar-label-swatch[data-key="case_485"]        { background: #3b82f6; }
+.storage-bar-seg[data-key="case_765"],
+.storage-bar-label-swatch[data-key="case_765"]        { background: #06b6d4; }
+.storage-bar-seg[data-key="case_131"],
+.storage-bar-label-swatch[data-key="case_131"]        { background: #ec4899; }
+
+/* ------- legend beneath the stacked bar -------
+ * Wrapped row of colour-swatched labels. Ordered largest-first,
+ * matching segment order on the bar. Swatch colour === segment
+ * colour so readers can visually tie each entry back to its slice
+ * without needing alignment. */
+.storage-bar-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding-top: 6px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.storage-bar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.storage-bar-label-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.storage-bar-label-name {
+  color: var(--text, #111827);
+  font-weight: 600;
+}
+.storage-bar-label-pct {
+  color: var(--muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+/* Critical state — box-shadow ring around the whole bar when close to or over limit. */
+.storage-bar-track.warn     { box-shadow: inset 0 0 0 1px #f59e0b; }
+.storage-bar-track.critical { box-shadow: inset 0 0 0 1px #ef4444; }
+.storage-bar-total.warn     { color: #b45309; }
+.storage-bar-total.critical { color: #b91c1c; font-weight: 600; }
+.storage-bar-seg[title] { cursor: help; }
+
+/* Compact storage indicator inside the System log tab header so
+ * operators can decide "should I clear this?" without leaving the
+ * tab. */
+.syslog-storage-line {
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+  margin-left: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.syslog-storage-line.warn { color: #b45309; }
+.syslog-storage-line.critical { color: #b91c1c; font-weight: 600; }
+
+/* Linkified trace artefacts (screenshot paths, trace_dir, etc.) */
+.syslog-detail-link {
+  color: #2563eb;
+  text-decoration: underline;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+.syslog-detail-link:hover { color: #1d4ed8; }
+
+/* One-line event summary rendered inline next to the pill, used by
+ * events with a `summarize` hook in SYSTEMLOG_EVENT_INFO. */
+.syslog-summary {
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ========== debug-mode pill ==========
+ * Toggle next to the version chip. Visually loud when ON so the
+ * operator can't forget the disk cost of full-trace-on-success. */
+.debug-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #6b7280;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.debug-pill:hover { background: #f3f4f6; }
+.debug-pill:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+.debug-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d1d5db;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.debug-pill[aria-checked="true"] {
+  background: #fef2f2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+.debug-pill[aria-checked="true"] .debug-pill-dot {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+  animation: debug-pulse 1.4s ease-in-out infinite;
+}
+@keyframes debug-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2); }
+  50%      { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.0); }
+}
+
+/* ========== open-trace buttons ==========
+ * Right-edge cluster inside a pull envelope header when the pull
+ * persisted a trace. Primary button opens the full Playwright zip
+ * in trace.playwright.dev; secondary opens the MFA-events sidecar. */
+.trace-open-group {
+  display: inline-flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  align-self: center;
+}
+.trace-open-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+.trace-open-btn:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+.trace-open-btn-sub {
+  background: #f3f4f6;
+  color: #374151;
+  border-color: #d1d5db;
+  font-weight: 500;
+}
+.trace-open-btn-sub:hover {
+  background: #e5e7eb;
+  border-color: #9ca3af;
+}
+
+/* ========== MFA trace modal ==========
+ * Pop-out overlay with Events + Emails tabs. Opens from the "MFA
+ * events" button on any pull envelope that persisted a trace. */
+.mfa-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: rgba(10, 14, 25, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: mfa-fade-in 0.12s ease-out;
+}
+@keyframes mfa-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.mfa-modal {
+  background: #fff;
+  border-radius: 10px;
+  /* Scale with viewport — no hard pixel cap so 4K monitors get the
+   * full benefit while phones still collapse gracefully. The
+   * `vmin`-free approach keeps the modal tall on narrow-but-long
+   * windows like a split screen too. */
+  width: 96vw;
+  height: 92vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+.mfa-modal-overlay {
+  /* Reduce outer padding on mobile so we're not wasting 20px
+   * each side of a narrow viewport. */
+  padding: 4vh 2vw;
+}
+.mfa-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+.mfa-modal-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #111827;
+}
+.mfa-modal-header code {
+  font-size: 0.82rem;
+  color: #374151;
+  background: #e5e7eb;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.mfa-modal-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: 12px;
+}
+.mfa-tab {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #4b5563;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.mfa-tab.active {
+  background: #e0e7ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+.mfa-modal-close {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  font-size: 1.4rem;
+  color: #6b7280;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.mfa-modal-close:hover { background: #e5e7eb; }
+.mfa-modal-body {
+  overflow: auto;
+  padding: 14px 16px;
+  flex: 1 1 auto;
+}
+.mfa-modal-loading, .mfa-empty, .mfa-modal-error {
+  padding: 40px;
+  text-align: center;
+  color: #6b7280;
+}
+.mfa-modal-error { color: #b91c1c; }
+
+.mfa-events-sub, .mfa-emails-sub {
+  font-size: 0.78rem;
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+.mfa-events-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mfa-events-table th,
+.mfa-events-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+.mfa-events-table th {
+  font-weight: 600;
+  color: #6b7280;
+  background: #fafbfc;
+  position: sticky;
+  top: -14px;
+}
+.mfa-events-table .mfa-ts { color: #6b7280; white-space: nowrap; }
+.mfa-events-table .mfa-cycle {
+  text-align: right;
+  color: #9ca3af;
+  width: 2ch;
+}
+.mfa-events-table .mfa-event {
+  font-weight: 600;
+  color: #111827;
+  white-space: nowrap;
+}
+.mfa-events-table .mfa-details {
+  color: #374151;
+  word-break: break-word;
+}
+.mfa-events-table .mfa-kv {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 0.72rem;
+}
+.mfa-events-table .mfa-kv b { color: #6b7280; font-weight: 600; }
+.mfa-events-table tr.mfa-row-ok td.mfa-event { color: #065f46; }
+.mfa-events-table tr.mfa-row-error {
+  background: #fef2f2;
+}
+.mfa-events-table tr.mfa-row-error td.mfa-event { color: #b91c1c; }
+
+.mfa-emails-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mfa-email-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mfa-email-card summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  background: #fafbfc;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mfa-email-card summary::-webkit-details-marker { display: none; }
+.mfa-email-card[open] summary {
+  background: #eff6ff;
+  border-bottom: 1px solid #e5e7eb;
+}
+.mfa-email-subject {
+  font-weight: 600;
+  color: #111827;
+  font-size: 0.88rem;
+}
+.mfa-email-meta {
+  font-size: 0.7rem;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mfa-email-body-placeholder {
+  padding: 10px 8px;
+  color: #6b7280;
+  font-size: 0.82rem;
+}
+.mfa-email-headers {
+  background: #fafbfc;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #111827;
+  margin-bottom: 10px;
+}
+.mfa-email-headers b { color: #6b7280; font-weight: 600; }
+.mfa-email-raw {
+  margin: 0;
+  padding: 10px 14px;
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Match the rendered-iframe's vertical footprint so toggling
+     between Rendered and Raw source doesn't reflow the modal. */
+  height: 70vh;
+  overflow: auto;
+  color: #111827;
+}
+.mfa-email-no-html {
+  padding: 40px;
+  text-align: center;
+  color: #9ca3af;
+  font-style: italic;
+  background: #fafbfc;
+  border-radius: 4px;
+}
+.mfa-email-view-switch {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px 0;
+  background: #fff;
+}
+.mfa-email-view-btn {
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #4b5563;
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.mfa-email-view-btn.active {
+  background: #e0e7ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+.mfa-email-view-wrap {
+  background: #fff;
+  /* Zero lateral padding so the iframe + raw-source pre spread edge-
+     to-edge of the email card. We already have breathing room from
+     the modal body + email card paddings above this. */
+  padding: 0;
+}
+.mfa-email-view-pane { display: none; }
+.mfa-email-view-pane.active { display: block; }
+.mfa-email-iframe {
+  display: block;
+  width: 100%;
+  /* Use most of the pop-out's vertical space. The modal itself is
+     92vh tall; reserving ~23vh for the modal header + tabs + email
+     card header + view-switch row leaves ~69vh for the iframe.
+     Short emails show at the top of a roomy canvas; long emails get
+     their own internal scrollbar without crushing the modal chrome. */
+  height: 70vh;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #fff;
 }
 

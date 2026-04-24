@@ -4,6 +4,11 @@ config.json
 # Per-case snapshots contain PII (applicant names, letter IDs, etc.) —
 # keep local. This also covers data/system_log.json.
 data/*.json
+# Full per-pull traces (HTML + PNG per phase). Contains rendered
+# USCIS pages including applicant dashboard — treat as PII.
+data/full_traces/
+# Storage-alert dedup state file.
+data/.storage_alert_state.json
 __pycache__/
 *.pyc
 .DS_Store

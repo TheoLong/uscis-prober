@@ -5,14 +5,14 @@
     { "id": "IOE0000000003", "label": "I-131" }
   ],
   "auth": {
-    "_comment": "my.uscis.gov login + the inbox that receives verification codes (any major provider — host auto-detected from the email domain)",
-    "uscis_email": "you@example.com",
-    "uscis_password": "your-uscis-password",
-    "uscis_mfa_email": "you@example.com",
-    "uscis_mfa_app_password": "16-char-app-password",
-    "_comment_gate": "Optional: when set, dashboard requires this code. Empty/null disables.",
-    "optional_access_code": "",
-    "_comment_notify": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email.",
-    "notification_email": ""
-  }
+    "uscis_email": "USCIS account email",
+    "uscis_password": "USCIS account password",
+    "uscis_mfa_email": "USCIS MFA email",
+    "uscis_mfa_app_password": "USCIS MFA Email 16-char-app-password",
+    "optional_access_code": "Optional: dashboard access code if enabled. Leave empty/null to disable.",
+    "notification_email": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email."
+  },
+  "retry": 2,
+  "retry_wait_seconds": 180,
+  "storage_limit_gb": 1.0
 }

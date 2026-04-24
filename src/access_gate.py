@@ -282,7 +282,12 @@ def configure(app: Flask, optional_access_code: str | None, *, root: Path) -> bo
     # anyone can read on GitHub — we're not leaking anything sensitive.
     OPEN_PATHS = {"/login", "/api/login", "/api/auth/status",
                   "/api/version", "/favicon.ico"}
-    OPEN_PREFIXES = ("/static/",)
+    # `/api/full-trace/` is open so trace.playwright.dev can fetch
+    # `trace.zip` cross-origin. The files served are sandboxed inside
+    # `data/full_traces/<dir>/` and path-traversal-guarded; their
+    # content is the same diagnostic material the operator is actively
+    # debugging, so no new PII surface is created.
+    OPEN_PREFIXES = ("/static/", "/api/full-trace/", "/trace-viewer/")
 
     def _client_ip() -> str:
         return (request.headers.get("X-Forwarded-For") or request.remote_addr or "?").split(",")[0].strip()

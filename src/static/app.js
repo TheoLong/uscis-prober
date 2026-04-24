@@ -25,13 +25,72 @@ const state = {
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
   wireExportInfo();
+  wireDebugPill();
+  wireMfaModal();
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.addEventListener("click", () => setView(btn.dataset.view))
   );
   await refreshAll();
   setInterval(updateCountdown, 1000);
   setInterval(pollPullStatus, 3000);
+  // Storage bar runs two poll cadences. When the user is looking
+  // at the System tab we want near-live updates (a file being
+  // touched anywhere in data/ should reflect within a couple of
+  // seconds). On any other tab we fall back to a relaxed cadence
+  // so we're not hammering the walk for a bar that isn't visible.
+  updateStorageBar();
+  setInterval(() => {
+    const fast = state.view === "systemlog";
+    const now = Date.now();
+    const since = now - (state._lastStoragePoll || 0);
+    const interval = fast ? 3_000 : 30_000;
+    if (since >= interval) {
+      state._lastStoragePoll = now;
+      updateStorageBar();
+    }
+  }, 1_000);
 });
+
+
+async function wireDebugPill() {
+  const pill = document.getElementById("debug-mode-pill");
+  if (!pill) return;
+  // Sync initial state from the server so a config edit is reflected
+  // without a restart.
+  try {
+    const r = await fetch("/api/debug-mode");
+    if (r.ok) {
+      const { enabled } = await r.json();
+      pill.setAttribute("aria-checked", enabled ? "true" : "false");
+    }
+  } catch (_e) { /* pill stays off; server may be warming up */ }
+
+  pill.addEventListener("click", async () => {
+    const currently = pill.getAttribute("aria-checked") === "true";
+    const desired = !currently;
+    pill.disabled = true;
+    try {
+      const r = await fetch("/api/debug-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: desired }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const body = await r.json();
+      pill.setAttribute("aria-checked", body.enabled ? "true" : "false");
+      toast(
+        body.enabled
+          ? "Debug mode ON — next pull will write full traces"
+          : "Debug mode OFF — traces only on failure",
+        body.enabled ? "warn" : "",
+      );
+    } catch (e) {
+      toast(`Debug toggle failed: ${e.message}`, "error");
+    } finally {
+      pill.disabled = false;
+    }
+  });
+}
 
 function wireExportInfo() {
   const btn = document.getElementById("export-info-btn");
@@ -65,7 +124,13 @@ function setView(view) {
   document.getElementById("updates-feed").hidden = view !== "updates";
   document.getElementById("systemlog-feed").hidden = view !== "systemlog";
   if (view === "updates") renderUpdates();
-  if (view === "systemlog") loadAndRenderSystemLog();
+  if (view === "systemlog") {
+    loadAndRenderSystemLog();
+    // Force-refresh the storage bar the moment the tab opens so
+    // stats are current, not up-to-30s stale from the slow-poll.
+    updateStorageBar();
+    state._lastStoragePoll = Date.now();
+  }
 }
 
 // ---------- data loading ----------
@@ -224,11 +289,17 @@ async function pollPullStatus() {
       } else {
         toast("Pull complete — data refreshed", "ok");
       }
-      // Reload cases/updates AND the system log — the pull lifecycle
-      // emits `pull_triggered_manually` / `pull_started` / `pull_finished`
-      // etc. that the System-log view should surface without needing a
-      // tab-switch.
-      await Promise.all([loadCases(), loadUpdates(), loadSystemLog()]);
+      // Reload everything the pull might have touched. Every
+      // completed pull writes (at minimum) case + location
+      // snapshots, a pull-envelope entry, and potentially a trace
+      // dir — ALL of which move the storage bar. Kick the bar
+      // refresh here instead of waiting for the 30s poll.
+      await Promise.all([
+        loadCases(),
+        loadUpdates(),
+        loadSystemLog(),
+        updateStorageBar(),
+      ]);
       if (state.view === "systemlog") renderSystemLog();
     }
   } catch (e) {
@@ -731,7 +802,14 @@ const SYSTEMLOG_EVENT_INFO = {
   server_startup:              { tone: "info",  label: "Server started" },
   scheduler_configured:        { tone: "info",  label: "Scheduler configured" },
   pull_skipped_already_running:{ tone: "warn",  label: "Pull skipped (already running)" },
-  system_log_cleared:          { tone: "info",  label: "System log cleared" },
+  system_log_cleared:          { tone: "info",  label: "System log cleared",
+    summarize: e => {
+      const n = Number(e.prior_entry_count);
+      if (!Number.isFinite(n)) return null;
+      return n === 0
+        ? "log was already empty"
+        : `${n} ${n === 1 ? "entry" : "entries"} cleared`;
+    } },
 
   // Subprocess lifecycle wrapping the pull
   subprocess_exit_nonzero:     { tone: "bad",   label: "Subprocess exit non-zero" },
@@ -769,6 +847,58 @@ const SYSTEMLOG_EVENT_INFO = {
   // Generic, used by both case + location paths via _append_to_log_file
   snapshot_log_not_array:      { tone: "warn",  label: "Snapshot log wasn't an array" },
   snapshot_log_invalid_json:   { tone: "warn",  label: "Snapshot log was malformed JSON" },
+
+  // Comprehensive auth-phase events (added 2026-04-24)
+  auth_ensure_started:         { tone: "info",  label: "Auth — ensure started" },
+  auth_ensure_result:          { tone: "info",  label: "Auth — ensure result" },
+  auth_goto_login_result:      { tone: "info",  label: "Auth — navigated to login" },
+  auth_email_form_result:      { tone: "info",  label: "Auth — email form ready" },
+  auth_credentials_filled:     { tone: "info",  label: "Auth — credentials filled" },
+  auth_submit_result:          { tone: "info",  label: "Auth — submit result" },
+  auth_http_response:          { tone: "info",  label: "Auth — HTTP response" },
+  auth_landing_result:         { tone: "info",  label: "Auth — landing result" },
+  auth_bridge_result:          { tone: "info",  label: "Auth — bridge nav result" },
+  trace_saved:                 { tone: "info",  label: "Trace saved",
+    summarize: e => {
+      const bits = [];
+      if (e.dir) bits.push(e.dir);
+      if (e.has_mfa_trace) {
+        const events = Number(e.mfa_event_count) || 0;
+        const emails = Number(e.mfa_email_count) || 0;
+        bits.push(`MFA: ${events} event${events === 1 ? "" : "s"}, ${emails} email${emails === 1 ? "" : "s"}`);
+      }
+      return bits.length ? bits.join(" · ") : null;
+    } },
+  tracing_start_failed:        { tone: "warn",  label: "Tracing — start failed" },
+  tracing_stop_failed:         { tone: "warn",  label: "Tracing — stop failed" },
+  auth_retry_waiting:          { tone: "warn",  label: "Auth — waiting before retry" },
+  auth_retry_starting:         { tone: "warn",  label: "Auth — starting retry attempt" },
+  auth_mfa_submit_did_not_advance: { tone: "bad", label: "MFA submit did not advance" },
+  login_storage_cleared:       { tone: "info",  label: "Login — session state wiped" },
+  login_started:               { tone: "info",  label: "Login — started" },
+  login_mfa_result:            { tone: "info",  label: "Login — MFA result" },
+  login_result:                { tone: "info",  label: "Login — final result" },
+  login_bridge_warning:        { tone: "warn",  label: "Login — bridge warning" },
+  login_landing_timeout:       { tone: "warn",  label: "Login — landing timeout" },
+  probe_session_result:        { tone: "info",  label: "Probe — session result" },
+  mfa_fetch_started:           { tone: "info",  label: "MFA — fetch started" },
+  mfa_fetch_succeeded:         { tone: "ok",    label: "MFA — code received" },
+  mfa_fetch_timeout:           { tone: "bad",   label: "MFA — fetch timeout" },
+  mfa_fetch_cycle_error:       { tone: "warn",  label: "MFA — IMAP cycle error" },
+
+  // Widened case-fetch net
+  case_fetch_unexpected_error: { tone: "bad",   label: "Case fetch — unexpected error" },
+
+  // Storage quota / alerting (added 2026-04-24)
+  storage_limit_exceeded:      { tone: "bad",   label: "Storage limit exceeded" },
+  storage_alert_rearmed:       { tone: "info",  label: "Storage alert re-armed" },
+  storage_alert_email_sent:    { tone: "info",  label: "Storage alert email sent" },
+  storage_alert_email_failed:  { tone: "warn",  label: "Storage alert email failed" },
+  storage_limit_check_skipped: { tone: "warn",  label: "Storage limit check skipped" },
+  storage_limit_check_crashed: { tone: "warn",  label: "Storage limit check crashed" },
+
+  // Config + debug mode
+  pull_config_error:           { tone: "bad",   label: "Pull config error" },
 };
 
 function _eventInfo(entry) {
@@ -788,7 +918,12 @@ function _eventInfo(entry) {
 }
 
 function renderSystemLog() {
-  const root = document.getElementById("systemlog-feed");
+  // The feed's parent contains TWO sections: the storage bar
+  // (static HTML in the template) and this dynamically-rendered
+  // log content. We only wipe / refill the log content — leaving
+  // the bar untouched so it isn't re-painted on every page flip.
+  const root = document.getElementById("systemlog-content");
+  if (!root) return;
   root.innerHTML = "";
 
   if (!state.systemLogTotal) {
@@ -821,7 +956,11 @@ function renderSystemLog() {
   head.className = "updates-head syslog-head-row";
   head.innerHTML =
     `<div>` +
-      `<h2>System log</h2>` +
+      `<h2>System log` +
+        // Size indicator lives inside the header so the operator sees
+        // "should I clear this?" right next to the Clear log button.
+        `<span class="syslog-storage-line" id="syslog-storage-line"></span>` +
+      `</h2>` +
       `<div class="updates-sub">` +
         `${escapeHtml(countLine)} · ` +
         `Persisted to <code>data/system_log.json</code>. Newest first.` +
@@ -829,6 +968,14 @@ function renderSystemLog() {
     `</div>`;
   head.appendChild(renderSystemLogControls());
   root.appendChild(head);
+  // Paint the size line with whatever the latest /api/storage poll
+  // returned. If no poll has landed yet, a lightweight fire-and-forget
+  // fetch triggers one.
+  if (LAST_STORAGE_DATA) {
+    renderSyslogStorageLine(LAST_STORAGE_DATA);
+  } else {
+    updateStorageBar();
+  }
 
   // Pagination — rendered BOTH above and below the list so operators
   // don't have to scroll 100 rows to flip pages.
@@ -967,17 +1114,21 @@ function openClearLogDialog() {
     `<div class="modal-card modal-card-danger">` +
       `<h3 id="clear-log-title" class="modal-title">Clear system log?</h3>` +
       `<div class="modal-body">` +
-        `<p><strong>This is irreversible.</strong> The log is the only ` +
-        `record of scheduler fires, pull failures, and notification ` +
-        `history. Clearing it will destroy the audit trail used to ` +
-        `debug silent failures — missed pulls, MFA errors, email ` +
-        `delivery issues.</p>` +
+        `<p><strong>This is irreversible.</strong> Clearing wipes:</p>` +
+        `<ul class="modal-list">` +
+          `<li>Every entry in <code>data/system_log.json</code></li>` +
+          `<li>Every full-pull trace under <code>data/full_traces/</code> ` +
+              `(HTML + PNG per phase)</li>` +
+        `</ul>` +
+        `<p>The log is the only record of scheduler fires, pull failures, ` +
+        `and notification history. Traces are the only forensic evidence ` +
+        `of what USCIS actually showed at each login phase.</p>` +
         `<p class="modal-hint">If you might need the log later, click ` +
         `<em>Export log</em> first.</p>` +
       `</div>` +
       `<div class="modal-actions">` +
         `<button type="button" class="modal-btn modal-btn-cancel">Cancel</button>` +
-        `<button type="button" class="modal-btn modal-btn-danger">Yes, delete all events</button>` +
+        `<button type="button" class="modal-btn modal-btn-danger">Yes, delete everything</button>` +
       `</div>` +
     `</div>`;
 
@@ -1005,8 +1156,23 @@ function openClearLogDialog() {
         body: JSON.stringify({ confirm: true }),
       });
       if (!res.ok) throw new Error(`status ${res.status}`);
+      // Combined toast: "Cleared N entries + M trace files."
+      const body = await res.json().catch(() => ({}));
+      const n = Number(body.priorEntryCount) || 0;
+      const traces = Number(body.tracesRemoved) || 0;
+      const parts = [];
+      if (n > 0) parts.push(`${n} ${n === 1 ? "entry" : "entries"}`);
+      if (traces > 0) parts.push(`${traces} trace file${traces === 1 ? "" : "s"}`);
+      const msg = parts.length
+        ? `Cleared ${parts.join(" + ")}.`
+        : "Log was already empty — nothing to clear.";
+      toast(msg);
       await loadSystemLog();
       renderSystemLog();
+      // Clear also wiped the full_traces directory on disk, which
+      // the storage bar tracks. Kick an immediate re-fetch so the
+      // bar shrinks right away instead of waiting for the 30s poll.
+      updateStorageBar();
       close();
     } catch (e) {
       console.warn("clear log failed:", e);
@@ -1061,17 +1227,32 @@ function _renderFlatSystemLogRow(entry) {
       `</div>`;
   }
 
-  // `.syslog-disclosure-spacer` is an invisible placeholder that reserves
-  // the same width as the real disclosure triangle on nested entries, so
-  // the pill column lines up flat-vs-nested without needing grid layout.
+  // Optional one-line summary next to the label. Used e.g. for
+  // system_log_cleared to show "5 entries cleared" inline.
+  const summary = typeof info.summarize === "function"
+    ? info.summarize(entry)
+    : null;
+  const summaryHtml = summary
+    ? `<span class="syslog-summary">${escapeHtml(summary)}</span>`
+    : "";
+
+  // Header is a 5-column grid so every row aligns:
+  //   [disc-spacer] [pill] [source] [event] [ts-right]
+  // Summary (when present — e.g. "343 entries cleared" on
+  // system_log_cleared) lives in a content band BELOW the header so
+  // it can't disturb column alignment.
+  const contentHtml = summaryHtml
+    ? `<div class="syslog-envelope-content">${summaryHtml}</div>`
+    : "";
   block.innerHTML =
     `<div class="syslog-head">` +
       `<span class="syslog-disclosure-spacer" aria-hidden="true"></span>` +
       `<span class="kind-tag kind-${info.tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
-      `<span class="syslog-ts">${escapeHtml(when)}</span>` +
       `<span class="syslog-event">${escapeHtml(entry.event)}</span>` +
+      `<span class="syslog-ts">${escapeHtml(when)}</span>` +
     `</div>` +
+    contentHtml +
     detailsHtml;
 
   return block;
@@ -1150,9 +1331,27 @@ function _renderNestedSystemLogRow(entry) {
       `</div>`
     : "";
 
-  // Disclosure: toggled by clicking the header. Default collapsed — a
-  // pull with 17 steps would otherwise swamp the feed when paged through.
+  // Detect a persisted trace via the `trace_saved` step the
+  // subprocess emits after writing trace.zip + mfa_trace/.
+  const traceSaved = entry.steps.find(
+    s => s && s.event === "trace_saved"
+  );
+  const hasTrace = Boolean(traceSaved && traceSaved.dir);
+
   const disclosureId = `syslog-steps-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Summary + trace buttons are moved OUT of the header and into a
+  // content band between the header and the kv strip. Keeps the
+  // header row a uniform 5-column grid (pill | source | event | ts)
+  // so every envelope aligns identically regardless of how much
+  // per-attempt summary text there is.
+  const traceButtonsHtml = hasTrace ? _renderTraceButtons(traceSaved) : "";
+  const contentHtml = (summaryLine || traceButtonsHtml)
+    ? `<div class="syslog-envelope-content">` +
+        (summaryLine || "") +
+        traceButtonsHtml +
+      `</div>`
+    : "";
 
   block.innerHTML =
     `<button type="button" class="syslog-head syslog-head-expandable"` +
@@ -1160,10 +1359,10 @@ function _renderNestedSystemLogRow(entry) {
       `<span class="syslog-disclosure" aria-hidden="true">▶</span>` +
       `<span class="kind-tag kind-${tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
-      `<span class="syslog-ts">${escapeHtml(when)}</span>` +
       `<span class="syslog-event syslog-event-envelope">${escapeHtml(entry.event)}</span>` +
-      summaryLine +
+      `<span class="syslog-ts">${escapeHtml(when)}</span>` +
     `</button>` +
+    contentHtml +
     envelopeKvHtml +
     `<div class="syslog-steps" id="${disclosureId}" hidden></div>`;
 
@@ -1218,7 +1417,23 @@ function _renderNestedStepRow(step) {
 }
 
 // Single renderer for a kv pair — used by both flat rows and nested steps.
+// When the key points to a persisted trace artefact (html_file, png_file,
+// screenshot, trace_dir), render as a clickable link that opens the file
+// via /api/full-trace/.
 function _detailKvHtml(k, v) {
+  const link = _traceLinkHref(k, v);
+  if (link) {
+    return (
+      `<div class="syslog-detail">` +
+        `<span class="syslog-detail-k">${escapeHtml(k)}</span>` +
+        `<a class="syslog-detail-link" href="${escapeHtml(link.href)}" ` +
+           `target="_blank" rel="noopener noreferrer" ` +
+           `title="Open ${escapeHtml(link.kind)} in new tab">` +
+          `${escapeHtml(link.label)}` +
+        `</a>` +
+      `</div>`
+    );
+  }
   const shown = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
   return (
     `<div class="syslog-detail">` +
@@ -1226,6 +1441,347 @@ function _detailKvHtml(k, v) {
       `<span class="syslog-detail-v">${escapeHtml(shown)}</span>` +
     `</div>`
   );
+}
+
+// Build the inline trace gallery for a pull envelope. Reads the
+// `auth_trace_saved` steps to discover the phase list + their file
+// names, then renders one card per phase with a clickable PNG
+// thumbnail and HTML link. Returns null when the pull produced no
+// trace (routine successful pull in non-debug mode).
+// Build the open-trace button cluster rendered at the right edge of a
+// pull envelope header when the pull persisted a trace. Primary
+// button opens the self-hosted Playwright viewer (served from our
+// origin so it auto-loads without a file-select prompt); secondary
+// button opens an in-page modal with the MFA events + raw emails.
+function _renderTraceButtons(step) {
+  const dir = step.dir;
+  if (!dir) return "";
+  // Self-hosted viewer. Same-origin means no CORS/mixed-content
+  // issues and the viewer auto-fetches the trace zip immediately.
+  const traceUrl =
+    `/api/full-trace/${encodeURIComponent(dir)}/trace.zip`;
+  const viewerUrl =
+    `/trace-viewer/index.html?trace=${encodeURIComponent(traceUrl)}`;
+  const buttons = [
+    `<a class="trace-open-btn" href="${escapeHtml(viewerUrl)}" ` +
+        `target="_blank" rel="noopener noreferrer" ` +
+        `title="Open full Playwright trace viewer (auto-loads the zip)">` +
+      `Open trace` +
+    `</a>`,
+  ];
+  if (step.has_mfa_trace) {
+    buttons.push(
+      `<button type="button" class="trace-open-btn trace-open-btn-sub" ` +
+          `data-mfa-dir="${escapeHtml(dir)}" ` +
+          `title="Show MFA wire-level events + archived emails">` +
+        `MFA events` +
+      `</button>`,
+    );
+  }
+  return `<span class="trace-open-group">${buttons.join("")}</span>`;
+}
+
+// Delegate click-handler for the "MFA events" buttons — opens the
+// modal. Wired once at boot; new buttons added to the DOM on every
+// re-render are picked up automatically.
+function wireMfaModal() {
+  document.addEventListener("click", e => {
+    const btn = e.target.closest("[data-mfa-dir]");
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMfaModal(btn.getAttribute("data-mfa-dir"));
+  });
+}
+
+async function openMfaModal(dir) {
+  closeMfaModal();
+  const overlay = document.createElement("div");
+  overlay.className = "mfa-modal-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "MFA events");
+  overlay.innerHTML =
+    `<div class="mfa-modal">` +
+      `<header class="mfa-modal-header">` +
+        `<h3>MFA trace — <code>${escapeHtml(dir)}</code></h3>` +
+        `<div class="mfa-modal-tabs" role="tablist">` +
+          `<button type="button" class="mfa-tab active" ` +
+              `data-tab="events" role="tab">Events</button>` +
+          `<button type="button" class="mfa-tab" ` +
+              `data-tab="emails" role="tab">Emails</button>` +
+        `</div>` +
+        `<button type="button" class="mfa-modal-close" ` +
+            `aria-label="Close">×</button>` +
+      `</header>` +
+      `<div class="mfa-modal-body">` +
+        `<div class="mfa-modal-loading">Loading…</div>` +
+      `</div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener("click", e => {
+    if (e.target === overlay) closeMfaModal();
+  });
+  overlay.querySelector(".mfa-modal-close")
+    .addEventListener("click", closeMfaModal);
+  const escHandler = (e) => { if (e.key === "Escape") closeMfaModal(); };
+  document.addEventListener("keydown", escHandler);
+  overlay._escHandler = escHandler;
+
+  let data;
+  try {
+    const r = await fetch(
+      `/api/mfa-trace/${encodeURIComponent(dir)}/summary`,
+    );
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    const body = overlay.querySelector(".mfa-modal-body");
+    body.innerHTML =
+      `<div class="mfa-modal-error">Failed to load: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  const tabs = overlay.querySelectorAll(".mfa-tab");
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      tabs.forEach(t => t.classList.toggle(
+        "active", t === tab,
+      ));
+      _renderMfaTab(overlay, dir, tab.dataset.tab, data);
+    });
+  });
+  _renderMfaTab(overlay, dir, "events", data);
+}
+
+function closeMfaModal() {
+  const existing = document.querySelector(".mfa-modal-overlay");
+  if (!existing) return;
+  const h = existing._escHandler;
+  existing.remove();
+  if (h) document.removeEventListener("keydown", h);
+}
+
+function _renderMfaTab(overlay, dir, which, data) {
+  const body = overlay.querySelector(".mfa-modal-body");
+  body.innerHTML = "";
+  if (which === "events") {
+    body.appendChild(_renderMfaEventsTable(data.events || []));
+  } else {
+    body.appendChild(_renderMfaEmailsList(dir, data.emails || []));
+  }
+}
+
+function _renderMfaEventsTable(events) {
+  const wrap = document.createElement("div");
+  wrap.className = "mfa-events-wrap";
+  if (!events.length) {
+    wrap.innerHTML = `<div class="mfa-empty">No events captured.</div>`;
+    return wrap;
+  }
+  wrap.innerHTML =
+    `<div class="mfa-events-sub">${events.length} event${events.length === 1 ? "" : "s"}` +
+    ` across ${(new Set(events.map(e => e.cycle))).size} cycle${(new Set(events.map(e => e.cycle))).size === 1 ? "" : "s"}</div>` +
+    `<table class="mfa-events-table">` +
+      `<thead><tr>` +
+        `<th>ts</th><th>cycle</th><th>event</th><th>details</th>` +
+      `</tr></thead>` +
+      `<tbody>` +
+        events.map(e => {
+          const skel = new Set(["ts", "cycle", "event"]);
+          const details = Object.entries(e)
+            .filter(([k]) => !skel.has(k))
+            .map(([k, v]) => `<span class="mfa-kv"><b>${escapeHtml(k)}</b>` +
+              `=<span>${escapeHtml(_shortJson(v))}</span></span>`)
+            .join(" ");
+          const toneClass = _mfaEventToneClass(e.event || "");
+          return (
+            `<tr class="${toneClass}">` +
+              `<td class="mfa-ts">${escapeHtml((e.ts || "").slice(11, 23))}</td>` +
+              `<td class="mfa-cycle">${escapeHtml(String(e.cycle ?? ""))}</td>` +
+              `<td class="mfa-event">${escapeHtml(e.event || "?")}</td>` +
+              `<td class="mfa-details">${details || ""}</td>` +
+            `</tr>`
+          );
+        }).join("") +
+      `</tbody>` +
+    `</table>`;
+  return wrap;
+}
+
+function _mfaEventToneClass(evName) {
+  if (!evName) return "";
+  if (evName.endsWith("_failed") || evName.includes("error")) return "mfa-row-error";
+  if (evName === "code_accepted" || evName.endsWith("_ok")) return "mfa-row-ok";
+  return "";
+}
+
+function _shortJson(v) {
+  if (v == null) return "";
+  if (typeof v === "object") {
+    const j = JSON.stringify(v);
+    return j.length > 120 ? j.slice(0, 117) + "…" : j;
+  }
+  const s = String(v);
+  return s.length > 180 ? s.slice(0, 177) + "…" : s;
+}
+
+function _renderMfaEmailsList(dir, emails) {
+  const wrap = document.createElement("div");
+  wrap.className = "mfa-emails-wrap";
+  if (!emails.length) {
+    wrap.innerHTML = `<div class="mfa-empty">No emails archived.</div>`;
+    return wrap;
+  }
+  wrap.innerHTML =
+    `<div class="mfa-emails-sub">${emails.length} email${emails.length === 1 ? "" : "s"} archived</div>`;
+  const list = document.createElement("div");
+  list.className = "mfa-emails-list";
+  for (const em of emails) {
+    const card = document.createElement("details");
+    card.className = "mfa-email-card";
+    card.innerHTML =
+      `<summary>` +
+        `<span class="mfa-email-subject">${escapeHtml(em.subject || "(no subject)")}</span>` +
+        `<span class="mfa-email-meta">` +
+          `from ${escapeHtml(em.from || "?")} · ` +
+          `${escapeHtml(em.date || "?")} · ` +
+          `uid ${escapeHtml(em.uid)} · ` +
+          `${formatBytes(em.size || 0)}` +
+        `</span>` +
+      `</summary>` +
+      `<div class="mfa-email-body-placeholder">Click to load body…</div>`;
+    // Lazy-load the body the first time the card is opened.
+    card.addEventListener("toggle", async () => {
+      if (!card.open) return;
+      const placeholder = card.querySelector(".mfa-email-body-placeholder");
+      if (!placeholder || placeholder.dataset.loaded === "1") return;
+      placeholder.dataset.loaded = "1";
+      placeholder.textContent = "Loading…";
+      try {
+        const r = await fetch(
+          `/api/mfa-trace/${encodeURIComponent(dir)}` +
+          `/email/${encodeURIComponent(em.uid)}`,
+        );
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const body = await r.json();
+        placeholder.innerHTML = _renderEmailBody(body);
+        _wireEmailBody(placeholder);
+      } catch (e) {
+        placeholder.textContent = `Load failed: ${e.message}`;
+      }
+    });
+    list.appendChild(card);
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
+
+// Render the body of one archived MFA email: headers strip + a
+// sandboxed iframe showing the HTML part (so styles render as a
+// mail client would), plus a toggle to view the raw RFC822 source
+// for regex-anchor debugging.
+function _renderEmailBody(body) {
+  const headers = body.headers || {};
+  const html = body.html || null;
+  const raw = body.raw || "";
+
+  // USCIS's MFA email is a 600px-fixed-width table centered in the
+  // body — that's fine in a mail client, but in our full-width modal
+  // it leaves the pop-out feeling cramped. Prepend an override style
+  // that strips the hard width caps so the rendered content fills
+  // whatever horizontal space our iframe has available. We keep the
+  // override behind a high-specificity `html body` selector and use
+  // !important so the inline USCIS <table width="600"> still yields.
+  //
+  // Sanitization is enforced via the iframe's sandbox="" attribute:
+  // null origin, no scripts, no forms, no top-level navigation. The
+  // iframe can't reach the dashboard's cookies or DOM.
+  const overrideStyle =
+    `<style>` +
+      `html,body{margin:0!important;padding:12px 16px!important;` +
+      `width:100%!important;max-width:100%!important;` +
+      `box-sizing:border-box!important;font-family:system-ui,-apple-system,` +
+      `"Segoe UI",sans-serif;}` +
+      `body *{max-width:100%!important;}` +
+      `table{width:100%!important;max-width:100%!important;}` +
+      `table[width]{width:100%!important;}` +
+      `img{max-width:100%!important;height:auto!important;}` +
+    `</style>`;
+  const wrappedHtml = overrideStyle + (html || "");
+  const encoded = wrappedHtml
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;");
+  const iframeHtml = html
+    ? `<iframe class="mfa-email-iframe" sandbox="" srcdoc="${encoded}" ` +
+        `title="Rendered email body"></iframe>`
+    : `<div class="mfa-email-no-html">No HTML part in this email.</div>`;
+  const rawHtml =
+    `<pre class="mfa-email-raw">${escapeHtml(raw || "(empty)")}</pre>`;
+
+  return (
+    `<div class="mfa-email-headers">` +
+      Object.entries(headers).map(
+        ([k, v]) => `<div><b>${escapeHtml(k)}:</b> ${escapeHtml(v || "")}</div>`,
+      ).join("") +
+    `</div>` +
+    `<div class="mfa-email-view-switch" role="tablist">` +
+      `<button type="button" class="mfa-email-view-btn active" ` +
+          `data-view="rendered" role="tab">Rendered</button>` +
+      `<button type="button" class="mfa-email-view-btn" ` +
+          `data-view="raw" role="tab">Raw source</button>` +
+    `</div>` +
+    `<div class="mfa-email-view-wrap">` +
+      `<div class="mfa-email-view-pane mfa-email-view-rendered active">${iframeHtml}</div>` +
+      `<div class="mfa-email-view-pane mfa-email-view-raw">${rawHtml}</div>` +
+    `</div>`
+  );
+}
+
+function _wireEmailBody(root) {
+  const buttons = root.querySelectorAll(".mfa-email-view-btn");
+  const wrap = root.querySelector(".mfa-email-view-wrap");
+  if (!wrap) return;
+  // NOTE: we deliberately DON'T auto-size the iframe to content
+  // height here. USCIS's MFA email is short — auto-sizing squeezes
+  // the preview into ~200px and leaves the rest of the pop-out blank.
+  // Instead the iframe gets a viewport-relative height from CSS
+  // (see .mfa-email-iframe) so short emails render in a comfortable
+  // canvas and long ones get their own internal scrollbar.
+  buttons.forEach(btn => {
+    btn.addEventListener("click", () => {
+      buttons.forEach(b => b.classList.toggle("active", b === btn));
+      const which = btn.dataset.view;
+      wrap.querySelectorAll(".mfa-email-view-pane").forEach(p => {
+        p.classList.toggle(
+          "active", p.classList.contains(`mfa-email-view-${which}`),
+        );
+      });
+    });
+  });
+}
+
+
+// Map a step field into a {href, label, kind} for direct-open links.
+// Returns null when the field isn't a linkable artefact. Currently
+// handles only `trace_dir` — points at the dir's _meta.json, which
+// indexes the phase list and is a reasonable "landing page" for a
+// reader inspecting a trace from a failed pull.
+function _traceLinkHref(key, value) {
+  if (value == null) return null;
+  const val = String(value);
+  if (key === "trace_dir") {
+    const tail = val.split("/").filter(Boolean).pop();
+    if (!tail) return null;
+    return {
+      href: `/api/full-trace/${encodeURIComponent(tail)}/_meta.json`,
+      label: `${tail}/_meta.json`,
+      kind: "trace index",
+    };
+  }
+  return null;
 }
 
 function _worstLevelAcross(items) {
@@ -1745,6 +2301,120 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
+}
+
+// ----------------------------------------------------------------------
+// Storage bar (topbar) + System-log tab size line.
+// Shared state: LAST_STORAGE_DATA lets the systemlog view read the
+// latest categories without a second fetch.
+// ----------------------------------------------------------------------
+
+let LAST_STORAGE_DATA = null;
+
+async function updateStorageBar() {
+  const wrap = document.getElementById("storage-bar");
+  if (!wrap) return;
+  let data;
+  try {
+    const r = await fetch("/api/storage");
+    if (!r.ok) return;
+    data = await r.json();
+  } catch (_e) {
+    return;
+  }
+  LAST_STORAGE_DATA = data;
+  renderStorageBar(data);
+  renderSyslogStorageLine(data);
+}
+
+function renderStorageBar(data) {
+  const track = document.getElementById("storage-bar-track");
+  const labelsEl = document.getElementById("storage-bar-labels");
+  const totalEl = document.getElementById("storage-bar-total");
+  const limitEl = document.getElementById("storage-bar-limit");
+  if (!track || !totalEl || !limitEl) return;
+  const total = data.total_bytes || 0;
+  const limit = data.limit_bytes || 1;
+  const ratio = limit > 0 ? total / limit : 0;
+
+  track.innerHTML = "";
+  if (labelsEl) labelsEl.innerHTML = "";
+  track.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
+  track.classList.toggle("critical", ratio >= 0.9);
+  totalEl.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
+  totalEl.classList.toggle("critical", ratio >= 0.9);
+
+  totalEl.textContent = formatBytes(total);
+  limitEl.textContent = `/ ${formatBytes(limit)} limit · ${(ratio * 100).toFixed(1)}%`;
+
+  // Both the bar AND the label percentages are measured against
+  // the configured limit. Bar fill naturally reflects "how much of
+  // the limit is gone"; each segment's width is its own share of
+  // that limit, NOT its share of what's currently used. Matching
+  // denominators keep the eye's proportion sense in sync with the
+  // numbers next to each swatch.
+  //
+  // Display order: cases first (I-485, I-765, I-131, …) sorted by
+  // size, then "System log" last. Cases are the primary data;
+  // system log grows with retained traces, so giving it the
+  // right-hand position makes its growth easy to eyeball.
+  const ordered = [...(data.categories || [])].sort((a, b) => {
+    const aSys = a.key === "system_log";
+    const bSys = b.key === "system_log";
+    if (aSys !== bSys) return aSys ? 1 : -1;
+    return b.bytes - a.bytes;
+  });
+  for (const cat of ordered) {
+    if (!cat.bytes) continue;
+    const limitPct = limit > 0 ? (cat.bytes / limit) * 100 : 0;
+    // Segment — fixed width in % of track, NOT flex-grow. Using
+    // `flex: 0 0 X%` pins the basis at X% and locks grow/shrink so
+    // segments never expand to fill leftover space. Track remainder
+    // stays empty (the grey background shows through).
+    const seg = document.createElement("div");
+    seg.className = "storage-bar-seg";
+    seg.dataset.key = cat.key;
+    seg.style.flex = `0 0 ${limitPct}%`;
+    seg.title =
+      `${cat.label} — ${limitPct.toFixed(2)}% of limit · ` +
+      `${formatBytes(cat.bytes)} (${cat.file_count} file${cat.file_count === 1 ? "" : "s"})`;
+    track.appendChild(seg);
+    if (labelsEl) {
+      const lbl = document.createElement("div");
+      lbl.className = "storage-bar-label";
+      lbl.dataset.key = cat.key;
+      lbl.title = seg.title;
+      lbl.innerHTML =
+        `<span class="storage-bar-label-swatch" data-key="${cat.key}"></span>` +
+        `<span class="storage-bar-label-name">${escapeHtml(cat.label)}</span> ` +
+        `<span class="storage-bar-label-pct">${limitPct.toFixed(2)}%</span>`;
+      labelsEl.appendChild(lbl);
+    }
+  }
+}
+
+function renderSyslogStorageLine(data) {
+  const el = document.getElementById("syslog-storage-line");
+  if (!el) return;
+  // The system_log bucket already aggregates events + traces +
+  // session state — one number tells the whole story. Tinted when
+  // the bucket alone would warn/critical against the limit.
+  const sl = (data.categories || []).find(c => c.key === "system_log");
+  const slBytes = sl ? sl.bytes : 0;
+  const limit = data.limit_bytes || 1;
+  const ratio = limit > 0 ? slBytes / limit : 0;
+  el.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
+  el.classList.toggle("critical", ratio >= 0.9);
+  el.textContent = `System log: ${formatBytes(slBytes)}`;
+}
+
+function formatBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
 function toast(msg, kind) {

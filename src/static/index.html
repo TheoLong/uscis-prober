@@ -21,6 +21,17 @@
              next poll without a hard refresh. Tooltip carries full SHA,
              commit date, and server boot time. -->
         <a id="version-chip" class="version-chip" href="#" title="" hidden></a>
+        <!-- Debug-mode pill: toggles config.trace_successful_pulls via
+             /api/debug-mode. When ON, every pull writes full HTML + PNG
+             traces to data/full_traces/ so the operator can verify the
+             capture system against a healthy pull. Intentionally loud
+             when active so we don't forget to turn it off. -->
+        <button id="debug-mode-pill" class="debug-pill" type="button"
+                role="switch" aria-checked="false"
+                title="Off: traces only on failure. On: traces on every pull (disk-heavier).">
+          <span class="debug-pill-dot"></span>
+          <span class="debug-pill-label">debug</span>
+        </button>
       </h1>
       <span class="subtitle" id="summary-line">loading…</span>
     </div>
@@ -62,14 +73,34 @@
       <span class="view-tab-count" id="updates-count" hidden></span>
     </button>
     <button class="view-tab" data-view="systemlog">
-      System log
+      System
       <span class="view-tab-count" id="systemlog-count" hidden></span>
     </button>
   </nav>
 
   <main id="case-list"></main>
   <main id="updates-feed" hidden></main>
-  <main id="systemlog-feed" hidden></main>
+
+  <!-- System tab: two stacked sections.
+         1. Storage — stacked usage bar + per-category legend. Polls
+            /api/storage every 30s so the bar reflects growth
+            without the operator hitting refresh.
+         2. System log — paginated event feed, populated by
+            renderSystemLog() in app.js. -->
+  <main id="systemlog-feed" hidden>
+    <section class="storage-bar-wrap" id="storage-bar" aria-label="Disk usage">
+      <div class="storage-bar-header">
+        <span class="storage-bar-title">Storage</span>
+        <span class="storage-bar-total" id="storage-bar-total">—</span>
+        <span class="storage-bar-limit" id="storage-bar-limit"></span>
+      </div>
+      <div class="storage-bar-track" id="storage-bar-track" role="img"
+           aria-label="Stacked storage usage by category"></div>
+      <div class="storage-bar-labels" id="storage-bar-labels"
+           aria-hidden="true"></div>
+    </section>
+    <section id="systemlog-content"></section>
+  </main>
 
   <template id="case-card-template">
     <article class="case-card">

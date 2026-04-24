@@ -7,6 +7,7 @@ SMTP/IMAP I/O is mocked so tests run offline.
 
 from __future__ import annotations
 
+import imaplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from unittest.mock import MagicMock, patch
@@ -439,7 +440,7 @@ def _mk_fake_check(sequence, query="QUERY", uids=None):
     uids = uids if uids is not None else ["1"]
     it = iter(sequence)
 
-    def _fake(email_addr, pw, since, *, tally=None):
+    def _fake(email_addr, pw, since, *, tally=None, collector=None, cycle=0):
         try:
             nxt = next(it)
         except StopIteration:
@@ -480,7 +481,7 @@ def test_fetch_latest_code_times_out(monkeypatch):
 def test_fetch_latest_code_default_since_is_two_minutes_ago(monkeypatch):
     captured = {}
 
-    def _capture(gu, pw, since, *, tally=None):
+    def _capture(gu, pw, since, *, tally=None, collector=None, cycle=0):
         captured["since"] = since
         return ("999999", "Q", [])
 
@@ -534,7 +535,7 @@ def test_fetch_latest_code_timeout_sys_log_carries_diagnostics(monkeypatch, tmp_
     monkeypatch.setattr(mfa_mailbox.time, "time", lambda: next(t_values, 100.0))
 
     # Simulate the live failure mode: every cycle, search returns empty.
-    def _always_empty(email_addr, pw, since, *, tally=None):
+    def _always_empty(email_addr, pw, since, *, tally=None, collector=None, cycle=0):
         if tally is not None:
             tally[mfa_mailbox.REASON_IMAP_SEARCH_EMPTY] = (
                 tally.get(mfa_mailbox.REASON_IMAP_SEARCH_EMPTY, 0) + 1
@@ -628,3 +629,154 @@ def test_extract_body_non_multipart_with_payload():
     assert msg.is_multipart() is False
     body = _extract_body(msg)
     assert "456123" in body
+
+
+# -------- mfa_fetch_cycle_error early-warning ----------------------------
+
+def test_fetch_surfaces_cycle_error_on_first_real_failure(monkeypatch, tmp_path):
+    """A bad-app-password / IMAP-auth / SSL-handshake failure must
+    surface as a `mfa_fetch_cycle_error` on its FIRST occurrence so
+    operators don't have to wait for the full fetch timeout to see
+    what went wrong.
+
+    Healthy 'no new mail yet' reasons must NOT surface as cycle
+    errors (noise)."""
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+
+    # Scripted sequence: two cycles returning None. First cycle bumps
+    # the tally with REASON_IMAP_SEARCH_FAILED (a real error), second
+    # with REASON_STALE (benign "no match yet"). Only the first should
+    # emit a cycle_error event.
+    script = iter([
+        mfa_mailbox.REASON_IMAP_SEARCH_FAILED,
+        mfa_mailbox.REASON_STALE,
+    ])
+
+    def _fake(email_addr, pw, since, *, tally=None, collector=None, cycle=0):
+        try:
+            reason = next(script)
+        except StopIteration:
+            reason = mfa_mailbox.REASON_STALE
+        if tally is not None:
+            tally[reason] = tally.get(reason, 0) + 1
+        return (None, "QUERY", [])
+
+    monkeypatch.setattr(mfa_mailbox, "_check_inbox_once", _fake)
+    monkeypatch.setattr(mfa_mailbox.time, "sleep", lambda _s: None)
+
+    # Give the loop time to run at least two cycles before timeout.
+    with pytest.raises(TimeoutError):
+        fetch_latest_code(
+            "u@example.com", "pw",
+            max_wait_seconds=2, poll_interval_seconds=0,
+        )
+
+    cycle_errors = [e for e in system_log.read_all()
+                    if e.get("event") == "mfa_fetch_cycle_error"]
+    # Exactly one error event fired — for the real failure reason.
+    # (Benign `REASON_STALE` cycles must NOT trigger a cycle_error.)
+    assert len(cycle_errors) == 1
+    assert cycle_errors[0]["reason"] == mfa_mailbox.REASON_IMAP_SEARCH_FAILED
+    assert cycle_errors[0]["level"] == "warning"
+
+
+# -------- IMAP failure branches -------------------------------------------
+# Every failure transition must categorise into a REASON_* tally entry AND
+# (when a collector is attached) produce a wire-level event so the MFA
+# modal has forensic evidence for every branch.
+
+def test_check_inbox_once_imap_select_raises_categorised(since_dt):
+    """IMAP SELECT INBOX raising → REASON_IMAP_SELECT_FAILED (line 377-384)."""
+    class _SelectRaisesMail(_FakeMail):
+        def select(self, *a, **k):
+            raise imaplib.IMAP4.error("SELECT unavailable")
+
+    fake = _SelectRaisesMail()
+    tally: dict[str, int] = {}
+    code, query, uids = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_IMAP_SELECT_FAILED: 1}
+
+
+def test_check_inbox_once_imap_select_non_ok_categorised(since_dt):
+    """IMAP SELECT returning ("NO", ...) → REASON_IMAP_SELECT_FAILED
+    with status recorded (lines 386-390)."""
+    class _SelectNoMail(_FakeMail):
+        def select(self, *a, **k):
+            return ("NO", [b""])
+
+    fake = _SelectNoMail()
+    tally: dict[str, int] = {}
+    code, query, uids = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_IMAP_SELECT_FAILED: 1}
+
+
+def test_check_inbox_once_select_returns_non_numeric_count(since_dt):
+    """sel_data[0] not decodable to int → msg_count becomes None,
+    execution continues normally (lines 394-395)."""
+    class _WeirdCountMail(_FakeMail):
+        def select(self, *a, **k):
+            return ("OK", [b"not-a-number"])
+
+    fake = _WeirdCountMail(fetch_data=[(b"x", _fake_msg())])
+    code, _, _ = _scan(fake, since_dt)
+    assert code == "424242"  # still extracts despite odd count header
+
+
+def test_check_inbox_once_imap_search_raises_categorised(since_dt):
+    """mail.search() raising → REASON_IMAP_SEARCH_FAILED, search_query
+    still returned so the caller can log it (lines 409-416)."""
+    class _SearchRaisesMail(_FakeMail):
+        def search(self, *a, **k):
+            raise imaplib.IMAP4.error("search broken")
+
+    fake = _SearchRaisesMail()
+    tally: dict[str, int] = {}
+    code, query, uids = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert query is not None  # query was built before search failed
+    assert uids == []
+    assert tally == {mfa_mailbox.REASON_IMAP_SEARCH_FAILED: 1}
+
+
+def test_check_inbox_once_imap_fetch_raises_categorised(since_dt):
+    """mail.fetch() raising for a specific uid → REASON_FETCH_FAILED,
+    loop continues to next uid (lines 452-459)."""
+    class _FetchRaisesMail(_FakeMail):
+        def fetch(self, *a, **k):
+            raise imaplib.IMAP4.error("fetch exploded")
+
+    fake = _FetchRaisesMail()
+    tally: dict[str, int] = {}
+    code, _, _ = _scan(fake, since_dt, tally=tally)
+    assert code is None
+    assert tally == {mfa_mailbox.REASON_FETCH_FAILED: 1}
+
+
+def test_check_inbox_once_records_collector_events_and_emails(since_dt):
+    """When collector is supplied, every IMAP stage records a wire-level
+    event and every considered email (accepted OR rejected) is archived
+    to collector.mfa_emails (lines 326 + 475-476)."""
+    import uscis_auth
+    collector = uscis_auth.TraceCollector()
+    fake = _FakeMail(fetch_data=[(b"x", _fake_msg())])
+    with patch.object(mfa_mailbox.imaplib, "IMAP4_SSL", return_value=fake):
+        code, _, _ = _check_inbox_once(
+            "u@example.com", "pw", since_dt, collector=collector,
+        )
+    assert code == "424242"
+    # Collector recorded every IMAP stage.
+    events = [e["event"] for e in collector.mfa_events]
+    assert "imap_connect_started" in events
+    assert "imap_connect_ok" in events
+    assert "imap_login_ok" in events
+    assert "imap_select_ok" in events
+    assert "imap_search_started" in events
+    assert "imap_search_ok" in events
+    assert "imap_fetch_ok" in events
+    # Raw email preserved for forensic inspection.
+    assert "1" in collector.mfa_emails
+    assert collector.mfa_emails["1"].startswith(b"From:")

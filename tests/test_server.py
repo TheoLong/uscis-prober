@@ -231,7 +231,7 @@ def test_run_pull_subprocess_skips_if_already_running(monkeypatch):
 def test_run_pull_subprocess_success_flags_ok(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -250,7 +250,11 @@ def test_run_pull_subprocess_success_flags_ok(monkeypatch, tmp_path):
 def test_run_pull_subprocess_success_with_new_diffs_notifies(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [{"id": "IOE1", "label": "I-485"}]}))
+    cfg_path.write_text(json.dumps({
+        "cases": [{"id": "IOE1", "label": "I-485"}],
+        "retry": 0, "retry_wait_seconds": 0,
+        "storage_limit_gb": 1.0,
+    }))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -274,7 +278,7 @@ def test_run_pull_subprocess_success_with_new_diffs_notifies(monkeypatch, tmp_pa
 def test_run_pull_subprocess_failure_sets_error(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -291,7 +295,7 @@ def test_run_pull_subprocess_failure_sets_error(monkeypatch, tmp_path):
 def test_run_pull_subprocess_timeout_recorded(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -308,7 +312,7 @@ def test_run_pull_subprocess_timeout_recorded(monkeypatch, tmp_path):
 def test_run_pull_subprocess_crash_recorded(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": []}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -316,6 +320,512 @@ def test_run_pull_subprocess_crash_recorded(monkeypatch, tmp_path):
     with patch.object(subprocess, "run", side_effect=RuntimeError("oops")):
         server._run_pull_subprocess()
     assert server._pull_state.ok is False
+
+
+# -------- retry policy + orchestration ----------------------------------
+
+def test_load_retry_policy_raises_when_retry_missing():
+    with pytest.raises(server.ConfigError, match="retry"):
+        server.load_retry_policy({"retry_wait_seconds": 60})
+
+
+def test_load_retry_policy_raises_when_wait_missing():
+    with pytest.raises(server.ConfigError, match="retry_wait_seconds"):
+        server.load_retry_policy({"retry": 2})
+
+
+def test_load_retry_policy_raises_on_non_numeric_retry():
+    with pytest.raises(server.ConfigError, match="retry"):
+        server.load_retry_policy({"retry": "two", "retry_wait_seconds": 60})
+
+
+def test_load_retry_policy_raises_on_non_numeric_wait():
+    with pytest.raises(server.ConfigError, match="retry_wait_seconds"):
+        server.load_retry_policy({"retry": 1, "retry_wait_seconds": "later"})
+
+
+def test_load_retry_policy_raises_on_negative_values():
+    with pytest.raises(server.ConfigError):
+        server.load_retry_policy({"retry": -1, "retry_wait_seconds": 60})
+    with pytest.raises(server.ConfigError):
+        server.load_retry_policy({"retry": 1, "retry_wait_seconds": -5})
+
+
+def test_load_retry_policy_clamps_out_of_range():
+    p = server.load_retry_policy({"retry": 99, "retry_wait_seconds": 9999})
+    assert p.retry == server.RETRY_MAX_COUNT
+    assert p.retry_wait_seconds == float(server.RETRY_MAX_WAIT_SECONDS)
+
+
+def test_load_retry_policy_respects_zero():
+    # retry=0 is valid — it's how operators disable retries.
+    p = server.load_retry_policy({"retry": 0, "retry_wait_seconds": 30})
+    assert p.retry == 0
+    assert p.total_attempts == 1
+
+
+def test_load_retry_policy_template_values_are_valid():
+    # Sanity check: the recommended values from config.example.json
+    # must parse cleanly through the same validator live configs use.
+    p = server.load_retry_policy({"retry": 2, "retry_wait_seconds": 180})
+    assert p.retry == 2
+    assert p.retry_wait_seconds == 180.0
+    assert p.total_attempts == 3
+
+
+# -------- storage_limit_gb + trace_successful_pulls config --------------
+
+def test_load_storage_limit_raises_when_missing():
+    with pytest.raises(server.ConfigError, match="storage_limit_gb"):
+        server.load_storage_limit_bytes({"retry": 1, "retry_wait_seconds": 10})
+
+
+def test_load_storage_limit_parses_gb_to_bytes():
+    b = server.load_storage_limit_bytes({"storage_limit_gb": 2.5})
+    assert b == int(2.5 * 1024**3)
+
+
+def test_load_storage_limit_rejects_out_of_range():
+    with pytest.raises(server.ConfigError):
+        server.load_storage_limit_bytes({"storage_limit_gb": 0})
+    with pytest.raises(server.ConfigError):
+        server.load_storage_limit_bytes({"storage_limit_gb": 9999})
+
+
+def test_load_trace_successful_pulls_defaults_false_when_missing():
+    """Optional field — missing = false. Traces are only written on
+    failures unless the UI toggle explicitly sets true."""
+    assert server.load_trace_successful_pulls(
+        {"retry": 1, "retry_wait_seconds": 10},
+    ) is False
+
+
+def test_load_trace_successful_pulls_rejects_non_bool():
+    with pytest.raises(server.ConfigError):
+        server.load_trace_successful_pulls({"trace_successful_pulls": "yes"})
+
+
+def test_load_trace_successful_pulls_honours_true_and_false():
+    assert server.load_trace_successful_pulls({"trace_successful_pulls": True}) is True
+    assert server.load_trace_successful_pulls({}) is False
+
+
+# -------- /api/storage + category breakdown ----------------------------
+
+def test_api_storage_categorises_data_dir(client, monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    # Seed representative files per category.
+    (data_dir / "485_case.json").write_text("[]")
+    (data_dir / "485_location.json").write_text("[]")
+    (data_dir / "system_log.json").write_text("[]")
+    (data_dir / "full_traces").mkdir()
+    (data_dir / "full_traces" / "trace1").mkdir()
+    (data_dir / "full_traces" / "trace1" / "01_after_goto.html.gz").write_bytes(b"x" * 1200)
+    (data_dir / "full_traces" / "trace1" / "01_after_goto.png").write_bytes(b"x" * 2000)
+
+    # Extend the existing client's config with required storage key.
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg.update({
+        "retry": 1, "retry_wait_seconds": 10,
+        "storage_limit_gb": server.STORAGE_MIN_GB,  # minimum legal value
+    })
+    cfg_path.write_text(json.dumps(cfg))
+
+    r = client.get("/api/storage")
+    assert r.status_code == 200
+    body = r.get_json()
+    keys = {c["key"]: c for c in body["categories"]}
+    # Cases grouped per form number (case+location merged).
+    assert "case_485" in keys
+    assert keys["case_485"]["label"] == "I-485"
+    assert keys["case_485"]["file_count"] == 2  # 485_case.json + 485_location.json
+    # System log aggregates the event log + every full-trace file.
+    assert "system_log" in keys
+    # Event log (2 bytes: "[]") + 2 trace files (3200 bytes).
+    assert keys["system_log"]["bytes"] >= 3200
+    assert keys["system_log"]["file_count"] >= 3
+    # Config + Other filtered out of UI categories (still counted
+    # toward total_bytes indirectly via the walk).
+    assert "config" not in keys
+    assert "other" not in keys
+    assert body["total_bytes"] > 0
+    assert body["limit_bytes"] == int(server.STORAGE_MIN_GB * 1024**3)
+
+
+def test_api_storage_reports_limit_exceeded(client, monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    (data_dir / "big_case.json").write_bytes(b"x" * 100_000)
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    # 50 KB limit — easily tripped by our 100 KB seed.
+    cfg.update({
+        "retry": 1, "retry_wait_seconds": 10,
+        "storage_limit_gb": 50 / (1024**3),  # 50 bytes in GB — triggers floor
+    })
+    # storage_limit_gb must be >= STORAGE_MIN_GB; use the floor directly.
+    cfg["storage_limit_gb"] = server.STORAGE_MIN_GB
+    cfg_path.write_text(json.dumps(cfg))
+
+    r = client.get("/api/storage")
+    assert r.status_code == 200
+    body = r.get_json()
+    # 100 KB > STORAGE_MIN_GB (~ 10 MB); so limit is NOT exceeded here.
+    # Flip: make the seed file MUCH bigger than the limit.
+    (data_dir / "big_case.json").write_bytes(b"x" * int(0.02 * 1024**3))  # 20 MB
+    r = client.get("/api/storage")
+    body = r.get_json()
+    assert body["limit_exceeded"] is True
+    assert body["limit_ratio"] > 1.0
+
+
+# -------- storage-limit alert + dedup ----------------------------------
+
+def test_storage_limit_check_emits_and_dedups(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "cases": [],
+        "retry": 0, "retry_wait_seconds": 0,
+        "storage_limit_gb": server.STORAGE_MIN_GB,  # ~10 MB
+    }))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    # Disable email path — we only care about dedup + event emission.
+    monkeypatch.setattr(server, "_send_storage_alert_email", lambda *a, **kw: None)
+
+    # Seed a file big enough to trip the limit (20 MB > 10 MB).
+    (data_dir / "big_case.json").write_bytes(b"x" * int(0.02 * 1024**3))
+
+    # First run: should alert.
+    steps1 = server._check_storage_limit_and_alert()
+    events1 = [s["event"] for s in steps1]
+    assert "storage_limit_exceeded" in events1
+
+    # Second run while still over: must NOT re-alert.
+    steps2 = server._check_storage_limit_and_alert()
+    events2 = [s["event"] for s in steps2]
+    assert "storage_limit_exceeded" not in events2
+
+    # Shrink well below rearm threshold (< 90 % of limit).
+    (data_dir / "big_case.json").unlink()
+    steps3 = server._check_storage_limit_and_alert()
+    events3 = [s["event"] for s in steps3]
+    assert "storage_alert_rearmed" in events3
+
+    # Grow over again: re-alerts.
+    (data_dir / "big_case.json").write_bytes(b"x" * int(0.02 * 1024**3))
+    steps4 = server._check_storage_limit_and_alert()
+    events4 = [s["event"] for s in steps4]
+    assert "storage_limit_exceeded" in events4
+
+
+# -------- /api/debug-mode + /api/auth-trace --------------------------
+
+def _write_full_cfg(cfg_path, enabled=False):
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g@example.com",
+            "uscis_mfa_app_password": "pw",
+        },
+        "cases": [],
+        "retry": 1, "retry_wait_seconds": 10,
+        "storage_limit_gb": 1.0,
+        "trace_successful_pulls": enabled,
+    }))
+
+
+def test_api_debug_mode_get_returns_current(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.get("/api/debug-mode")
+    assert r.status_code == 200
+    assert r.get_json() == {"enabled": False}
+
+
+def test_api_debug_mode_post_persists_flip(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.post("/api/debug-mode", json={"enabled": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True and body["enabled"] is True
+    # Config file was rewritten.
+    saved = json.loads(cfg_path.read_text())
+    assert saved["trace_successful_pulls"] is True
+
+
+def test_api_debug_mode_rejects_non_bool(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.post("/api/debug-mode", json={"enabled": "yes"})
+    assert r.status_code == 400
+
+
+def test_api_full_trace_serves_zip_jsonl_eml(client, tmp_path):
+    """Serves trace.zip + mfa_trace/events.jsonl + mfa_trace/email_*.eml
+    with correct MIME types. Path-traversal is rejected."""
+    data_dir = tmp_path / "data"
+    trace_dir = data_dir / "full_traces" / "20260424T000000Z_fail_scheduled"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.zip").write_bytes(b"PK\x03\x04FAKE_ZIP")
+    (trace_dir / "mfa_trace").mkdir()
+    (trace_dir / "mfa_trace" / "events.jsonl").write_text(
+        '{"event": "imap_connect_ok"}\n'
+    )
+    (trace_dir / "mfa_trace" / "email_12345.eml").write_bytes(
+        b"From: a\nSubject: x\n\nbody"
+    )
+
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path)
+
+    # Zip at the top level.
+    r = client.get("/api/full-trace/20260424T000000Z_fail_scheduled/trace.zip")
+    assert r.status_code == 200
+    assert r.mimetype == "application/zip"
+    assert r.headers.get("Access-Control-Allow-Origin") == "*"
+
+    # Nested one level deep (mfa_trace/events.jsonl).
+    r = client.get(
+        "/api/full-trace/20260424T000000Z_fail_scheduled/mfa_trace/events.jsonl",
+    )
+    assert r.status_code == 200
+    assert r.mimetype == "application/x-ndjson"
+
+    # Nested .eml.
+    r = client.get(
+        "/api/full-trace/20260424T000000Z_fail_scheduled/mfa_trace/email_12345.eml",
+    )
+    assert r.status_code == 200
+    assert r.mimetype == "message/rfc822"
+
+    # Path traversal rejected.
+    for bad in (
+        "../etc/passwd",
+        "..%2fescape",
+    ):
+        r = client.get(f"/api/full-trace/{bad}/trace.zip")
+        assert r.status_code in (400, 404)
+
+    # More than two levels of nesting rejected.
+    r = client.get(
+        "/api/full-trace/20260424T000000Z_fail_scheduled/a/b/c.txt",
+    )
+    assert r.status_code == 400
+
+    # Missing file → 404.
+    r = client.get("/api/full-trace/20260424T000000Z_fail_scheduled/nope.zip")
+    assert r.status_code == 404
+
+
+def _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0.0):
+    cfg_path.write_text(json.dumps({
+        "cases": [],
+        "retry": retry,
+        "retry_wait_seconds": retry_wait_seconds,
+        "storage_limit_gb": 1.0,
+    }))
+
+
+def _auth_failed_stderr(attempt_marker: str = "a") -> str:
+    """Compose one JSONL-encoded cli_run_auth_failed event as the child
+    would emit it when its login flow bailed out."""
+    from system_log import _JSONL_PREFIX  # type: ignore[attr-defined]
+    return (
+        f'{_JSONL_PREFIX}{{"ts":"2026-04-24T00:00:00Z",'
+        f'"event":"cli_run_auth_failed","level":"error",'
+        f'"source":"session_fetch","error":"AuthError: marker={attempt_marker}"}}'
+    )
+
+
+def test_run_pull_retries_on_auth_failure(monkeypatch, tmp_path):
+    """Classic recovery: first attempt hits an auth failure, second
+    attempt succeeds. We must see both attempts under one pull envelope."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    # Two subprocess invocations under one pull.
+    assert len(calls) == 2
+    assert server._pull_state.ok is True
+    assert server._pull_state.exit_code == 0
+
+
+def test_run_pull_does_not_retry_non_auth_failure(monkeypatch, tmp_path):
+    """A non-auth failure (e.g. case fetch 500 without an auth_failed
+    marker) must NOT retry — retry is an anti-bot recovery tool, not a
+    catch-all."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=3, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_proc(1, "", "something else went wrong")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 1  # no retry
+    assert server._pull_state.ok is False
+
+
+def test_run_pull_stops_after_total_attempts_exhausted(monkeypatch, tmp_path):
+    """With retry=2, an always-failing auth must run exactly 3 total
+    attempts (1 initial + 2 retries) before giving up."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_proc(1, "", _auth_failed_stderr(str(len(calls))))
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 3  # 1 initial + 2 retries
+    assert server._pull_state.ok is False
+
+
+def test_run_pull_preserves_stderr_across_retry_attempts(monkeypatch, tmp_path):
+    """The subprocess_exit_nonzero step must include every attempt's
+    stderr tail, not just the last one. Otherwise a crash signature on
+    attempt 1 vanishes the moment attempt 2 starts."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    def _run(cmd, **kw):
+        # Each attempt prints a distinctive marker line plus the
+        # structured auth-failure event.
+        marker = f"TRACEBACK_MARKER_ATTEMPT_{1 + len(getattr(_run, '_seen', []))}"
+        _run._seen = getattr(_run, "_seen", []) + [marker]
+        return _fake_proc(1, "", marker + "\n" + _auth_failed_stderr(marker))
+
+    import system_log
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    exit_steps = [s for s in pulls[0]["steps"]
+                  if s.get("event") == "subprocess_exit_nonzero"]
+    # One exit-nonzero step per attempt, and the LAST attempt's step
+    # must carry all earlier tails as `all_attempts_stderr_tails`.
+    assert len(exit_steps) >= 1
+    last = exit_steps[-1]
+    assert "all_attempts_stderr_tails" in last
+    # Flatten for easy inspection — at least two distinct markers
+    # survived.
+    flat = [line for tail in last["all_attempts_stderr_tails"] for line in tail]
+    assert any("ATTEMPT_1" in line for line in flat)
+    assert any("ATTEMPT_3" in line for line in flat)
+
+
+def test_run_pull_emits_retry_waiting_and_starting_events(monkeypatch, tmp_path):
+    """Each retry must emit `auth_retry_waiting` then `auth_retry_starting`
+    so the dashboard shows the pending retry rather than a dead gap."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    import system_log
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    # auth_retry_waiting / _starting are emitted inside the capture
+    # scope so they're folded into the pull envelope's `steps[]`, not
+    # written as standalone top-level events. Inspect the envelope.
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    step_names = [s.get("event") for s in pulls[0]["steps"]]
+    assert step_names.count("auth_retry_waiting") == 1
+    assert step_names.count("auth_retry_starting") == 1
+
+
+def test_run_pull_retry_does_not_wait_when_retry_zero(monkeypatch, tmp_path):
+    """retry=0 disables retry entirely — only one subprocess invocation."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=0, retry_wait_seconds=120)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_proc(1, "", _auth_failed_stderr())
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 1
+
+
+def test_run_pull_does_not_retry_on_subprocess_timeout(monkeypatch, tmp_path):
+    """A subprocess timeout is not a USCIS-side anti-bot issue — it's our
+    side taking too long. Retrying risks a runaway pull, so we don't."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 1
+    assert "timeout" in (server._pull_state.last_error or "")
 
 
 def test_spawn_pull_async_starts_thread():
@@ -846,3 +1356,688 @@ def test_main_handles_missing_config(monkeypatch, tmp_path):
         server.main()
     gate.assert_called_once()
     assert gate.call_args.args[1] == ""
+
+
+# -------- main() error branches ---------------------------------------
+
+def test_main_access_gate_failure_is_fatal(monkeypatch, tmp_path):
+    """Access-gate configure failure MUST re-raise — a running server
+    without a gate is worse than no server."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {"optional_access_code": "c"}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate",
+                      side_effect=RuntimeError("gate broken")):
+        with pytest.raises(RuntimeError, match="gate broken"):
+            server.main()
+
+
+def test_main_scheduler_failure_is_non_fatal(monkeypatch, tmp_path):
+    """Scheduler setup failure must log but NOT crash — manual pulls
+    and the web UI still work."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate"), \
+         patch.object(server, "_setup_scheduler",
+                      side_effect=RuntimeError("scheduler down")):
+        # Does not raise.
+        server.main()
+
+
+def test_main_server_run_failure_logs_and_reraises(monkeypatch, tmp_path):
+    """app.run() itself failing (port already bound, etc.) must log
+    server_run_failed before propagating."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_setup_scheduler", MagicMock())
+    monkeypatch.setattr(server.app, "run",
+                        MagicMock(side_effect=OSError("port bound")))
+    with patch.object(server, "configure_access_gate"):
+        with pytest.raises(OSError, match="port bound"):
+            server.main()
+
+
+# -------- _send_storage_alert_email -----------------------------------
+
+def test_send_storage_alert_email_noop_when_config_load_fails(monkeypatch, tmp_path):
+    """If load_config raises, the email path short-circuits without
+    propagating (storage event already written to log is authoritative)."""
+    monkeypatch.setattr(server, "load_config",
+                        MagicMock(side_effect=RuntimeError("nope")))
+    # Must not raise.
+    server._send_storage_alert_email(
+        total_bytes=2 * 1024**3, limit_bytes=1 * 1024**3, categories=[],
+    )
+
+
+def test_send_storage_alert_email_noop_when_creds_missing(monkeypatch, tmp_path):
+    """Missing MFA credentials → no-op log warning, no exception."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    server._send_storage_alert_email(
+        total_bytes=2 * 1024**3, limit_bytes=1 * 1024**3, categories=[],
+    )
+
+
+def test_send_storage_alert_email_builds_and_sends(monkeypatch, tmp_path):
+    """Happy path: creds present → mailer.send_email called with a
+    composed subject/body reporting total, limit, over-by, and per-
+    category breakdown in both plain + html."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_mfa_email": "u@example.com",
+            "uscis_mfa_app_password": "pw",
+            "notification_email": "n@example.com",
+        },
+        "cases": [],
+    }))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    captured = {}
+    import mailer as _mailer
+    def _send(**kw):
+        captured.update(kw)
+    monkeypatch.setattr(_mailer, "send_email", _send)
+
+    categories = [
+        {"key": "case_485", "label": "I-485", "bytes": 5 * 1024**2,
+         "file_count": 7},
+        {"key": "system_log", "label": "System log", "bytes": 800 * 1024,
+         "file_count": 2},
+    ]
+    server._send_storage_alert_email(
+        total_bytes=int(1.2 * 1024**3),
+        limit_bytes=int(1.0 * 1024**3),
+        categories=categories,
+    )
+    assert captured["to"] == "n@example.com"
+    assert "Storage" in captured["subject"]
+    assert "I-485" in captured["plain"]
+    assert "I-485" in captured["html"]
+    assert "over by" in captured["plain"]
+    # Human-readable sizes embedded in both renderings.
+    assert "GB" in captured["subject"] or "MB" in captured["subject"]
+
+
+# -------- /api/mfa-trace/<dir>/summary --------------------------------
+
+def _seed_trace(data_dir: Path, dir_name: str = "t1") -> Path:
+    trace_dir = data_dir / "full_traces" / dir_name
+    trace_dir.mkdir(parents=True)
+    mfa = trace_dir / "mfa_trace"
+    mfa.mkdir()
+    return trace_dir
+
+
+def test_api_mfa_trace_summary_rejects_bad_dir_name(client, tmp_path):
+    r = client.get("/api/mfa-trace/..%2Fevil/summary")
+    # URL-decoded ".." gets through as path traversal attempt; our
+    # handler validates the component.
+    assert r.status_code in (400, 404)
+
+
+def test_api_mfa_trace_summary_404_when_trace_missing(client, tmp_path):
+    r = client.get("/api/mfa-trace/nonexistent/summary")
+    assert r.status_code == 404
+    assert r.get_json()["error"] == "trace_not_found"
+
+
+def test_api_mfa_trace_summary_returns_empty_when_no_mfa_subdir(client, tmp_path):
+    data_dir = tmp_path / "data"
+    trace_dir = data_dir / "full_traces" / "t1"
+    trace_dir.mkdir(parents=True)
+    r = client.get("/api/mfa-trace/t1/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body == {"events": [], "emails": []}
+
+
+def test_api_mfa_trace_summary_parses_events_and_emails(client, tmp_path):
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    mfa = trace_dir / "mfa_trace"
+    (mfa / "events.jsonl").write_text(
+        '{"ts":"2026-04-24T00:00:00Z","event":"imap_connect_ok","cycle":0}\n'
+        '\n'  # blank line must be skipped
+        '{"ts":"2026-04-24T00:00:01Z","event":"imap_login_ok","cycle":0}\n'
+        'malformed json skipped\n'
+    )
+    eml = (
+        b"From: sender@example.com\r\n"
+        b"To: u@example.com\r\n"
+        b"Subject: USCIS code\r\n"
+        b"Date: Wed, 24 Apr 2026 00:00:00 +0000\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"Your code is 123456.\r\n"
+    )
+    (mfa / "email_1.eml").write_bytes(eml)
+
+    r = client.get("/api/mfa-trace/t1/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    events = [e["event"] for e in body["events"]]
+    assert "imap_connect_ok" in events
+    assert "imap_login_ok" in events
+    # Malformed + blank lines are dropped, not propagated.
+    assert len(body["events"]) == 2
+    assert len(body["emails"]) == 1
+    em = body["emails"][0]
+    assert em["uid"] == "1"
+    assert em["subject"] == "USCIS code"
+    assert em["from"] == "sender@example.com"
+    assert "123456" in em["preview"]
+
+
+# -------- /api/mfa-trace/<dir>/email/<uid> ----------------------------
+
+def test_api_mfa_trace_email_returns_html_and_raw(client, tmp_path):
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    eml = (
+        b"From: sender@example.com\r\n"
+        b"Subject: code\r\n"
+        b"Date: Wed, 24 Apr 2026 00:00:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/alternative; boundary="BB"\r\n\r\n'
+        b"--BB\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"plain body\r\n"
+        b"--BB\r\n"
+        b"Content-Type: text/html\r\n\r\n"
+        b"<html>hi</html>\r\n"
+        b"--BB--\r\n"
+    )
+    (trace_dir / "mfa_trace" / "email_42.eml").write_bytes(eml)
+
+    r = client.get("/api/mfa-trace/t1/email/42")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["headers"]["subject"] == "code"
+    assert body["html"] == "<html>hi</html>\r\n" or "hi" in body["html"]
+    # raw is the entire message bytes decoded best-effort.
+    assert "plain body" in body["raw"]
+
+
+def test_api_mfa_trace_email_404_on_missing(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_trace(data_dir)
+    r = client.get("/api/mfa-trace/t1/email/999")
+    assert r.status_code == 404
+
+
+def test_api_mfa_trace_email_400_on_invalid_path(client):
+    r = client.get("/api/mfa-trace/../evil/email/1")
+    # flask routes return 404 for malformed paths before us; either
+    # 400 or 404 is acceptable — both mean "rejected".
+    assert r.status_code in (400, 404)
+
+
+def test_api_mfa_trace_email_500_on_unparseable(client, tmp_path):
+    """If message_from_bytes itself raises, respond 500 with parse error."""
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    (trace_dir / "mfa_trace" / "email_1.eml").write_bytes(b"garbage\xff\xfe")
+    # message_from_bytes actually tolerates almost anything, so force
+    # the parse to fail by patching.
+    from unittest.mock import patch as _patch
+    import email as _email
+    with _patch.object(_email, "message_from_bytes",
+                       side_effect=RuntimeError("unparseable")):
+        r = client.get("/api/mfa-trace/t1/email/1")
+    assert r.status_code == 500
+    assert "parse" in r.get_json()["error"]
+
+
+# -------- _extract_email_part helpers ---------------------------------
+
+def test_extract_email_part_multipart_returns_matching_part():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["Subject"] = "x"
+    msg.set_content("plain")
+    msg.add_alternative("<html>alt</html>", subtype="html")
+    html = server._extract_email_part(msg, "text/html")
+    assert html is not None
+    assert "<html>alt</html>" in html
+
+
+def test_extract_email_part_multipart_returns_none_when_missing():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("plain only")
+    assert server._extract_email_part(msg, "text/html") is None
+
+
+def test_extract_email_part_single_part_matches():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("just text")
+    text = server._extract_email_part(msg, "text/plain")
+    assert "just text" in text
+
+
+def test_extract_email_part_single_part_mismatch_returns_none():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("plain")
+    assert server._extract_email_part(msg, "text/html") is None
+
+
+def test_extract_plain_body_prefers_text_over_html():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("plain body wins")
+    msg.add_alternative("<p>html loses</p>", subtype="html")
+    body = server._extract_plain_body(msg)
+    assert "plain body wins" in body
+
+
+def test_extract_plain_body_falls_back_to_stripped_html():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_type("text/html")
+    msg.set_payload("<p>html text</p>")
+    body = server._extract_plain_body(msg)
+    assert "html text" in body
+    # Tags were stripped.
+    assert "<p>" not in body
+
+
+def test_extract_plain_body_empty_when_no_body():
+    """Message with no recognizable body part → empty string, no crash."""
+    import email as _email
+    msg = _email.message_from_bytes(b"From: x\r\n\r\n")
+    assert server._extract_plain_body(msg) == ""
+
+
+# -------- _wipe_tree_contents --------------------------------------
+
+def test_wipe_tree_contents_removes_nested_dirs_and_files(tmp_path):
+    root = tmp_path / "full_traces"
+    root.mkdir()
+    # Mix of top-level files and nested trace dirs.
+    (root / "top.txt").write_text("x")
+    nested = root / "trace1" / "mfa_trace"
+    nested.mkdir(parents=True)
+    (nested / "events.jsonl").write_text("{}")
+    (nested / "email_1.eml").write_bytes(b"raw")
+    (root / "trace1" / "trace.zip").write_bytes(b"zip")
+
+    errors: list[str] = []
+    removed = server._wipe_tree_contents(root, errors)
+
+    # Every file deleted; root itself preserved.
+    assert removed >= 4
+    assert root.exists()
+    assert not any(root.iterdir())
+    assert errors == []
+
+
+def test_wipe_tree_contents_noop_when_root_missing(tmp_path):
+    assert server._wipe_tree_contents(tmp_path / "never", []) == 0
+
+
+def test_wipe_tree_contents_collects_unlink_errors(tmp_path, monkeypatch):
+    """OSError during unlink is recorded, not raised."""
+    root = tmp_path / "full_traces"
+    root.mkdir()
+    (root / "f.txt").write_text("x")
+
+    from pathlib import Path as _P
+    orig_unlink = _P.unlink
+
+    def _bad_unlink(self, *a, **kw):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(_P, "unlink", _bad_unlink)
+    errors: list[str] = []
+    try:
+        server._wipe_tree_contents(root, errors)
+    finally:
+        monkeypatch.setattr(_P, "unlink", orig_unlink)
+    assert any("permission denied" in e for e in errors)
+
+
+# -------- /api/system-log/clear end-to-end ---------------------------
+
+def test_api_system_log_clear_without_confirmation_rejected(client):
+    r = client.post("/api/system-log/clear", json={})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "confirmation_required"
+
+
+def test_latest_location_info_returns_none_when_no_known_fields():
+    """Unwrapped inner dict without receipt_details / form / location →
+    None (line 352)."""
+    entries = [{"data": {"data": {"noise": "stuff"}}}]
+    assert server._latest_location_info(entries) is None
+
+
+def test_latest_location_info_returns_unwrapped_when_known_field_present():
+    entries = [{"data": {"data": {"form": "I-765"}}}]
+    out = server._latest_location_info(entries)
+    assert out == {"form": "I-765"}
+
+
+def test_storage_alert_email_human_size_bytes_branch(monkeypatch, tmp_path):
+    """Totals under 1KB fall through to `NNN B` (line 659)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {"uscis_mfa_email": "u@e", "uscis_mfa_app_password": "pw",
+                 "notification_email": "n@e"},
+        "cases": [],
+    }))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    captured = {}
+    import mailer as _mailer
+    monkeypatch.setattr(_mailer, "send_email",
+                        lambda **kw: captured.update(kw))
+    # Use small byte values so the GB/MB/KB branches all fall through.
+    server._send_storage_alert_email(
+        total_bytes=42, limit_bytes=50, categories=[],
+    )
+    assert "42 B" in captured["plain"]
+
+
+def test_api_full_trace_path_escape_blocked(client, tmp_path, monkeypatch):
+    """Even when the outer `_is_safe_name_part` gate passes, an attempt
+    to resolve to a path outside of full_traces/ returns path_escape."""
+    data_dir = tmp_path / "data"
+    traces = data_dir / "full_traces"
+    traces.mkdir(parents=True)
+    # Create a symlink inside that points to /etc — resolving walks
+    # across it, producing a target outside the base. (Skip test on
+    # systems that can't create symlinks.)
+    import os as _os
+    victim = traces / "t1"
+    try:
+        _os.symlink("/etc", str(victim))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    r = client.get("/api/full-trace/t1/passwd")
+    # Either path_escape (target resolved outside base) or not_found;
+    # both mean the guard worked.
+    assert r.status_code in (400, 404)
+
+
+def test_collect_storage_categories_stat_error_treated_as_zero(
+    monkeypatch, tmp_path,
+):
+    """_safe_size swallows OSError → file counted with 0 bytes (line 1610-1611)."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "485_case.json").write_text("[]")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
+
+    from pathlib import Path as _P
+    orig_stat = _P.stat
+    def _bad_stat(self, *a, **kw):
+        if self.name.endswith("_case.json"):
+            raise OSError("permission denied")
+        return orig_stat(self, *a, **kw)
+    monkeypatch.setattr(_P, "stat", _bad_stat)
+    # Must not raise.
+    cats = server._collect_storage_categories()
+    # The file is still bucketed but with 0 bytes — so it might not appear
+    # because the filter drops zero-byte buckets. Either way, no crash.
+    assert isinstance(cats, list)
+
+
+def test_api_mfa_trace_summary_rejects_unsafe_dir_name(client):
+    """`_is_safe_name_part` rejects a directly-provided bad name with
+    400 invalid_dir (line 2010)."""
+    # Flask's URL decoder will pass the single component through.
+    r = client.get("/api/mfa-trace/bad!name/summary")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_dir"
+
+
+def test_extract_email_part_single_part_charset_fallback(monkeypatch):
+    """The single-part branch's bad-codec fallback decodes with utf-8
+    (lines 2132-2133)."""
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("body")
+    msg.get_content_charset = lambda: "not-a-real-codec"
+    out = server._extract_email_part(msg, "text/plain")
+    assert out is not None
+
+
+def test_load_storage_limit_bytes_rejects_non_numeric():
+    with pytest.raises(server.ConfigError, match="not numeric"):
+        server.load_storage_limit_bytes({"storage_limit_gb": "banana"})
+
+
+def test_load_retry_policy_config_error_surfaces_as_pull_step(monkeypatch, tmp_path):
+    """When load_retry_policy raises ConfigError, the inner pull runner
+    emits pull_config_error and returns an envelope whose steps include
+    that capture (lines 922-937)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": []}))  # missing retry keys
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(
+        server, "_pull_state",
+        server.PullState(running=True, started_at="2026-04-24T00:00:00Z"),
+    )
+    # Simulate the outer function's capture scope so that sys_log events
+    # fired inside the inner function are folded into thread_captured_steps.
+    from system_log import push_capture, pop_capture
+    captured = push_capture()
+    try:
+        envelope = server._run_pull_subprocess_inner(
+            trigger="manual", thread_captured_steps=captured,
+        )
+    finally:
+        pop_capture()
+
+    assert envelope["event"] == "pull"
+    assert envelope["level"] == "error"
+    assert any(
+        s.get("event") == "pull_config_error" for s in envelope["steps"]
+    )
+
+
+def test_api_storage_config_error_returns_500(client, tmp_path):
+    """Missing storage_limit_gb → /api/storage returns 500 with ConfigError
+    message (lines 1561-1562)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    r = client.get("/api/storage")
+    assert r.status_code == 500
+    assert "storage_limit_gb" in r.get_json()["error"]
+
+
+def test_api_debug_mode_get_config_error_returns_500(client, tmp_path):
+    """/api/debug-mode GET when config has invalid type → 500."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"trace_successful_pulls": "not_a_bool"}))
+    r = client.get("/api/debug-mode")
+    assert r.status_code == 500
+
+
+def test_api_full_trace_rejects_invalid_component(client, tmp_path):
+    """Path components containing disallowed chars are rejected — first
+    the outer dir_name guard fires (invalid_dir), then subpath. Either
+    way, status is 400."""
+    r = client.get("/api/full-trace/abc!def/trace.zip")
+    assert r.status_code == 400
+    assert r.get_json()["error"] in ("invalid_dir", "invalid_component")
+
+
+def test_api_full_trace_rejects_invalid_subpath_component(client, tmp_path):
+    """Valid dir_name, invalid subpath char → invalid_component."""
+    r = client.get("/api/full-trace/t1/bad!file.zip")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_component"
+
+
+def test_api_full_trace_rejects_path_depth(client, tmp_path):
+    """subpath deeper than 2 levels → 400 invalid_path_depth."""
+    r = client.get("/api/full-trace/t1/a/b/c/d.txt")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_path_depth"
+
+
+def test_api_full_trace_mimetypes(client, tmp_path, monkeypatch):
+    """Each supported extension lands on the right Content-Type.
+    Covers lines 1944-1949."""
+    data_dir = tmp_path / "data"
+    trace_dir = data_dir / "full_traces" / "t1"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "a.json").write_text("{}")
+    (trace_dir / "b.png").write_bytes(b"\x89PNG")
+    (trace_dir / "c.bin").write_bytes(b"\x00\x01")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    r = client.get("/api/full-trace/t1/a.json")
+    assert r.content_type == "application/json"
+    r = client.get("/api/full-trace/t1/b.png")
+    assert r.content_type == "image/png"
+    r = client.get("/api/full-trace/t1/c.bin")
+    assert r.content_type == "application/octet-stream"
+
+
+def test_trace_viewer_rejects_path_traversal(client):
+    r = client.get("/trace-viewer/..%2Fetc%2Fpasswd")
+    # Either 400 (our guard) or 404 (not found).
+    assert r.status_code in (400, 404)
+
+
+def test_api_mfa_trace_email_rejects_bad_uid(client, tmp_path):
+    r = client.get("/api/mfa-trace/t1/email/bad!uid")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_path"
+
+
+def test_collect_storage_categories_buckets_storage_alert_state(
+    monkeypatch, tmp_path,
+):
+    """`.storage_alert_state.json` rolls into System log, not Other
+    (lines 1633-1635)."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / ".storage_alert_state.json").write_text('{"alerted_at":"x"}')
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
+    cats = {c["key"]: c for c in server._collect_storage_categories()}
+    assert "system_log" in cats
+    assert cats["system_log"]["bytes"] > 0
+
+
+def test_collect_storage_categories_buckets_session_state(
+    monkeypatch, tmp_path,
+):
+    """Repo-root `.uscis_session.json` rolls into System log (line 1649)."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    session_file = tmp_path / ".uscis_session.json"
+    session_file.write_text("{}")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "STORAGE_SESSION_PATH", session_file)
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
+    cats = {c["key"]: c for c in server._collect_storage_categories()}
+    assert "system_log" in cats
+
+
+def test_check_storage_limit_config_missing_emits_skip(monkeypatch, tmp_path):
+    """When load_storage_limit_bytes raises ConfigError, the check
+    emits `storage_limit_check_skipped` and returns (lines 561-568)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    steps = server._check_storage_limit_and_alert()
+    assert any(
+        s.get("event") == "storage_limit_check_skipped" for s in steps
+    )
+
+
+def test_send_storage_alert_email_swallows_mailer_failure(monkeypatch, tmp_path):
+    """mailer.send_email raising → alert step records storage_alert_email_failed,
+    does not propagate (lines 619-621 via _check_storage_limit)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_mfa_email": "u@example.com",
+            "uscis_mfa_app_password": "pw",
+        },
+        "cases": [], "storage_limit_gb": server.STORAGE_MIN_GB,
+    }))
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    # Seed storage over the limit.
+    (data_dir / "big.json").write_bytes(b"x" * int(0.02 * 1024**3))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    import mailer as _mailer
+    monkeypatch.setattr(
+        _mailer, "send_email",
+        MagicMock(side_effect=RuntimeError("smtp down")),
+    )
+    steps = server._check_storage_limit_and_alert()
+    event_types = [s["event"] for s in steps]
+    assert "storage_alert_email_failed" in event_types
+
+
+def test_extract_plain_body_decode_failure_falls_back(monkeypatch):
+    """_extract_email_part's charset-decode failure falls back to
+    utf-8 with replace errors (lines 2122-2124 / 2132-2133)."""
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("body")
+    # Force .get_content_charset() to return a bad codec name so the
+    # first decode raises — covering the single-part fallback branch.
+    orig = msg.get_content_charset
+    msg.get_content_charset = lambda: "not-a-real-codec"
+    out = server._extract_email_part(msg, "text/plain")
+    # Fallback decode must not raise.
+    assert out is not None
+
+
+def test_api_mfa_trace_summary_events_read_error_returns_500(
+    client, tmp_path, monkeypatch,
+):
+    """Unreadable events.jsonl → 500 with read error (lines 2030-2031)."""
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    (trace_dir / "mfa_trace" / "events.jsonl").write_text("{}")
+
+    from pathlib import Path as _P
+    orig_read = _P.read_text
+    def _bad(self, *a, **kw):
+        if self.name == "events.jsonl":
+            raise OSError("disk gone")
+        return orig_read(self, *a, **kw)
+    monkeypatch.setattr(_P, "read_text", _bad)
+
+    r = client.get("/api/mfa-trace/t1/summary")
+    assert r.status_code == 500
+
+
+def test_api_system_log_clear_wipes_log_and_traces(client, tmp_path, monkeypatch):
+    import system_log
+    log_path = tmp_path / "system_log.json"
+    monkeypatch.setattr(system_log, "LOG_PATH", log_path)
+    system_log.log("dummy", source="test")
+
+    data_dir = tmp_path / "data"
+    (data_dir / "full_traces" / "t1" / "mfa_trace").mkdir(parents=True)
+    (data_dir / "full_traces" / "t1" / "trace.zip").write_bytes(b"z")
+    (data_dir / "full_traces" / "t1" / "mfa_trace" / "events.jsonl").write_text("{}")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    r = client.post("/api/system-log/clear", json={"confirm": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["tracesRemoved"] >= 2
+    # Traces dir is emptied, but the directory itself persists.
+    assert (data_dir / "full_traces").exists()
+    assert not any((data_dir / "full_traces").iterdir())

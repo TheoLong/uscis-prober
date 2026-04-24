@@ -265,3 +265,126 @@ def test_open_worker_tab_dashboard_timeout_emits_sys_log(syslog_to_tmp):
     assert len(events) == 1
     assert events[0]["phase"] == "dashboard_goto"
     assert "dashboard too slow" in events[0]["error"]
+
+
+# -------- open_worker_tab additional failure branches ------------------
+
+def test_open_worker_tab_new_page_raises_emits_sys_log(syslog_to_tmp):
+    """context.new_page() raising (browser already closed, etc.) →
+    api_worker_tab_failed phase=new_page (lines 82-88)."""
+    context = MagicMock()
+    context.new_page.side_effect = RuntimeError("browser gone")
+    with pytest.raises(RuntimeError):
+        open_worker_tab(context)
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_worker_tab_failed"]
+    assert len(events) == 1
+    assert events[0]["phase"] == "new_page"
+    assert "browser gone" in events[0]["error"]
+
+
+def test_open_worker_tab_dashboard_playwright_error_emits_sys_log(syslog_to_tmp):
+    """net::ERR_* from the dashboard goto is PlaywrightError, not
+    TimeoutError (lines 100-107)."""
+    from playwright.sync_api import Error as PlaywrightError
+    context = MagicMock()
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightError("net::ERR_CONNECTION_RESET")
+    context.new_page.return_value = tab
+    with pytest.raises(PlaywrightError):
+        open_worker_tab(context)
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_worker_tab_failed"]
+    assert len(events) == 1
+    assert events[0]["phase"] == "dashboard_goto"
+    assert "ERR_CONNECTION_RESET" in events[0]["error"]
+
+
+# -------- _parse_case_response body-read failure -----------------------
+
+def test_parse_case_response_body_read_failure_emits_sys_log(syslog_to_tmp):
+    """tab.evaluate throwing (page crashed, JS eval disabled, etc.) →
+    api_fetch_body_read_failed + ApiError (lines 123-129)."""
+    tab = MagicMock()
+    tab.evaluate.side_effect = RuntimeError("page crashed")
+    with pytest.raises(ApiError) as exc:
+        _parse_case_response(tab, "IOE1", 200)
+    assert "body read failed" in str(exc.value)
+    events = [
+        e for e in syslog_to_tmp() if e["event"] == "api_fetch_body_read_failed"
+    ]
+    assert len(events) == 1
+
+
+# -------- fetch_case PlaywrightTimeout branch --------------------------
+
+def test_fetch_case_timeout_emits_sys_log(syslog_to_tmp):
+    """Timeout on the case endpoint navigation (lines 173-179)."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightTimeout("case endpoint slow")
+    with pytest.raises(PlaywrightTimeout):
+        fetch_case(tab, "IOE1")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_nav_failed"]
+    assert len(events) == 1
+    assert "PlaywrightTimeout" in events[0]["error"]
+
+
+# -------- fetch_location additional failure branches -------------------
+
+def test_fetch_location_timeout_emits_sys_log(syslog_to_tmp):
+    """Timeout on the location endpoint (lines 211-217)."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightTimeout("location slow")
+    with pytest.raises(PlaywrightTimeout):
+        fetch_location(tab, "IOE1")
+    events = [
+        e for e in syslog_to_tmp() if e["event"] == "api_location_nav_failed"
+    ]
+    assert len(events) == 1
+    assert "PlaywrightTimeout" in events[0]["error"]
+
+
+def test_fetch_location_body_read_failure_emits_sys_log(syslog_to_tmp):
+    """tab.evaluate throwing on the location endpoint (lines 230-236)."""
+    tab = MagicMock()
+    tab.url = "https://my.uscis.gov/x"
+    response = MagicMock()
+    response.status = 200
+    tab.goto.return_value = response
+    tab.evaluate.side_effect = RuntimeError("page crashed")
+    with pytest.raises(ApiError) as exc:
+        fetch_location(tab, "IOE1")
+    assert "body read failed" in str(exc.value)
+    events = [
+        e for e in syslog_to_tmp()
+        if e["event"] == "api_location_body_read_failed"
+    ]
+    assert len(events) == 1
+
+
+# -------- fetch_case_in_new_tab failure branches ----------------------
+
+def test_fetch_case_in_new_tab_new_page_raises_emits_sys_log(syslog_to_tmp):
+    """context.new_page() raising (lines 280-286)."""
+    context = MagicMock()
+    context.new_page.side_effect = RuntimeError("browser gone")
+    with pytest.raises(RuntimeError):
+        fetch_case_in_new_tab(context, "IOE1", "I-485")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_nav_failed"]
+    assert len(events) == 1
+    assert events[0]["phase"] == "new_tab"
+
+
+def test_fetch_case_in_new_tab_dashboard_failure_emits_sys_log(syslog_to_tmp):
+    """Dashboard goto failing (timeout OR PlaywrightError) → single
+    api_fetch_nav_failed event with phase=dashboard_goto (lines 290-297)."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    context = MagicMock()
+    tab = _tab()
+    tab.goto.side_effect = PlaywrightTimeout("dashboard slow")
+    context.new_page.return_value = tab
+    with pytest.raises(PlaywrightTimeout):
+        fetch_case_in_new_tab(context, "IOE1", "I-485")
+    events = [e for e in syslog_to_tmp() if e["event"] == "api_fetch_nav_failed"]
+    assert len(events) == 1
+    assert events[0]["phase"] == "dashboard_goto"

@@ -125,6 +125,9 @@ def _stub_server_config(monkeypatch, tmp_path, cases=None, auth=None):
     cfg_path.write_text(json.dumps({
         "cases": cases if cases is not None else [],
         "auth": auth or {},
+        "retry": 0,
+        "retry_wait_seconds": 0,
+        "storage_limit_gb": 1.0,
     }))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
@@ -591,7 +594,7 @@ def test_api_system_log_returns_events(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -612,7 +615,7 @@ def test_api_system_log_respects_limit(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(20):
@@ -634,7 +637,7 @@ def test_api_system_log_paginates_with_offset(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(888):
@@ -660,7 +663,7 @@ def test_api_system_log_offset_past_end_returns_empty_slice(monkeypatch, tmp_pat
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for _ in range(10):
@@ -676,7 +679,7 @@ def test_api_system_log_clamps_limit_to_500(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(700):
@@ -693,7 +696,7 @@ def test_api_system_log_default_limit_is_page_size(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for _ in range(250):
@@ -710,7 +713,7 @@ def test_api_system_log_negative_offset_clamped_to_zero(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(5):
@@ -736,7 +739,7 @@ def test_api_system_log_ignores_bad_limit(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     system_log.log("tick")
@@ -753,7 +756,7 @@ def test_api_system_log_clear_wipes_and_audits(monkeypatch, tmp_path):
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -785,7 +788,7 @@ def test_api_system_log_clear_rejects_without_confirm(monkeypatch, tmp_path):
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -823,7 +826,7 @@ def test_api_system_log_clear_on_empty_log_is_noop_plus_audit(monkeypatch, tmp_p
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -857,7 +860,7 @@ def test_api_export_excludes_system_log(monkeypatch, tmp_path):
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -875,14 +878,28 @@ def test_api_export_excludes_system_log(monkeypatch, tmp_path):
 
 # -------- dedicated /api/system-log/export ---------------------------
 
-def test_api_system_log_export_returns_json_attachment(monkeypatch, tmp_path):
+def test_api_system_log_export_returns_zip_with_log_and_traces(monkeypatch, tmp_path):
+    """Export now bundles the system log + every persisted trace
+    directory into a single zip. The log lands at `system_log.json`
+    at the root; traces land under `full_traces/<dir>/...` preserving
+    layout."""
     import server
+    import zipfile
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    # Seed a fake trace directory.
+    trace_dir = data_dir / "full_traces" / "20260424T000000Z_fail_scheduled"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.zip").write_bytes(b"PK\x03\x04FAKE")
+    (trace_dir / "mfa_trace").mkdir()
+    (trace_dir / "mfa_trace" / "events.jsonl").write_text(
+        '{"event": "imap_ok"}\n'
+    )
 
     system_log.log("server_startup", hours=[7, 14, 20])
     system_log.log("pull_finished", exit_code=0)
@@ -890,30 +907,39 @@ def test_api_system_log_export_returns_json_attachment(monkeypatch, tmp_path):
     with server.app.test_client() as c:
         r = c.get("/api/system-log/export")
         assert r.status_code == 200
-        assert r.mimetype == "application/json"
+        assert r.mimetype == "application/zip"
         disp = r.headers.get("Content-Disposition", "")
         assert disp.startswith("attachment;")
-        assert "uscis-system-log-" in disp
-        assert disp.endswith('.json"')
+        assert "uscis-diagnostics-" in disp
+        assert disp.endswith('.zip"')
 
-        body = json.loads(r.data)
-        assert isinstance(body, list)
-        event_names = [e["event"] for e in body]
-        assert "server_startup" in event_names
-        assert "pull_finished" in event_names
+        import io
+        with zipfile.ZipFile(io.BytesIO(r.data)) as zf:
+            names = set(zf.namelist())
+        assert "system_log.json" in names
+        # Trace files bundled under full_traces/<dir>/...
+        assert any(n.startswith("full_traces/") and n.endswith("trace.zip")
+                   for n in names)
+        assert any(n.endswith("mfa_trace/events.jsonl") for n in names)
 
 
-def test_api_system_log_export_on_empty_log_is_empty_array(monkeypatch, tmp_path):
+def test_api_system_log_export_on_empty_log_is_zip_with_empty_array(monkeypatch, tmp_path):
+    """Empty log → zip still returned, containing just an empty
+    `system_log.json` and no trace dirs (data/full_traces missing)."""
     import server
+    import zipfile
+    import io
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
-    # Autouse fixture already ensured log is empty.
     with server.app.test_client() as c:
         r = c.get("/api/system-log/export")
         assert r.status_code == 200
-        assert json.loads(r.data) == []
+        assert r.mimetype == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(r.data)) as zf:
+            contents = zf.read("system_log.json").decode()
+        assert json.loads(contents) == []
