@@ -1262,10 +1262,16 @@ function _renderFlatSystemLogRow(entry) {
 }
 
 function _renderNestedSystemLogRow(entry) {
-  // Top-level tone takes the worst severity between the envelope itself
-  // and every nested step, so a pull that looks info-level but contains
-  // an error step still visibly surfaces as red at a glance.
-  const topLevel = _worstLevelAcross([entry, ...entry.steps]);
+  // Trust the envelope's `level` field directly — server-side
+  // computes it with the authoritative three-tier rule (error / warning
+  // / info, see _run_pull_subprocess_inner in server.py). Previously
+  // we re-aggregated `_worstLevelAcross([entry, ...steps])` on the
+  // client, which ignored the server's downgrade of "recovered retry"
+  // from error → warning (an error-level step inside a zero-exit pull
+  // would force the pill red). That made the three-tier rule
+  // unreachable — any env with error steps tipped to red regardless of
+  // operation outcome. Client just renders what the server decided.
+  const topLevel = entry.level || "info";
   // A pull that completed CLEANLY — no errors, no warnings, exit 0, not
   // timed out — gets the green "ok" tone so the operator can distinguish
   // "the pull happened and everything worked" from a merely informational
