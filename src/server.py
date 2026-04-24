@@ -516,14 +516,23 @@ def _notify_recipient(auth: dict) -> str | None:
 # duplicate `storage_limit_exceeded` events (and send duplicate
 # emails) on every pull while usage remains above the limit. Once
 # usage drops back below 90 % of the limit the dedup is re-armed.
-STORAGE_ALERT_STATE_PATH = DATA_DIR / ".storage_alert_state.json"
+#
+# The path is computed lazily (not captured at import time) so
+# tests that monkeypatch DATA_DIR redirect the dedup state too,
+# and so a CI runner without a seeded data/ dir doesn't silently
+# fail the state write and re-fire the alert.
 STORAGE_REARM_RATIO = 0.9
+
+
+def _storage_alert_state_path() -> Path:
+    return DATA_DIR / ".storage_alert_state.json"
 
 
 def _read_storage_alert_state() -> dict:
     try:
-        if STORAGE_ALERT_STATE_PATH.exists():
-            return json.loads(STORAGE_ALERT_STATE_PATH.read_text())
+        path = _storage_alert_state_path()
+        if path.exists():
+            return json.loads(path.read_text())
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("storage_alert_state read failed: %s", e)
     return {}
@@ -532,9 +541,10 @@ def _read_storage_alert_state() -> dict:
 def _write_storage_alert_state(state: dict) -> None:
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = STORAGE_ALERT_STATE_PATH.with_suffix(".tmp")
+        path = _storage_alert_state_path()
+        tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state))
-        os.replace(tmp, STORAGE_ALERT_STATE_PATH)
+        os.replace(tmp, path)
     except Exception as e:  # pragma: no cover — best-effort
         logger.warning("storage_alert_state write failed: %s", e)
 
