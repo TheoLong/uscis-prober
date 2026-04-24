@@ -1009,10 +1009,21 @@ def _run_pull_subprocess_inner(
             trace_on_success = load_trace_successful_pulls()
         except ConfigError:
             trace_on_success = False
+        # Forensic-retention rule: once any attempt in this pull has
+        # failed, the whole pull envelope is flagged error at the top
+        # level. Every attempt that belongs to such a pull must keep
+        # its trace — including the retry that finally succeeded —
+        # so the operator can diff "what USCIS returned on attempt 1"
+        # vs "what USCIS returned on attempt 2" side-by-side in the
+        # trace viewer. Without this, a successful retry discards
+        # exactly the evidence that would explain the failure.
+        force_trace_for_retry = attempt_num > 1
         child_env = {
             **os.environ,
             _SYSLOG_JSONL_ENV: "1",
-            "USCIS_TRACE_ON_SUCCESS": "1" if trace_on_success else "0",
+            "USCIS_TRACE_ON_SUCCESS": (
+                "1" if (trace_on_success or force_trace_for_retry) else "0"
+            ),
             # Trigger label lands in the trace directory name so an
             # operator can tell at a glance whether a saved trace came
             # from a scheduled pull vs a manual click.

@@ -1334,12 +1334,15 @@ function _renderNestedSystemLogRow(entry) {
       `</div>`
     : "";
 
-  // Detect a persisted trace via the `trace_saved` step the
-  // subprocess emits after writing trace.zip + mfa_trace/.
-  const traceSaved = entry.steps.find(
-    s => s && s.event === "trace_saved"
+  // Detect persisted trace(s) via the `trace_saved` step(s) the
+  // subprocess emits after writing trace.zip + mfa_trace/. There can
+  // be MORE than one when the pull retried — each attempt that saved
+  // its trace has its own step with its own `dir`. We must render a
+  // button pair per trace so the operator can open each attempt's
+  // zip and MFA events independently.
+  const tracesSaved = (entry.steps || []).filter(
+    s => s && s.event === "trace_saved" && s.dir
   );
-  const hasTrace = Boolean(traceSaved && traceSaved.dir);
 
   const disclosureId = `syslog-steps-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1348,7 +1351,9 @@ function _renderNestedSystemLogRow(entry) {
   // header row a uniform 5-column grid (pill | source | event | ts)
   // so every envelope aligns identically regardless of how much
   // per-attempt summary text there is.
-  const traceButtonsHtml = hasTrace ? _renderTraceButtons(traceSaved) : "";
+  const traceButtonsHtml = tracesSaved.length
+    ? _renderTraceButtonRows(tracesSaved)
+    : "";
   const contentHtml = (summaryLine || traceButtonsHtml)
     ? `<div class="syslog-envelope-content">` +
         (summaryLine || "") +
@@ -1446,20 +1451,46 @@ function _detailKvHtml(k, v) {
   );
 }
 
-// Build the open-trace button cluster rendered at the right edge of a
-// pull envelope header when the pull persisted a trace. Primary
-// button opens the self-hosted Playwright viewer (served from our
-// origin so it auto-loads without a file-select prompt); secondary
-// button opens an in-page modal with the MFA events + raw emails.
-function _renderTraceButtons(step) {
+// Render one row of trace buttons per preserved attempt. A pull that
+// retried and preserved both attempts produces two rows; a single-
+// attempt pull produces one row without the attempt label.
+//
+// Backend contract: each attempt's subprocess emits its own
+// `trace_saved` step. The step's `attempt` field (added by server.py
+// when folding subprocess events) tells us which attempt it belongs
+// to, and `outcome` tells us whether that attempt was fail/ok — we
+// surface both on the label so the operator can tell at a glance
+// which button opens the failed trace vs the successful retry.
+function _renderTraceButtonRows(steps) {
+  // Sort by attempt number so "Attempt 1" is always above "Attempt 2".
+  // Fall back to timestamp if the attempt field is missing.
+  const sorted = [...steps].sort((a, b) => {
+    const an = a.attempt ?? 999;
+    const bn = b.attempt ?? 999;
+    if (an !== bn) return an - bn;
+    return (a.ts || "").localeCompare(b.ts || "");
+  });
+  const multi = sorted.length > 1;
+  const rows = sorted.map(s => _renderTraceButtonRow(s, multi));
+  return `<div class="trace-open-rows">${rows.join("")}</div>`;
+}
+
+function _renderTraceButtonRow(step, showAttemptLabel) {
   const dir = step.dir;
   if (!dir) return "";
-  // Self-hosted viewer. Same-origin means no CORS/mixed-content
-  // issues and the viewer auto-fetches the trace zip immediately.
-  const traceUrl =
-    `/api/full-trace/${encodeURIComponent(dir)}/trace.zip`;
+  const traceUrl = `/api/full-trace/${encodeURIComponent(dir)}/trace.zip`;
   const viewerUrl =
     `/trace-viewer/index.html?trace=${encodeURIComponent(traceUrl)}`;
+  const attemptLabel = showAttemptLabel
+    ? `<span class="trace-attempt-label">` +
+        `Attempt ${escapeHtml(String(step.attempt ?? "?"))}` +
+        (step.outcome
+          ? ` <span class="trace-outcome trace-outcome-${escapeHtml(step.outcome)}">` +
+              `${escapeHtml(step.outcome)}` +
+            `</span>`
+          : "") +
+      `</span>`
+    : "";
   const buttons = [
     `<a class="trace-open-btn" href="${escapeHtml(viewerUrl)}" ` +
         `target="_blank" rel="noopener noreferrer" ` +
@@ -1476,7 +1507,12 @@ function _renderTraceButtons(step) {
       `</button>`,
     );
   }
-  return `<span class="trace-open-group">${buttons.join("")}</span>`;
+  return (
+    `<div class="trace-open-row">` +
+      attemptLabel +
+      `<span class="trace-open-group">${buttons.join("")}</span>` +
+    `</div>`
+  );
 }
 
 // Delegate click-handler for the "MFA events" buttons — opens the

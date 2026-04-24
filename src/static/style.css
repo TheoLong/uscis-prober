@@ -1720,6 +1720,45 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   flex: 0 0 auto;
   align-self: center;
 }
+/* Per-attempt trace rows. A single-attempt pull renders one row with no
+ * attempt label; a multi-attempt pull renders one row per preserved
+ * attempt so the operator can open each trace independently. */
+.trace-open-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+.trace-open-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.trace-attempt-label {
+  font-size: 0.72rem;
+  color: #374151;
+  font-weight: 600;
+  white-space: nowrap;
+  min-width: 96px;
+}
+.trace-outcome {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  margin-left: 4px;
+  text-transform: uppercase;
+}
+.trace-outcome-ok {
+  background: #dcfce7;
+  color: #166534;
+}
+.trace-outcome-fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
 .trace-open-btn {
   display: inline-flex;
   align-items: center;

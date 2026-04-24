@@ -667,6 +667,46 @@ def test_run_pull_retries_on_auth_failure(monkeypatch, tmp_path):
     assert server._pull_state.exit_code == 0
 
 
+def test_run_pull_forces_trace_on_retry_even_when_debug_off(monkeypatch, tmp_path):
+    """Forensic-retention rule: if any attempt fails, the whole pull
+    envelope is flagged error at top level. Every attempt under a
+    flagged pull must preserve its trace so a "retry succeeded after
+    failure" scenario keeps both traces side-by-side.
+
+    Observable: the FIRST attempt's child env has USCIS_TRACE_ON_SUCCESS=0
+    (normal rule — only fail paths auto-preserve). The SECOND attempt,
+    because we only get here after a prior failure, forces it to 1
+    regardless of debug mode."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    # Debug mode explicitly OFF — the flag must still flip on retry.
+    cfg = json.loads(cfg_path.read_text())
+    cfg["trace_successful_pulls"] = False
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    captured_envs: list[dict] = []
+
+    def _run(cmd, **kw):
+        captured_envs.append(dict(kw.get("env") or {}))
+        if len(captured_envs) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(captured_envs) == 2
+    # Attempt 1: debug off, no prior failure → discard trace on success.
+    assert captured_envs[0]["USCIS_TRACE_ON_SUCCESS"] == "0"
+    # Attempt 2: previous attempt failed → forced on, preserves trace
+    # even if attempt 2 itself succeeds.
+    assert captured_envs[1]["USCIS_TRACE_ON_SUCCESS"] == "1"
+
+
 def test_run_pull_does_not_retry_non_auth_failure(monkeypatch, tmp_path):
     """A non-auth failure (e.g. case fetch 500 without an auth_failed
     marker) must NOT retry — retry is an anti-bot recovery tool, not a
