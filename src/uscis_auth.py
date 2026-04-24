@@ -6,8 +6,11 @@ Only call `ensure_authenticated` when you actually need to log in. It is the
 *only* function in the project that will submit credentials or trigger an
 MFA email. All other code paths must treat an invalid session as an error.
 
-Session state is persisted to `.uscis_session.json` via Playwright's
-storage_state mechanism, and is reused on subsequent runs.
+Session policy: `cmd_run` (the pull runner) wipes `.uscis_session.json`
+before every pull and never persists it at the end, so every scheduled
+or manual pull exercises the full OIDC + MFA flow from zero. The CLI-
+only `cmd_login` and `cmd_extract` subcommands still use the file as
+a debug/inspection aid (login once, inspect repeatedly).
 
 Diagnostics
 -----------
@@ -648,10 +651,12 @@ def _do_login(
       * `auth_bridge_result`       — post-landing dashboard bridge
       * `login_result`             — terminal ok/failed summary
 
-    On any warning/error path the trace buffer is flushed to
-    `data/full_traces/<ts>_fail_.../` — one gzipped HTML + PNG per
-    phase including an `at_failure_<step>` entry captured right
-    before the failure event is raised.
+    On any failure path `collector.should_keep` is set to True so the
+    caller (cmd_run) persists the preserved trace to
+    `data/full_traces/<ts>_fail_.../`. That directory contains
+    Playwright's native `trace.zip` (DOM + network + screenshots +
+    console) plus the `mfa_trace/` sidecar with wire-level IMAP
+    events and archived emails.
     """
     _clear_stored_session(context)
     sys_log("login_started", source="auth", target=LOGIN_URL)
@@ -708,7 +713,7 @@ def _do_login(
                 outcome="timeout",
                 **snap,
             )
-            raise  # outer handler will capture an at_failure_<step> phase
+            raise  # outer handler flips collector.should_keep to preserve trace
 
         # ---- Step: fill credentials + TOS ------------------------------
         step = LOGIN_STEP_FILL_CREDENTIALS
@@ -898,10 +903,10 @@ def _handle_mfa_if_present(
         snap = _page_snapshot(page)
         if _is_on_signin_url(url):
             # The credential POST was silently refused — we never
-            # advanced off the public sign-in page. The outer
-            # _do_login handler will capture an `at_failure_<step>`
-            # phase into the full trace so the screenshot of this
-            # exact moment is preserved.
+            # advanced off the public sign-in page. Playwright tracing
+            # is still recording (the context-level trace.start is live
+            # for the entire pull), so the DOM + screenshot of this
+            # exact moment is preserved inside the saved trace.zip.
             sys_log(
                 "login_mfa_result", level="error", source="auth",
                 outcome="submit_did_not_advance",

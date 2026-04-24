@@ -121,6 +121,21 @@ get the credentials your email provider needs.
   fetch, location fetch, snapshot append, notify) nested as `steps[]`.
   Top-level tone = worst-child severity, so an otherwise green pull
   containing a single failed location fetch still shows up as yellow.
+- **Every pull is a cold start.** `.uscis_session.json` is wiped at
+  the start of every pull and never persisted at the end, so every
+  scheduled or manual pull exercises the full OIDC + MFA flow. Login
+  regressions surface at the next scheduled fire, not days later when
+  a stale cookie expires.
+- **Full Playwright trace on failure (or in debug mode).** Every pull
+  records a native Playwright `trace.zip` (DOM snapshots, network,
+  console, screenshots) in memory. On failure — or on every pull when
+  you flip the Debug-mode pill in the topbar — the zip is written to
+  `data/full_traces/<ts>_fail_.../` alongside an `mfa_trace/` sidecar
+  containing wire-level IMAP events (`events.jsonl`) and every raw
+  email considered (`email_<uid>.eml`). Click **Open trace** on any
+  pull row to replay it in the self-hosted Playwright viewer; click
+  **MFA events** for a modal that decodes the sidecar into a
+  filterable table + rendered email previews.
 - **Build version visible in the dashboard.** Top-left chip reads
   e.g. `2026-04-23.0032` — the commit's authored time in UTC. String
   comparison between two labels matches chronological order, so you
@@ -275,7 +290,10 @@ Fill in `config.json`:
     "uscis_mfa_app_password": "16charapppassword",
     "optional_access_code":   "",
     "notification_email":     ""
-  }
+  },
+  "retry": 2,
+  "retry_wait_seconds": 180,
+  "storage_limit_gb": 1.0
 }
 ```
 
@@ -286,8 +304,12 @@ Fill in `config.json`:
 | `auth.uscis_email` / `uscis_password` | yes | `my.uscis.gov` login. |
 | `auth.uscis_mfa_email` | yes | Inbox where USCIS MFA emails land. Any major provider. |
 | `auth.uscis_mfa_app_password` | yes | App password for that inbox (see Step 3). |
+| `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). Start with `2`. Only auth failures retry; timeouts and config errors do not. |
+| `retry_wait_seconds` | yes | Wait between retry attempts, in seconds (int, ≥0). `180` is a good default — long enough for a transient anti-bot block to clear. |
+| `storage_limit_gb` | yes | Disk budget across `data/` + session/config files. Storage bar in the System tab tracks it; one alert email fires when crossed. Legal range 0.1–10.0. |
 | `auth.optional_access_code` | no | Recommended when deployed remotely. When non-empty, dashboard requires this code to view. |
 | `auth.notification_email` | no | Override recipient for diff-update emails. Defaults to `uscis_mfa_email`. |
+| `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace (useful for verifying capture against a green pull). Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
 
 Verify:
 
@@ -319,8 +341,10 @@ python src/session_fetch.py login
 ```
 
 Headless Chromium signs in to `my.uscis.gov`, polls your inbox for the
-MFA code, and saves the session to `.uscis_session.json`. Subsequent
-pulls reuse that session and skip MFA for ~24 h.
+MFA code, and saves the session to `.uscis_session.json`. This file is
+used only by the `extract` CLI subcommand below for debugging —
+scheduled and manual pulls (`run` / `/api/pull`) deliberately wipe it
+before each pull so every run exercises the full OIDC + MFA flow.
 
 ```bash
 ls -la .uscis_session.json        # must exist and be non-empty
@@ -336,6 +360,12 @@ python src/session_fetch.py extract
 iterate with without burning more MFA codes. Success writes two rows
 per case — one to `data/{formNum}_case.json` (case API), one to
 `data/{formNum}_location.json` (location API).
+
+> Note: `extract` is a debug / inspection tool. The production pull
+> path is `python src/session_fetch.py run` (called by `/api/pull` and
+> the scheduler), which starts from a clean slate every time — the
+> saved `.uscis_session.json` is wiped at the start of `run` and not
+> re-created at the end.
 
 ```bash
 ls data/*.json                    # two files per form number + system_log.json
@@ -355,10 +385,12 @@ python src/server.py
  * Running on http://127.0.0.1:8080
 ```
 
-Open <http://127.0.0.1:8080>. Cases render with Overview / Timeline /
-Changes / Raw JSON tabs, plus a global Updates feed. Pulls run on the
-schedule; click **Pull update** for an ad-hoc probe; **Export data**
-downloads the full zip archive.
+Open <http://127.0.0.1:8080>. Cases render with Overview / Changes /
+Raw JSON tabs, plus a global Updates feed and a System tab (storage
+breakdown + paginated event log). Pulls run on the schedule; click
+**Pull update** for an ad-hoc probe; **Export data** downloads the
+full zip archive; **Export log** (inside System) downloads the
+system log + every preserved trace.
 
 ### Troubleshooting
 
@@ -539,12 +571,18 @@ Beyond the snapshot/diff core:
 
 - **Dashboard views.** Per-case Overview (with the Current Location
   row), Changes (merged case + location diffs), Raw JSON (Case API /
-  Location API sub-tabs); a global Updates feed and paginated System
+  Location API sub-tabs); a global Updates feed; a System tab with a
+  stacked storage bar (per case + system log) and a paginated system
   log; live countdown to the next scheduled pull; build-version chip
-  in the topbar.
+  in the topbar; Debug-mode pill next to it that flips
+  `trace_successful_pulls` live (next pull preserves its trace
+  regardless of outcome).
 - **Login isolation.** `uscis_auth.py` is the only module that burns an
   MFA code. `extract` refuses to log in — safe for iterating on
-  scraping logic without spamming your inbox.
+  scraping logic without spamming your inbox. Fresh-session policy in
+  `cmd_run` means scheduled and manual pulls always exercise the full
+  login + MFA flow; the saved session file is *only* used by the
+  `extract` debug subcommand.
 - **Comprehensive failure logging.** Every exit/failure point in
   every module emits a categorised `sys_log` event (SMTP stage-by-
   stage, Flask secret I/O, scheduler dispatch, pull thread crashes,
@@ -573,9 +611,17 @@ One file. Gitignored. Minimum viable shape:
     "uscis_password":         "…",
     "uscis_mfa_email":        "…",
     "uscis_mfa_app_password": "…"
-  }
+  },
+  "retry": 2,
+  "retry_wait_seconds": 180,
+  "storage_limit_gb": 1.0
 }
 ```
+
+Required keys: `cases`, `auth` (with all four credential fields),
+`retry`, `retry_wait_seconds`, `storage_limit_gb`. Optional runtime
+fields — `trace_successful_pulls` (bool), `optional_access_code`,
+`notification_email` — default sensibly when absent.
 
 See Setup → Configure for the full field table with optional overrides.
 

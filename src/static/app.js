@@ -1117,12 +1117,15 @@ function openClearLogDialog() {
         `<p><strong>This is irreversible.</strong> Clearing wipes:</p>` +
         `<ul class="modal-list">` +
           `<li>Every entry in <code>data/system_log.json</code></li>` +
-          `<li>Every full-pull trace under <code>data/full_traces/</code> ` +
-              `(HTML + PNG per phase)</li>` +
+          `<li>Every preserved pull trace under <code>data/full_traces/</code> ` +
+              `— each one contains a Playwright <code>trace.zip</code> ` +
+              `(DOM + network + screenshots) plus the <code>mfa_trace/</code> ` +
+              `sidecar (<code>events.jsonl</code> + archived ` +
+              `<code>.eml</code>s)</li>` +
         `</ul>` +
         `<p>The log is the only record of scheduler fires, pull failures, ` +
         `and notification history. Traces are the only forensic evidence ` +
-        `of what USCIS actually showed at each login phase.</p>` +
+        `of what USCIS and Gmail returned on each pull.</p>` +
         `<p class="modal-hint">If you might need the log later, click ` +
         `<em>Export log</em> first.</p>` +
       `</div>` +
@@ -1443,11 +1446,6 @@ function _detailKvHtml(k, v) {
   );
 }
 
-// Build the inline trace gallery for a pull envelope. Reads the
-// `auth_trace_saved` steps to discover the phase list + their file
-// names, then renders one card per phase with a clickable PNG
-// thumbnail and HTML link. Returns null when the pull produced no
-// trace (routine successful pull in non-debug mode).
 // Build the open-trace button cluster rendered at the right edge of a
 // pull envelope header when the pull persisted a trace. Primary
 // button opens the self-hosted Playwright viewer (served from our

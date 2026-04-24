@@ -22,10 +22,11 @@
              commit date, and server boot time. -->
         <a id="version-chip" class="version-chip" href="#" title="" hidden></a>
         <!-- Debug-mode pill: toggles config.trace_successful_pulls via
-             /api/debug-mode. When ON, every pull writes full HTML + PNG
-             traces to data/full_traces/ so the operator can verify the
-             capture system against a healthy pull. Intentionally loud
-             when active so we don't forget to turn it off. -->
+             /api/debug-mode. When ON, every pull preserves its
+             Playwright trace.zip + mfa_trace/ sidecar under
+             data/full_traces/ so the operator can verify the capture
+             system against a healthy pull. Intentionally loud when
+             active so we don't forget to turn it off. -->
         <button id="debug-mode-pill" class="debug-pill" type="button"
                 role="switch" aria-checked="false"
                 title="Off: traces only on failure. On: traces on every pull (disk-heavier).">
