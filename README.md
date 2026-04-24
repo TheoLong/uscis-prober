@@ -137,11 +137,13 @@ get the credentials your email provider needs.
   **MFA events** for a modal that decodes the sidecar into a
   filterable table + rendered email previews.
 - **Build version visible in the dashboard.** Top-left chip reads
-  e.g. `2026-04-23.0032` — the commit's authored time in UTC. String
-  comparison between two labels matches chronological order, so you
-  can tell at a glance whether what you just pushed has landed on the
-  VM. `GET /api/version` returns the same info unauthenticated for
-  deploy-verification scripts.
+  e.g. `2026-04-24T17:28:04 EDT` — the commit's authored time rendered
+  in *your* browser's timezone. Lexicographic comparison between two
+  chip labels matches chronological order on the date+time portion,
+  so you can tell at a glance whether what you just pushed has landed
+  on the VM. The server's `/api/version` response keeps the sortable
+  UTC key (`2026-04-24.2128`) so external deploy-verification scripts
+  have a stable, timezone-free field to compare.
 - **One-click export.** `/api/export` (or the "Export data" button)
   bundles every `data/*_case.json`, every `data/*_location.json`, and
   a manifest into a timestamped zip. Useful for sharing with a lawyer

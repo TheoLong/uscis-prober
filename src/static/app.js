@@ -234,14 +234,20 @@ function updateVersionChip(version) {
   const prev = state.versionSha;
   state.versionSha = sha;
 
-  // Primary chip text: the date-time label (`2026-04-22.2032`) if we
-  // have it. Lexicographic comparison between two labels tells the
-  // operator which is newer — e.g. `2026-04-23.1105` > `2026-04-22.2032`.
-  // Falls back to short SHA on a box without git.
-  chip.textContent = label || sha;
+  // Primary chip text: the commit's authored instant rendered in the
+  // operator's local timezone as
+  //     YYYY-MM-DDTHH:MM:SS TZ
+  // e.g. `2026-04-24T17:28:04 EDT`. "When did this deploy?" is
+  // answerable without mental UTC-to-local conversion, and the
+  // format is still lexicographically comparable on the date+time
+  // portion so visually diffing two chips tells you which is newer.
+  // Falls back to the server-side UTC label, then to short SHA, on
+  // a box where `commit_date` is unavailable (no git).
+  chip.textContent = _formatVersionChipLocal(commitDate) || label || sha;
   chip.hidden = false;
   chip.title = [
-    label ? `Version:  ${label} (UTC)` : "",
+    commitDate ? `Version:  ${_formatVersionChipLocal(commitDate)}` : "",
+    label     ? `UTC:      ${label}` : "",
     `Commit:   ${full}`,
     commitDate ? `Authored: ${commitDate}` : "",
     bootTime ? `Booted:   ${bootTime}` : "",
@@ -259,6 +265,45 @@ function updateVersionChip(version) {
 
   if (prev && prev !== sha) {
     toast(`Server rolled over → ${label || sha}`, "ok");
+  }
+}
+
+
+// Render an ISO commit timestamp as `YYYY-MM-DDTHH:MM:SS TZ` in the
+// browser's local timezone, where TZ is the short zone abbreviation
+// (e.g. EDT, EST, PDT). Returns null if the input can't be parsed so
+// the caller can fall back to the server's UTC label.
+function _formatVersionChipLocal(commitIso) {
+  if (!commitIso) return null;
+  const d = new Date(commitIso);
+  if (Number.isNaN(d.getTime())) return null;
+  try {
+    // formatToParts gives us each component so we can assemble the
+    // ISO-like "YYYY-MM-DDTHH:MM:SS" stub + a human-readable TZ
+    // abbreviation without pulling in a date-fns-tz-sized dependency.
+    //
+    // We grab the Y/M/D/H/M/S components from one en-GB formatter
+    // (reliably 24-hour + 2-digit) and the TZ abbreviation from a
+    // separate en-US formatter (reliably gives `EDT`, `PST`, etc.
+    // on ICU; en-GB tends to emit `GMT-4` which is less readable).
+    const numeric = new Intl.DateTimeFormat("en-GB", {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    }).formatToParts(d);
+    const get = (t) => numeric.find(p => p.type === t)?.value || "";
+    const hour = get("hour") === "24" ? "00" : get("hour");  // Intl midnight quirk
+    const stamp = `${get("year")}-${get("month")}-${get("day")}T${hour}:${get("minute")}:${get("second")}`;
+    let tz = "";
+    try {
+      const zoneParts = new Intl.DateTimeFormat("en-US", {
+        hour: "numeric", timeZoneName: "short",
+      }).formatToParts(d);
+      tz = zoneParts.find(p => p.type === "timeZoneName")?.value || "";
+    } catch (_) { /* browser without TZ-names support — stamp only */ }
+    return tz ? `${stamp} ${tz}` : stamp;
+  } catch (_) {
+    return null;
   }
 }
 
