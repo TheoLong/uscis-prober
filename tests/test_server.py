@@ -640,6 +640,90 @@ def _auth_failed_stderr(attempt_marker: str = "a") -> str:
     )
 
 
+def test_envelope_level_green_on_clean_pull(monkeypatch, tmp_path):
+    """Three-tier colour rule — tier 1 (green / info): all attempts
+    succeeded, no error or warning steps anywhere. The dashboard
+    should render this as the "green" neutral state."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run",
+                      return_value=_fake_proc(0, "", "")):
+        server._run_pull_subprocess()
+
+    import system_log
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    assert pulls[0]["level"] == "info"
+    assert pulls[0]["exit_code"] == 0
+
+
+def test_envelope_level_yellow_on_retry_recovery(monkeypatch, tmp_path):
+    """Three-tier colour rule — tier 2 (yellow / warning): attempt 1
+    failed but attempt 2 recovered. Final exit is 0, the data is
+    present, but the operator should glance at it because a retry
+    was exercised. Previously this would have been tagged `error`
+    (worst-step severity) — the fix downgrades recovered pulls to
+    `warning` so red stays reserved for truly-broken pulls."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    import system_log
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    env = pulls[0]
+    assert env["level"] == "warning", (
+        "retry-recovered pulls must downgrade red → yellow; "
+        "got level=%r" % env["level"]
+    )
+    assert env["exit_code"] == 0
+    # There SHOULD be error-level step(s) inside — the first attempt's
+    # auth failure. The top-level downgrade rule is exactly what
+    # distinguishes this case from a fully-failed pull.
+    assert any(s.get("level") == "error" for s in env["steps"])
+
+
+def test_envelope_level_red_on_total_failure(monkeypatch, tmp_path):
+    """Three-tier colour rule — tier 3 (red / error): every attempt
+    failed, final exit is non-zero. The operator needs to see red."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run",
+                      return_value=_fake_proc(1, "", _auth_failed_stderr("x"))):
+        server._run_pull_subprocess()
+
+    import system_log
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    env = pulls[0]
+    assert env["level"] == "error"
+    assert env["exit_code"] != 0
+
+
 def test_run_pull_retries_on_auth_failure(monkeypatch, tmp_path):
     """Classic recovery: first attempt hits an auth failure, second
     attempt succeeds. We must see both attempts under one pull envelope."""
@@ -668,10 +752,13 @@ def test_run_pull_retries_on_auth_failure(monkeypatch, tmp_path):
 
 
 def test_run_pull_forces_trace_on_retry_even_when_debug_off(monkeypatch, tmp_path):
-    """Forensic-retention rule: if any attempt fails, the whole pull
-    envelope is flagged error at top level. Every attempt under a
-    flagged pull must preserve its trace so a "retry succeeded after
-    failure" scenario keeps both traces side-by-side.
+    """Forensic-retention rule: if any attempt in a pull fails, every
+    attempt under that pull must preserve its trace so a "retry
+    succeeded after failure" scenario keeps both traces side-by-side.
+    (The envelope itself is top-level `warning` in that case — see
+    test_envelope_level_yellow_on_retry_recovery — but regardless of
+    final colour, the tracer retention applies whenever a retry
+    happened.)
 
     Observable: the FIRST attempt's child env has USCIS_TRACE_ON_SUCCESS=0
     (normal rule — only fail paths auto-preserve). The SECOND attempt,

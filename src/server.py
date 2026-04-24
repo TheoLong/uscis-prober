@@ -1159,12 +1159,33 @@ def _run_pull_subprocess_inner(
     all_steps = list(steps) + captured_steps
     all_steps.sort(key=lambda s: s.get("ts", ""))
 
-    # Derive the top-level severity and summary. The outer function
-    # emits the envelope AFTER it pops the capture so this final event
-    # reaches disk.
-    top_level = _worst_level(all_steps)
-    if exit_code not in (0, None) or timed_out or crashed_error is not None:
+    # Derive the top-level severity and summary. Three-tier rule so
+    # the dashboard conveys outcome, not just worst-step-severity:
+    #
+    #   error (red)    — operation ultimately failed (non-zero exit,
+    #                    timeout, or crash). The pull DID NOT deliver
+    #                    the data it promised. Needs immediate fix.
+    #   warning (yellow) — operation succeeded but a failure step
+    #                    happened along the way (e.g. attempt 1 hit an
+    #                    anti-bot refusal, attempt 2 recovered). The
+    #                    data is in; the retry path just got exercised.
+    #                    Needs attention but not urgent.
+    #   info (green)   — clean run, no error OR warning steps anywhere.
+    #
+    # The outer function emits the envelope AFTER it pops the capture
+    # so this final event reaches disk.
+    operation_failed = (
+        exit_code not in (0, None) or timed_out or crashed_error is not None
+    )
+    worst_step = _worst_level(all_steps)
+    if operation_failed:
         top_level = "error"
+    elif worst_step == "error":
+        # Error step but successful exit → we recovered (retry path).
+        # Downgrade red → yellow: "needs attention, not devastated".
+        top_level = "warning"
+    else:
+        top_level = worst_step  # warning or info, passthrough
 
     summary = _pull_summary_from_steps(all_steps)
     # Attempts is max(attempt) seen in steps; missing tag defaults to 1.

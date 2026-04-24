@@ -395,8 +395,12 @@ def test_pull_absorbs_server_process_events_via_capture(monkeypatch, tmp_path):
     step_events = [s["event"] for s in pull["steps"]]
     assert "smtp_auth_failed" in step_events
     assert "notify_failed" in step_events
-    # Envelope reflects the worst severity (error) from its steps.
-    assert pull["level"] == "error"
+    # Three-tier rule: exit_code=0 means the pull itself succeeded —
+    # data is on disk. SMTP auth failed as a downstream notification
+    # side-effect, so the envelope is `warning` (yellow), not `error`
+    # (red). Red is reserved for pulls that didn't deliver the data.
+    assert pull["level"] == "warning"
+    assert pull["exit_code"] == 0
 
 
 def test_push_capture_diverts_log_calls_on_same_thread():
