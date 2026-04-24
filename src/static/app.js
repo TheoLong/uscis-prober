@@ -236,14 +236,18 @@ function updateVersionChip(version) {
 
   // Primary chip text: the commit's authored instant rendered in the
   // operator's local timezone as
-  //     YYYY-MM-DDTHH:MM:SS TZ
-  // e.g. `2026-04-24T17:28:04 EDT`. "When did this deploy?" is
-  // answerable without mental UTC-to-local conversion, and the
-  // format is still lexicographically comparable on the date+time
-  // portion so visually diffing two chips tells you which is newer.
-  // Falls back to the server-side UTC label, then to short SHA, on
-  // a box where `commit_date` is unavailable (no git).
-  chip.textContent = _formatVersionChipLocal(commitDate) || label || sha;
+  //     Version: YYYY-MM-DDTHH:MM:SS TZ
+  // e.g. `Version: 2026-04-24T17:28:04 EDT`. The "Version:" prefix
+  // makes it unambiguous that the timestamp identifies the deployed
+  // build (not e.g. last pull or current time). Format is still
+  // lexicographically comparable on the date+time portion so
+  // visually diffing two chips tells you which is newer. Falls back
+  // to the server-side UTC label, then to short SHA, on a box where
+  // `commit_date` is unavailable (no git).
+  const localStamp = _formatVersionChipLocal(commitDate);
+  chip.textContent = localStamp
+    ? `Version: ${localStamp}`
+    : (label || sha);
   chip.hidden = false;
   chip.title = [
     commitDate ? `Version:  ${_formatVersionChipLocal(commitDate)}` : "",
@@ -391,7 +395,7 @@ function renderSummary() {
   const tz = getLocalTimezoneAbbrev();
   document.getElementById("summary-line").textContent =
     `${state.cases.length} cases · ${totalCaptures} snapshots` +
-    (last ? ` · last ${formatLocal(new Date(last))}` : "") +
+    (last ? ` · last pull ${formatLocal(new Date(last))}` : "") +
     ` · times in ${tz}`;
 }
 
@@ -1790,10 +1794,21 @@ function _renderEmailBody(body) {
       `width:100%!important;max-width:100%!important;` +
       `box-sizing:border-box!important;font-family:system-ui,-apple-system,` +
       `"Segoe UI",sans-serif;}` +
-      `body *{max-width:100%!important;}` +
-      `table{width:100%!important;max-width:100%!important;}` +
+      // body * disables every inline / attribute-driven hard width so
+      // USCIS's 600px-wide table layout collapses to whatever space
+      // the iframe has. min-width:0 is critical — without it nested
+      // tables can refuse to shrink below their content width and
+      // overflow horizontally on phones.
+      `body *{max-width:100%!important;min-width:0!important;` +
+      `box-sizing:border-box!important;}` +
+      `table{width:100%!important;max-width:100%!important;` +
+      `table-layout:auto!important;}` +
       `table[width]{width:100%!important;}` +
+      `td[width],th[width]{width:auto!important;}` +
       `img{max-width:100%!important;height:auto!important;}` +
+      // Word-break for long unbreakable strings (URLs, codes, etc.)
+      // so they wrap instead of forcing horizontal scroll.
+      `body{word-wrap:break-word!important;overflow-wrap:break-word!important;}` +
     `</style>`;
   const wrappedHtml = overrideStyle + (html || "");
   const encoded = wrappedHtml

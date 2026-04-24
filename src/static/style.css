@@ -54,16 +54,41 @@ body {
   background: var(--topbar-bg);
   backdrop-filter: saturate(150%) blur(10px);
   border-bottom: 1px solid var(--border-soft);
+  /* Wrap rows when content overflows — at intermediate widths
+     (between desktop and the 900px tablet breakpoint) topbar-right's
+     countdown + buttons would otherwise squeeze topbar-left's title
+     and version chip into a too-narrow column. With wrap, topbar-right
+     drops to its own row instead of squishing. */
+  flex-wrap: wrap;
+  row-gap: 12px;
+  column-gap: 16px;
 }
-.topbar-left { display: flex; align-items: center; gap: 14px; }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  /* min-width:0 lets the subtitle truncate cleanly inside the
+     flex container instead of forcing the parent wider. */
+  min-width: 0;
+  flex: 1 1 auto;
+}
 .topbar-left h1 {
   margin: 0;
   font-size: 1.15rem;
   font-weight: 600;
   letter-spacing: 0.02em;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 8px 10px;
+  /* Title row content (logo + brand + chip + debug pill) wraps internally
+     when the row runs out of room — at wide widths everything sits on
+     one line; at narrow widths the chip + debug pill drop below "USCIS
+     Prober". h1 itself does NOT have flex-shrink:0 so it never forces
+     overflow past the viewport edge. */
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
 }
 .brand-logo {
   display: block;
@@ -88,6 +113,13 @@ body {
   letter-spacing: 0.02em;
   line-height: 1.4;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
+  /* Single-line, no shrinking — the chip carries a precise timestamp
+     and TZ; truncating it produces nonsense. If the topbar runs out
+     of horizontal room, the chip wraps onto a new flex line below
+     the title (handled by .topbar-left flex-wrap above). */
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 100%;
 }
 .version-chip:hover {
   color: var(--text);
@@ -96,8 +128,26 @@ body {
 }
 .version-chip[hidden] { display: none; }
 
-.subtitle { color: var(--muted); font-size: 0.85rem; }
-.topbar-right { display: flex; align-items: center; gap: 16px; }
+.subtitle {
+  color: var(--muted);
+  font-size: 0.85rem;
+  /* When the topbar squeezes, let the subtitle truncate with an
+     ellipsis instead of wrapping to a new line and double-stacking. */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  /* Mirror the left side — wrap freely so countdown + buttons don't
+     squish at intermediate widths. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 10px;
+}
 
 .countdown { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.2; }
 .countdown .label {
@@ -1378,15 +1428,95 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
     height: 100vh;
     border-radius: 0;
   }
-  .mfa-modal-header { flex-wrap: wrap; }
+  .mfa-modal-header {
+    /* Header now flows over multiple lines if needed: title row,
+       trace-dir code row, tabs row. The close button sticks to the
+       top-right via absolute positioning so it never gets pushed
+       off-screen by a long trace-dir name. */
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 44px 10px 12px;
+    position: relative;
+  }
   .mfa-modal-header h3 { font-size: 0.88rem; }
-  .mfa-modal-tabs { margin-left: 0; }
-  .mfa-modal-close { margin-left: auto; }
-  .mfa-events-table { font-size: 0.72rem; }
-  .mfa-events-table th,
-  .mfa-events-table td { padding: 4px 6px; }
-  .mfa-events-table .mfa-details { word-break: break-all; }
-  .mfa-email-iframe { min-height: 340px; }
+  .mfa-modal-header code {
+    /* The trace-dir is long (`20260424T180012Z_fail_scheduled`) — wrap
+       it gracefully on narrow viewports instead of stretching the
+       header off-screen. */
+    word-break: break-all;
+    font-size: 0.72rem;
+  }
+  .mfa-modal-tabs { margin-left: 0; flex-basis: 100%; }
+  .mfa-modal-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    margin-left: 0;
+  }
+
+  /* Events: drop the table layout, render each event as a stacked
+     card so the `details` column doesn't get cut off the right edge.
+     `display: block` on tbody/tr/td turns each row into a column of
+     labelled lines that fits any width. */
+  .mfa-events-table { font-size: 0.74rem; display: block; }
+  .mfa-events-table thead { display: none; }
+  .mfa-events-table tbody,
+  .mfa-events-table tr,
+  .mfa-events-table td {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+  }
+  .mfa-events-table tr {
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #fff;
+  }
+  .mfa-events-table td.mfa-ts {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: #6b7280;
+    margin-bottom: 2px;
+  }
+  .mfa-events-table td.mfa-cycle {
+    display: inline-block;
+    width: auto;
+    font-size: 0.68rem;
+    color: #6b7280;
+    margin-right: 6px;
+  }
+  .mfa-events-table td.mfa-cycle:not(:empty)::before {
+    content: "cycle ";
+  }
+  .mfa-events-table td.mfa-event {
+    display: inline-block;
+    width: auto;
+    font-weight: 600;
+    color: #111827;
+    margin-bottom: 4px;
+  }
+  .mfa-events-table td.mfa-details {
+    word-break: break-word;
+    margin-top: 2px;
+  }
+  .mfa-events-table .mfa-kv {
+    display: inline-block;
+    margin-right: 8px;
+    margin-bottom: 2px;
+  }
+
+  /* Emails — keep the iframe usable but trim its min-height so it
+     doesn't dwarf the modal on phone-height viewports. */
+  .mfa-email-iframe {
+    min-height: 340px;
+    height: 60vh;
+  }
+  .mfa-email-raw {
+    height: 60vh;
+  }
 
   /* Topbar already stacks at ≤900px; at phone we just tighten sizes. */
   .topbar { padding: 12px 16px; }
