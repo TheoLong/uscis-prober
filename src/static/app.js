@@ -1481,16 +1481,6 @@ function _renderTraceButtonRow(step, showAttemptLabel) {
   const traceUrl = `/api/full-trace/${encodeURIComponent(dir)}/trace.zip`;
   const viewerUrl =
     `/trace-viewer/index.html?trace=${encodeURIComponent(traceUrl)}`;
-  const attemptLabel = showAttemptLabel
-    ? `<span class="trace-attempt-label">` +
-        `Attempt ${escapeHtml(String(step.attempt ?? "?"))}` +
-        (step.outcome
-          ? ` <span class="trace-outcome trace-outcome-${escapeHtml(step.outcome)}">` +
-              `${escapeHtml(step.outcome)}` +
-            `</span>`
-          : "") +
-      `</span>`
-    : "";
   const buttons = [
     `<a class="trace-open-btn" href="${escapeHtml(viewerUrl)}" ` +
         `target="_blank" rel="noopener noreferrer" ` +
@@ -1507,10 +1497,20 @@ function _renderTraceButtonRow(step, showAttemptLabel) {
       `</button>`,
     );
   }
+  const buttonGroup = `<span class="trace-open-group">${buttons.join("")}</span>`;
+  if (!showAttemptLabel) {
+    // Single-attempt pull: compact inline row, no attempt label / pill.
+    return `<div class="trace-open-row trace-open-row-single">${buttonGroup}</div>`;
+  }
+  // Multi-attempt pull: attempt label + outcome pill in their own
+  // grid columns so successive rows line up regardless of pill width.
   return (
-    `<div class="trace-open-row">` +
-      attemptLabel +
-      `<span class="trace-open-group">${buttons.join("")}</span>` +
+    `<div class="trace-open-row trace-open-row-multi">` +
+      `<span class="trace-attempt-label">Attempt ${escapeHtml(String(step.attempt ?? "?"))}</span>` +
+      (step.outcome
+        ? `<span class="trace-outcome trace-outcome-${escapeHtml(step.outcome)}">${escapeHtml(step.outcome)}</span>`
+        : `<span class="trace-outcome"></span>`) +
+      buttonGroup +
     `</div>`
   );
 }

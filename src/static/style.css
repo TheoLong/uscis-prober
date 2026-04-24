@@ -484,11 +484,14 @@ main[hidden] { display: none; }
  * columns line up cleanly across rows. */
 .syslog-envelope-content {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 0 14px 10px;
-  /* Visual cue: slight left-inset matching the kv details strip. */
+  /* Visual cue: slight left-inset matching the kv details strip.
+   * Stacked layout (column) keeps the summary line on top and each
+   * attempt's trace-button row below it on its own line — avoids the
+   * old "summary centered between two rows" awkwardness. */
 }
 .syslog-envelope-content .syslog-summary {
   /* Override the margin-left:auto from the old header styling —
@@ -499,7 +502,6 @@ main[hidden] { display: none; }
   font-size: 0.78rem;
 }
 .syslog-envelope-content .trace-open-group {
-  margin-left: auto;
   flex: 0 0 auto;
 }
 /* Five-column grid so every row aligns regardless of pill length:
@@ -1722,34 +1724,56 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 }
 /* Per-attempt trace rows. A single-attempt pull renders one row with no
  * attempt label; a multi-attempt pull renders one row per preserved
- * attempt so the operator can open each trace independently. */
+ * attempt so the operator can open each trace independently.
+ *
+ * Each row uses a 3-column grid with FIXED column widths so that
+ * successive rows line up visually regardless of outcome-pill length:
+ *
+ *   col 1 — attempt label ("Attempt N")
+ *   col 2 — outcome pill  (fixed min-width so OK / FAIL / … all occupy
+ *                           the same horizontal space)
+ *   col 3 — button cluster (Open trace + optional MFA events)
+ */
 .trace-open-rows {
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: flex-start;
 }
-.trace-open-row {
+/* Multi-attempt grid: fixed columns so outcome pills line up across
+   rows and the button cluster starts at the same X regardless of
+   OK / FAIL width. Single-attempt row collapses to a plain inline-
+   flex so there's no ghost cell reserving space. */
+.trace-open-row-multi {
+  display: grid;
+  grid-template-columns: 72px 56px auto;
+  align-items: center;
+  gap: 10px;
+}
+.trace-open-row-single {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
 }
 .trace-attempt-label {
   font-size: 0.72rem;
   color: #374151;
   font-weight: 600;
   white-space: nowrap;
-  min-width: 96px;
 }
 .trace-outcome {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 1px 6px;
   border-radius: 4px;
   font-size: 0.68rem;
   font-weight: 600;
-  margin-left: 4px;
   text-transform: uppercase;
+  min-width: 44px;     /* FAIL is widest; forces OK to the same footprint */
+  box-sizing: border-box;
+  /* Ensure the pill sits inside its grid column without stretching. */
+  justify-self: start;
 }
 .trace-outcome-ok {
   background: #dcfce7;
