@@ -1518,6 +1518,14 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
     height: 60vh;
   }
 
+  .syslog-head-row { gap: 6px; }
+
+  /* The kv detail strip uses a 2-column grid (label | value) with
+     auto+1fr — at narrow widths the value column wraps fine, but the
+     label column can dominate when keys are short. Keep as-is, just
+     trim font-size. */
+  .syslog-details { font-size: 0.74rem; }
+
   /* Topbar already stacks at ≤900px; at phone we just tighten sizes. */
   .topbar { padding: 12px 16px; }
   .topbar-left h1 { font-size: 1.05rem; }
@@ -2210,3 +2218,36 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   background: #fff;
 }
 
+
+/* ====================================================================== */
+/* Mobile system-log row reflow (placed at end of file so it always wins  */
+/* the cascade regardless of where unrelated @media blocks sit above).    */
+/*                                                                        */
+/* The desktop grid (16px 220px 110px 1fr auto) reserves ~360px for fixed */
+/* columns alone — on a 375-wide phone the timestamp lands well past the  */
+/* right edge. Reflow into a 2-row layout:                                */
+/*   row 1: disclosure + pill + timestamp (right-aligned)                 */
+/*   row 2: source + event identifier                                     */
+/* ====================================================================== */
+@media (max-width: 640px) {
+  .syslog-head {
+    grid-template-columns: 16px auto 1fr auto;
+    grid-template-areas:
+      "disc pill . ts"
+      ".    src  ev ev";
+    row-gap: 4px;
+    column-gap: 8px;
+    font-size: 0.78rem;
+  }
+  .syslog-head > .syslog-disclosure,
+  .syslog-head > .syslog-disclosure-spacer { grid-area: disc; }
+  .syslog-head > .kind-tag { grid-area: pill; }
+  .syslog-head > .syslog-source { grid-area: src; }
+  .syslog-head > .syslog-event { grid-area: ev; min-width: 0; }
+  .syslog-head > .syslog-ts {
+    grid-area: ts;
+    justify-self: end;
+    font-size: 0.7rem;
+    white-space: nowrap;
+  }
+}
