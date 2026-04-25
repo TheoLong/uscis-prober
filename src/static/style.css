@@ -63,61 +63,211 @@ body {
   row-gap: 12px;
   column-gap: 16px;
 }
+/* Two clusters: brand + pull-btn on the LEFT, three info pills on
+   the RIGHT. Each cluster is its own flex container that wraps
+   internally when its boxes don't fit on a single line.
+
+   Alignment is handled entirely by .topbar's `justify-content:
+   space-between`: when both clusters share row 1, they push to
+   opposite ends; when the right cluster wraps to its own row,
+   `space-between` with a single item per row degenerates to
+   flex-start, so BOTH clusters end up left-aligned in the wrapped
+   state. No `margin-left: auto` — that would force right-alignment
+   even when alone on a row, which the user explicitly doesn't want.
+
+   The h1 collapses to `display: contents` so the brand pill
+   becomes a direct flex child of .topbar-left alongside the pull
+   button — both visible to the cluster's wrapping behaviour. */
+/* Each of the two clusters keeps its two boxes locked together —
+   nowrap so brand+pull-btn never split, and same for LAST+NEXT.
+   The wrap point lives at the .topbar level (cluster vs cluster),
+   so the topbar either fits all four on one row or splits into
+   exactly two rows of two. */
 .topbar-left {
   display: flex;
-  /* Stack the title row (h1: brand + version chip + debug pill) on
-     top of the subtitle line. Putting them on separate rows means the
-     subtitle never has to fight the chip / debug pill for width — at
-     any viewport size the title row keeps its natural width and the
-     subtitle row gets its own clean line below. */
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  /* min-width:0 lets the subtitle truncate cleanly inside the
-     flex container instead of forcing the parent wider. */
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.topbar-left h1 {
-  margin: 0;
-  font-size: 1.15rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  display: flex;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px 10px;
-  /* Title row content (logo + brand + chip + debug pill) wraps internally
-     when the row runs out of room — at wide widths everything sits on
-     one line; at narrow widths the chip + debug pill drop below "USCIS
-     Prober". h1 itself does NOT have flex-shrink:0 so it never forces
-     overflow past the viewport edge. */
-  flex-wrap: wrap;
+  gap: 12px;
   min-width: 0;
-  max-width: 100%;
 }
+.topbar-right {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.topbar-pull-pair {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.topbar-left h1 { display: contents; }
+
+/* Split-row layout: when the natural single-row width can't fit
+   all four boxes, the layout breaks into 2 rows of 2. The two
+   rows have different design goals:
+
+   ROW 1 (brand + pull-btn): each box keeps its NATURAL width
+     and content is flattened to one line. Brand sits at the left
+     edge, pull button at the right — the row reads as a compact
+     header strip, not two stretched-to-50% banners.
+
+   ROW 2 (LAST PULL + NEXT PULL): each pill DOES stretch to 50/50,
+     and the content stays in its natural 3-line column stack
+     (label / value / sub) centred inside the wider pill. This
+     avoids the broken "label+value on top, sub stranded below"
+     wrap that flex-wrap produced in the previous iteration. */
+.topbar-left.is-isolated,
+.topbar-right.is-isolated {
+  flex: 1 1 100%;
+}
+
+/* ---- Row 1 — natural width, flattened content, edge-anchored.
+       Pills are flex-shrinkable (flex: 0 1 auto + min-width: 0) so
+       at extreme phone widths they collapse to fit instead of
+       overflowing the topbar. The brand-name and pull-btn-line
+       spans flex-wrap: wrap inside their pills as a fallback —
+       "USCIS Prober" → "USCIS / Prober" stack, "Manual Pull
+       Update" → "Manual / Pull Update" stack — when the flat row
+       doesn't fit. ---- */
+.topbar-left.is-isolated {
+  justify-content: space-between;
+  /* `stretch` so the shorter pill (button text) grows vertically
+     to match the taller pill (brand with logo). Without this the
+     brand sits at ~48px while the button sits at ~37px and the
+     row reads as two unequal cards. */
+  align-items: stretch;
+}
+.topbar-left.is-isolated .brand,
+.topbar-left.is-isolated > .pull-btn {
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  padding: 10px 16px;
+  border-radius: 12px;
+}
+.topbar-left.is-isolated .brand .brand-name {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 6px;
+}
+/* Shrink the logo in split mode so the brand pill stays thin —
+   without this the 34px default logo forces the brand pill ~48px
+   tall while the flattened button is naturally ~37px. Pairing
+   the smaller logo with align-items: stretch lets both pills
+   land at the same compact height. */
+.topbar-left.is-isolated .brand-logo {
+  width: 20px;
+  height: 20px;
+}
+.topbar-left.is-isolated > .pull-btn {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 6px;
+}
+.topbar-left.is-isolated > .pull-btn .pull-btn-line {
+  /* Flex items in the wrapping pull-btn — at wide split widths
+     both fit on one row ("Manual Pull Update"); at narrow they
+     stack vertically. */
+  flex: 0 0 auto;
+}
+
+/* ---- Row 2 — 50/50 stretch, natural 3-line stack centred ---- */
+.topbar-right.is-isolated > .topbar-pull-pair {
+  flex: 1 1 100%;
+  width: 100%;
+  align-items: stretch;
+  /* LAST PULL anchors to the left, NEXT PULL anchors to the right —
+     same edge-anchored pattern as row 1 (brand + pull-btn). The
+     pills only consume the width their content actually needs;
+     when the row is wider than that, the leftover sits in the
+     middle as breathing room rather than being absorbed by the
+     pills (which would just be stretching for the sake of it). */
+  justify-content: space-between;
+}
+.topbar-right.is-isolated .topbar-pull-pair > .subtitle,
+.topbar-right.is-isolated .topbar-pull-pair > .countdown {
+  /* Natural content width — don't grow. Shrink if the row is
+     genuinely too narrow (flex-shrink: 1 + min-width: 0 lets the
+     value wrap inside the pill at very narrow phone widths). */
+  flex: 0 1 auto;
+  min-width: 0;
+  /* Column-stacked content; alignment preserves the wide-width
+     intent: LAST PULL hugs the LEFT edge, NEXT PULL hugs the
+     RIGHT edge — same as before the split — so a row's content
+     orientation doesn't flip when the layout reflows. */
+  flex-direction: column;
+  justify-content: center;
+  padding: 10px 16px;
+  border-radius: 12px;
+  /* Drop the legacy overflow-clip on subtitle so info doesn't
+     get truncated when the pill is wider than the natural text. */
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.topbar-right.is-isolated .topbar-pull-pair > .subtitle {
+  align-items: flex-start;
+  text-align: left;
+}
+.topbar-right.is-isolated .topbar-pull-pair > .countdown {
+  align-items: flex-end;
+  text-align: right;
+}
+/* Allow values to wrap at whitespace if the pill is narrower than
+   the natural token. "04/25/2026 7:00AM" wraps at the space to
+   become "04/25/2026 / 7:00AM" rather than overflow the pill.
+   `word-break: keep-all` keeps tokens like "04/25/2026" intact —
+   only the inter-token whitespace breaks. */
+.topbar-right.is-isolated .topbar-pull-pair .chip-value,
+.topbar-right.is-isolated .topbar-pull-pair .chip-sub,
+.topbar-right.is-isolated .topbar-pull-pair .countdown .value,
+.topbar-right.is-isolated .topbar-pull-pair .countdown .when {
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
 .brand {
-  /* Brand block — logo + title bundled in a pill that stands out from
-     the supporting metadata pills around it without going dark.
-     White elevated surface + accent-colored border + accent-tinted
-     text gives the brand visual primacy in the topbar while staying
-     in the light/airy theme. */
+  /* Brand block — logo + title bundled in a soft-square pill that
+     stands out from the supporting metadata pills around it. White
+     surface + accent-colored border + accent-tinted text gives the
+     brand visual primacy without going dark. Padding sized to match
+     the height of the 3-line info pills (subtitle, countdown) at
+     wide widths so the topbar reads as a row of equal-height cards.
+     The same media query that collapses those pills to thin variants
+     also reduces brand padding (see ≤1320px rule). */
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  background: var(--bg-elev);          /* clean white */
-  color: var(--accent-hot);            /* deep brand blue */
+  gap: 12px;
+  background: var(--bg-elev);
+  color: var(--accent-hot);
   border: 1px solid var(--accent);
-  border-radius: 999px;
-  padding: 4px 14px 4px 8px;
+  border-radius: 12px;
+  padding: 14px 20px 14px 12px;
   flex-shrink: 0;
   box-shadow: 0 1px 4px rgba(58, 92, 216, 0.12);
 }
 .brand-name {
-  font-size: 1rem;
+  /* Stacks "USCIS / Prober" on two lines at wide widths so the brand
+     pill fills the topbar's vertical space matching the LAST PULL /
+     NEXT PULL boxes. The narrow-width media query collapses it back
+     to a single inline line. */
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.05;
+  font-size: 1.05rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: inherit;
 }
+.brand-name-line { display: block; }
 .brand-logo {
   /* Logo sits flush on the white brand-pill surface. */
   display: block;
@@ -128,27 +278,30 @@ body {
    rendered next to the title. Click to copy the full SHA; hover for the
    commit + boot metadata in the tooltip. */
 .version-chip {
-  display: inline-block;
-  padding: 2px 8px;
+  /* Single-line pill, lives in the System tab's Actions row alongside
+     DEBUG and Export-data. Sized to read as reference info next to
+     those action buttons — same height + padding so the row reads as
+     a coordinated cluster. */
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 14px;
   font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   font-weight: 500;
   color: var(--muted);
   background: var(--pill-bg);
   border: 1px solid var(--border-soft);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   text-decoration: none;
   cursor: pointer;
   letter-spacing: 0.02em;
-  line-height: 1.4;
+  line-height: 1;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
-  /* Single-line, no shrinking — the chip carries a precise timestamp
-     and TZ; truncating it produces nonsense. If the topbar runs out
-     of horizontal room, the chip wraps onto a new flex line below
-     the title (handled by .topbar-left flex-wrap above). */
   white-space: nowrap;
   flex-shrink: 0;
   max-width: 100%;
+  box-sizing: border-box;
 }
 .version-chip:hover {
   color: var(--text);
@@ -158,39 +311,24 @@ body {
 .version-chip[hidden] { display: none; }
 
 .subtitle {
-  color: var(--muted);
-  font-size: 0.78rem;
-  /* Box the subtitle as its own pill so the topbar reads as a row of
-     discrete info cards rather than loose text. Border + bg mirrors
-     the version chip + countdown box so the three "info zones" feel
-     unified. */
+  color: var(--text);
+  font-size: 0.85rem;
+  /* 3-line stacked layout (label / value / sub) mirrors the NEXT PULL
+     countdown box. */
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
   background: var(--pill-bg);
   border: 1px solid var(--border-soft);
-  border-radius: 999px;
-  padding: 3px 12px;
-  /* When the topbar squeezes, let the subtitle truncate with an
-     ellipsis instead of wrapping to a new line and double-stacking. */
+  border-radius: 12px;
+  padding: 8px 16px;
   min-width: 0;
   max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  /* Mirror the left side — wrap freely so the countdown can drop to
-     its own row when there's no room, while the action cluster
-     beneath it always stays intact (see .topbar-actions). */
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  row-gap: 10px;
-}
-/* Action cluster: every button + the spinner indicator MUST stay on
-   one row regardless of viewport width. flex-wrap:nowrap is the lock;
-   if the row genuinely doesn't fit a tiny phone, the cluster scrolls
-   horizontally rather than breaking up. */
 /* System tab — three stacked card sections (Actions / Storage /
    System log). All share the same surface treatment + a
    `.sys-card-title` header so each box self-identifies. Outer main
@@ -209,26 +347,53 @@ body {
   border-radius: var(--radius-sm, 8px);
   padding: 12px 14px;
 }
-/* The System log card hosts a header strip (.updates-head) with the
-   title + Export/Clear log buttons. Strip its own padding so the
-   visual top-edge lines up with Actions and Storage above. */
-#systemlog-content .updates-head {
-  padding: 0;
+/* The System log card title + subtitle are now direct children of
+   the section (so card collapse can keep the title visible while
+   hiding the body). The subtitle gets a small top margin so it
+   doesn't crowd the title baseline. */
+#systemlog-content .syslog-card-sub {
+  margin-top: -2px;
   margin-bottom: 8px;
 }
-/* Section-title styling for every System-tab card. Uses
-   `&` doubled for specificity so it wins against
-   `.updates-head h2 { font-size: 1.2rem; font-weight: 600 }` which
-   the System log header reuses for layout. */
-.sys-card-title,
-.updates-head h2.sys-card-title {
+/* Section-title styling for every System-tab card. */
+.sys-card-title {
   margin: 0 0 8px;
   font-size: 0.78rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted-2, #7e8aab);
+  /* Title doubles as a click-target to collapse / expand the card.
+     A small chevron is injected by JS as the first child of the
+     title so every card collapses with the same affordance. */
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+.sys-card-title:hover { color: var(--text); }
+.sys-card-title .sys-card-toggle {
+  /* Disclosure chevron — rotates between collapsed (▶) and
+     expanded (▼) state. Sized to match the title's font-size so
+     it sits on the same baseline. */
+  display: inline-block;
+  width: 0.7em;
+  font-size: 0.85em;
+  line-height: 1;
+  text-align: center;
+  color: var(--muted-2);
+  transition: transform 0.15s ease;
+}
+.sys-card.is-collapsed .sys-card-toggle { transform: rotate(-90deg); }
+.sys-card.is-collapsed > *:not(.sys-card-title) { display: none; }
+/* When the card is collapsed, drop the h2's bottom margin so every
+   card compresses to the same height regardless of whether its
+   parent uses block layout (System info / Actions / System log,
+   where the h2 margin contributes to height) or flex layout
+   (Storage uses display: flex + gap, which ignores child margins).
+   Without this rule the Storage card lands ~8px shorter. */
+.sys-card.is-collapsed .sys-card-title { margin-bottom: 0; }
 /* The size suffix sitting inside the System-log title shouldn't
    inherit uppercase / tracking — it's a value, not a label. */
 .sys-card-title .syslog-storage-line {
@@ -252,21 +417,81 @@ body {
   position: relative;
   display: inline-flex;
 }
-/* Unified size across every action button so the row reads as one
-   consistent button cluster. .action-btn is the modifier — the
-   button's own visual identity (color, weight, glyph) stays
-   intact via its base class (.debug-pill, .pull-btn, .pull-btn-secondary,
-   .syslog-export-btn, .clear-log-btn). */
-.action-btn {
-  height: 34px !important;
-  padding: 0 14px !important;
-  font-size: 0.85rem !important;
-  font-weight: 500 !important;
-  border-radius: var(--radius-sm) !important;
-  display: inline-flex;
+
+/* System info card — read-only metadata (build version etc.). Not
+   actions; styled to read as muted reference info, distinct from
+   the Actions card next to it. */
+.sys-info-row {
+  display: flex;
   align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sys-info-row .version-chip {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 0.78rem;
+}
+/* Unified style for every System-tab action button so the row reads
+   as ONE consistent cluster — same height, padding, border, font
+   weight, and font case. Variants (.debug-pill, .pull-btn-secondary,
+   etc.) keep their own colour / glyph identity via overrides below
+   but inherit the box geometry from this rule. */
+.action-btn,
+.action-btn.debug-pill,
+.action-btn.pull-btn,
+.action-btn.pull-btn-secondary {
+  height: 34px !important;
+  min-height: 0 !important;
+  padding: 0 14px !important;
+  font-size: 0.82rem !important;
+  font-weight: 500 !important;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  border-radius: var(--radius-sm) !important;
+  border: 1px solid var(--border) !important;
+  background: transparent !important;
+  color: var(--text) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
   box-sizing: border-box;
   line-height: 1;
+  flex-direction: row !important;
+  cursor: pointer;
+}
+.action-btn:hover,
+.action-btn.debug-pill:hover,
+.action-btn.pull-btn-secondary:hover {
+  background: var(--bg-elev) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+/* DEBUG keeps its toggle visual (the coloured dot indicator on the
+   left + the red active-state treatment) but its label matches the
+   other action buttons — same font case, weight, size, no
+   letterspacing — so the row reads as four uniform buttons. */
+.action-btn.debug-pill .debug-pill-label {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+.action-btn.debug-pill[aria-checked="true"] {
+  background: var(--bad-tint) !important;
+  color: var(--bad) !important;
+  border-color: var(--bad) !important;
+}
+/* Clear log: destructive cue (red border + red text) preserved on
+   top of the unified .action-btn geometry. */
+.action-btn.clear-log-btn {
+  color: var(--bad) !important;
+  border-color: var(--bad) !important;
+}
+.action-btn.clear-log-btn:hover {
+  background: var(--bad-tint) !important;
+  color: var(--bad) !important;
+  border-color: var(--bad) !important;
 }
 
 /* Corner-positioned info badge: sits at the top-right of its host
@@ -297,45 +522,109 @@ body {
   align-items: flex-end;
   line-height: 1.2;
   /* Boxed to match the subtitle / version chip — three discrete info
-     zones in the topbar that all share the same surface treatment. */
+     zones in the topbar that all share the same surface treatment.
+     Three-line content (label + value + when) inherently makes this
+     box taller than the single-line pills, anchoring the right edge
+     of the topbar at wide widths. Below 1100px we collapse to a thin
+     single-row variant (see media query) so it doesn't dwarf the
+     other pills when the topbar has to wrap. */
   background: var(--pill-bg);
   border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  padding: 6px 12px;
+  border-radius: 12px;
+  padding: 8px 16px;
 }
-.countdown .label {
-  font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+/* Shared typography for the 3-line info pills (version chip,
+   subtitle, countdown). Each pill renders as:
+     LABEL   ← small uppercase tracking-wide muted
+     value   ← primary value, larger / bolder
+     sub     ← supporting metadata, small + muted */
+.chip-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--muted-2);
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+.chip-value {
+  /* Mono + accent-blue to match the NEXT PULL countdown value. The
+     accent colour itself carries the emphasis — no bold needed,
+     since bold + colour is double-stamping. */
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  color: var(--accent-hot);
+  font-weight: 400;
+}
+.chip-sub {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-weight: 400;
+}
+
+/* No flatten variant. Boxes always render as multi-line stacks
+   (column flex direction). When the topbar runs out of width, the
+   parent flex containers wrap rows naturally — no pill ever
+   collapses its inner stack into a single line. Layout is purely
+   CSS-driven via flex-wrap; no JS observer needed. */
+/* NEXT PULL countdown uses different element class names (.label /
+   .value / .when) than the new TIMEZONE / LAST PULL pills (which use
+   .chip-label / .chip-value / .chip-sub). Mirror the typography
+   exactly so the three info pills are visually identical. */
+.countdown .label {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  font-weight: 600;
+  font-family: var(--font-sans);
 }
 .countdown .value {
   font-family: var(--font-mono);
-  font-size: 0.95rem; color: var(--accent-hot);
+  font-size: 0.92rem;
+  color: var(--accent-hot);
+  font-weight: 400;
 }
-.countdown .when { font-size: 0.7rem; color: var(--muted); }
+.countdown .when {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-weight: 400;
+}
 
 .pull-btn {
   /* Box model is shared between <button> and <a> variants so the two
      visually match: both reserve a 1px border (transparent on primary,
-     coloured on secondary) and the same explicit height. */
+     coloured on secondary) and the same explicit height. Sized tall
+     at wide widths to match the LAST PULL / NEXT PULL info boxes —
+     same vertical footprint, so the topbar reads as a row of equal-
+     height cards. The narrow-width media query collapses it back to
+     a regular 36px button when the topbar wraps. */
   box-sizing: border-box;
-  height: 36px;
-  padding: 0 16px;
+  height: auto;
+  min-height: 60px;
+  padding: 10px 22px;
   font: inherit;
   font-weight: 600;
-  font-size: 0.9rem;
-  line-height: 1;
+  font-size: 0.95rem;
+  line-height: 1.1;
   color: var(--bg);
   background: var(--accent-hot);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: 12px;
   cursor: pointer;
+  /* Two-line label stacks vertically at wide widths
+     ("Manual" / "pull update"). The narrow-width override flips this
+     back to row layout so the button reads as a single inline label. */
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   text-decoration: none;
   transition: transform 0.08s ease, background 0.2s ease,
               border-color 0.2s ease, color 0.2s ease;
 }
+.pull-btn-line { display: block; }
 .pull-btn:hover { background: #a7c4ff; }
 .pull-btn:active { transform: translateY(1px); }
 .pull-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
@@ -387,7 +676,13 @@ body {
   top: calc(100% + 8px);
   right: 0;
   z-index: 20;
-  width: 320px;
+  /* Cap the natural 320px width to the viewport (minus 56px = 28px
+     of breathing room each side, matching the .main horizontal
+     padding at wide widths and giving plenty of clearance from
+     the browser edge at any viewport). JS in positionPopover()
+     then nudges the popover back inside if either edge spills out. */
+  width: min(320px, calc(100vw - 56px));
+  max-width: calc(100vw - 56px);
   padding: 12px 14px;
   background: var(--bg-elev);
   color: var(--text);
@@ -746,6 +1041,7 @@ main[hidden] { display: none; }
   font-family: var(--font-mono);
   font-size: 0.78rem;
   color: var(--muted);
+  white-space: nowrap;
 }
 .syslog-event {
   font-family: var(--font-mono);
@@ -887,11 +1183,14 @@ main[hidden] { display: none; }
   margin-top: 4px;
   font-size: 0.74rem;
 }
-.syslog-controls {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  flex-wrap: wrap;
+.syslog-controls,
+#syslog-controls-mount {
+  /* Both the mount point in HTML and the wrapper inserted from JS
+     are purely structural — their children should sit directly
+     inside the parent .sys-actions-row flex container so the
+     buttons line up with DEBUG / Export data and inherit the row's
+     12px gap. `display: contents` makes them invisible to layout. */
+  display: contents;
 }
 
 .syslog-export-btn {
@@ -1451,8 +1750,14 @@ pre.raw .json-bool    { color: #7a3fbd; font-weight: 600; }
 pre.raw .json-null    { color: var(--muted); font-style: italic; }
 
 /* ---------- updates feed ---------- */
+/* Single-block header (title + subtitle stacked, flush left). The
+   old layout used `flex + space-between + align-items: flex-end` for
+   a side-by-side title/meta pair; once the meta moved into a subtitle
+   row that flex setup left a single child being pushed to flex-end on
+   the cross axis whenever the @media rule flipped direction to column,
+   right-aligning the whole block. Plain block-flow keeps it flush left
+   at every width. */
 .updates-head {
-  display: flex; justify-content: space-between; align-items: flex-end;
   padding: 6px 4px 4px;
 }
 .updates-head h2 { margin: 0; font-size: 1.2rem; font-weight: 600; }
@@ -1539,22 +1844,16 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
     padding-right: 16px;
   }
 
-  /* Topbar stacks from 900px down — desktop's space-between layout starts
-     to squeeze the title into two lines before we hit the phone breakpoint. */
+  /* Topbar tightens at ≤900px but does NOT stack vertically anymore
+     — the ≤1320px override (end of file) flattens topbar-left and
+     topbar-right via `display: contents` and reorders children so
+     brand + Pull update share row 1, info pills wrap below. Setting
+     flex-direction:column or align-items:stretch here would override
+     that flat layout and force every pill onto its own full-width
+     row. Just trim padding and rely on the wrap behaviour. */
   .topbar {
     padding: 14px 16px;
-    flex-direction: column;
-    align-items: stretch;
     gap: 10px;
-  }
-  .topbar-left {
-    justify-content: space-between;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .topbar-right {
-    gap: 12px;
-    flex-wrap: wrap;
   }
 
   .case-header {
@@ -1613,9 +1912,9 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   }
   .trace-open-btn { font-size: 0.7rem; padding: 4px 10px; }
 
-  /* ---------- storage bar mobile ----------
-   * Keep it visible but trim paddings. */
-  .storage-bar-wrap { padding: 4px 12px 6px; }
+  /* Storage card inherits the shared `.sys-card` 12px/14px padding
+     at every width — keeping the override would make the card
+     shorter than its siblings (especially when collapsed). */
 
   /* ---------- MFA modal mobile ----------
    * Full-viewport to maximise readable area on phones. */
@@ -1723,49 +2022,27 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
      trim font-size. */
   .syslog-details { font-size: 0.74rem; }
 
-  /* Topbar already stacks at ≤900px; at phone we just tighten sizes. */
-  .topbar { padding: 12px 16px; }
-  .topbar-left h1 { font-size: 1.05rem; }
-  .subtitle {
-    font-size: 0.75rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
-  }
-  .topbar-right { justify-content: space-between; gap: 10px; }
-  /* The countdown label and timestamp are fine to hide at this size — the
-     value alone is readable, and the timestamp duplicates info in the UI. */
-  /* Mobile countdown: keep ALL three bits (NEXT PULL · value · time)
-     on a single horizontal line so the boxed value doesn't end up
-     dangling without context. Trim font sizes + padding so the whole
-     line still fits a 360px-wide column. */
-  .countdown {
-    flex-direction: row;
-    align-items: baseline;
-    gap: 8px;
-    padding: 4px 10px;
-    flex-wrap: wrap;
-  }
+  /* Topbar at phone widths: trim sizes only — every box keeps its
+     3-line stacked layout so TIMEZONE / LAST PULL / NEXT PULL stay
+     visually identical at every width. They rearrange among
+     themselves via flex-wrap, never flatten their content. */
+  .topbar { padding: 12px 16px; gap: 10px; }
+  .brand { padding: 8px 14px 8px 10px; gap: 8px; }
+  .brand-name { font-size: 0.95rem; }
+  .brand-logo { width: 26px; height: 26px; }
+  .version-chip { padding: 3px 10px; font-size: 0.72rem; }
+  .countdown { padding: 6px 12px; }
   .countdown .label { font-size: 0.62rem; letter-spacing: 0.1em; }
   .countdown .when { font-size: 0.68rem; }
   .countdown .value { font-size: 0.86rem; }
-  .countdown .label,
-  .countdown .value,
-  .countdown .when { display: inline-block; }
-
-  /* Mobile: keep the subtitle pill but trim its padding so it nests
-     cleanly with the other info-zone boxes (brand, version chip,
-     debug, countdown) without looking chunky. */
-  .subtitle {
-    font-size: 0.72rem;
-    padding: 2px 10px;
-  }
+  .subtitle { font-size: 0.78rem; padding: 6px 12px; }
   .pull-btn {
-    height: 32px;
-    padding: 0 12px;
-    font-size: 0.85rem;
-    flex: 0 1 auto;
+    /* Keep the multi-line stack ("Manual / Pull Update"); just trim
+       the wide-width minimum height + paddings so it nests cleanly
+       with the LAST PULL / NEXT PULL boxes at phone widths. */
+    min-height: 50px;
+    padding: 8px 16px;
+    font-size: 0.88rem;
   }
   .pull-indicator { font-size: 0.76rem; padding: 5px 9px; }
 
@@ -1844,7 +2121,6 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   pre.raw { font-size: 0.72rem; padding: 12px; }
 
   /* ---------- updates feed ---------- */
-  .updates-head { flex-direction: column; gap: 4px; }
   .update-record { padding: 14px 14px; }
   .update-head {
     flex-direction: column;
@@ -2454,36 +2730,33 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 
 
 /* ====================================================================== */
-/* Mobile system-log row reflow (placed at end of file so it always wins  */
-/* the cascade regardless of where unrelated @media blocks sit above).    */
+/* JS-driven system-log row reflow. Replaces the old static                */
+/* @media(max-width:640px) trigger so the row only flattens when its       */
+/* natural single-row content would actually overflow the available        */
+/* width. _wireSyslogFit() in app.js measures every .syslog-head's content */
+/* against the container width and toggles `.syslog-rows-wrapped` on the   */
+/* feed when any row would collide.                                        */
 /*                                                                        */
-/* The desktop grid (16px 220px 110px 1fr auto) reserves ~360px for fixed */
-/* columns alone — on a 375-wide phone the timestamp lands well past the  */
-/* right edge. Reflow into a 2-row layout:                                */
-/*   row 1: disclosure + pill + timestamp (right-aligned)                 */
-/*   row 2: source + event identifier                                     */
+/* Wrapped layout (3 cells × 2 rows):                                     */
+/*   row 1: pill (auto) | .   (1fr) | timestamp (auto, right-aligned)     */
+/*   row 2: source         | event   (spans 2 cells)                     */
 /* ====================================================================== */
-@media (max-width: 640px) {
-  .syslog-head {
-    /* No leading disclosure column — chevron now lives in the
-       envelope-content row. 3 grid cells: pill (auto) | event (1fr)
-       | timestamp (auto, right-aligned), with source dropping to
-       row 2 next to the event identifier. */
-    grid-template-columns: auto 1fr auto;
-    grid-template-areas:
-      "pill .   ts"
-      "src  ev  ev";
-    row-gap: 4px;
-    column-gap: 8px;
-    font-size: 0.78rem;
-  }
-  .syslog-head > .kind-tag { grid-area: pill; }
-  .syslog-head > .syslog-source { grid-area: src; }
-  .syslog-head > .syslog-event { grid-area: ev; min-width: 0; }
-  .syslog-head > .syslog-ts {
-    grid-area: ts;
-    justify-self: end;
-    font-size: 0.7rem;
-    white-space: nowrap;
-  }
+.syslog-rows-wrapped .syslog-head {
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "pill .   ts"
+    "src  ev  ev";
+  row-gap: 4px;
+  column-gap: 8px;
+  font-size: 0.78rem;
 }
+.syslog-rows-wrapped .syslog-head > .kind-tag { grid-area: pill; }
+.syslog-rows-wrapped .syslog-head > .syslog-source { grid-area: src; }
+.syslog-rows-wrapped .syslog-head > .syslog-event { grid-area: ev; min-width: 0; }
+.syslog-rows-wrapped .syslog-head > .syslog-ts {
+  grid-area: ts;
+  justify-self: end;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+

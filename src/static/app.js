@@ -27,28 +27,46 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireExportInfo();
   wireDebugPill();
   wireMfaModal();
+  _wireSyslogFit();
+  _wireTopbarFlat();
+  _wireSysCardCollapse();
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.addEventListener("click", () => setView(btn.dataset.view))
   );
+  // Restore the previously selected tab BEFORE refreshAll() so the
+  // right view paints on first frame instead of flickering through
+  // the default "cases" view first.
+  const savedView = persistState.get("view");
+  if (savedView && ["cases", "updates", "systemlog"].includes(savedView)) {
+    setView(savedView);
+  }
   await refreshAll();
   setInterval(updateCountdown, 1000);
-  setInterval(pollPullStatus, 3000);
-  // Storage bar runs two poll cadences. When the user is looking
-  // at the System tab we want near-live updates (a file being
-  // touched anywhere in data/ should reflect within a couple of
-  // seconds). On any other tab we fall back to a relaxed cadence
-  // so we're not hammering the walk for a bar that isn't visible.
-  updateStorageBar();
+
+  // Status poll cadence: fast (2s) only while a pull is running,
+  // otherwise 30s. The idle poll exists to catch externally-
+  // triggered pulls (another browser tab or a scheduler fire) and
+  // to refresh the version chip after a deploy — neither needs
+  // sub-30s reaction time.
   setInterval(() => {
-    const fast = state.view === "systemlog";
     const now = Date.now();
-    const since = now - (state._lastStoragePoll || 0);
-    const interval = fast ? 3_000 : 30_000;
-    if (since >= interval) {
-      state._lastStoragePoll = now;
-      updateStorageBar();
+    const interval = state.pullRunning ? 2_000 : 30_000;
+    if (now - (state._lastStatusPoll || 0) >= interval) {
+      state._lastStatusPoll = now;
+      pollPullStatus();
     }
   }, 1_000);
+
+  // Storage is event-driven, NOT polled. /api/storage walks the
+  // entire data/ tree on every call (os.walk + stat per file), so
+  // a periodic poll = constant disk I/O for a value that only
+  // changes when the disk actually changes. Refreshes are
+  // triggered from the events that move the bar:
+  //   - boot (below, once)
+  //   - tab switch into System (setView)
+  //   - pull finish (pollPullStatus, line ~589)
+  //   - clear log button (line ~1512)
+  updateStorageBar();
 });
 
 
@@ -92,39 +110,195 @@ async function wireDebugPill() {
   });
 }
 
+// Nudge a popover back into the viewport when its natural anchor
+// (`right: 0` relative to the badge's wrapper) would push either
+// edge past the screen. Called every time a popover opens.
+// Reads the current bounding rect, computes the overflow, and
+// applies a horizontal translate to snap the popover inside the
+// viewport with an 8px margin.
+function positionPopover(pop) {
+  pop.style.transform = "";   // reset before measuring
+  const r = pop.getBoundingClientRect();
+  const margin = 28;          // gap between popover and viewport edge
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  if (r.left < margin) {
+    pop.style.transform = `translateX(${margin - r.left}px)`;
+  } else if (r.right > vw - margin) {
+    pop.style.transform = `translateX(-${r.right - (vw - margin)}px)`;
+  }
+}
+
 function wireExportInfo() {
   // Wire each (info-badge, popover) pair on the System tab. Both the
   // "Export data" badge and the "debug" badge share the same toggle
   // semantics: click to open, click outside / Escape to dismiss.
+  // Only one popover may be open at a time — opening one closes the
+  // others so they can't visually block each other.
   const pairs = [
     ["export-info-btn", "export-info-popover"],
     ["debug-info-btn",  "debug-info-popover"],
   ];
-  for (const [btnId, popId] of pairs) {
-    const btn = document.getElementById(btnId);
-    const pop = document.getElementById(popId);
-    if (!btn || !pop) continue;
-    const close = () => {
-      pop.hidden = true;
-      btn.setAttribute("aria-expanded", "false");
-    };
+  const popovers = pairs
+    .map(([btnId, popId]) => ({
+      btn: document.getElementById(btnId),
+      pop: document.getElementById(popId),
+    }))
+    .filter(p => p.btn && p.pop);
+
+  const closeAll = () => {
+    for (const p of popovers) {
+      p.pop.hidden = true;
+      p.pop.style.transform = "";
+      p.btn.setAttribute("aria-expanded", "false");
+    }
+  };
+
+  for (const p of popovers) {
+    const { btn, pop } = p;
     btn.addEventListener("click", e => {
       e.stopPropagation();
       const open = pop.hidden;
+      // Always close every other popover first so only one is
+      // visible at a time.
+      closeAll();
       pop.hidden = !open;
       btn.setAttribute("aria-expanded", open ? "true" : "false");
-    });
-    document.addEventListener("click", e => {
-      if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
-    });
-    document.addEventListener("keydown", e => {
-      if (e.key === "Escape") close();
+      // After the browser has rendered the un-hidden popover, snap
+      // it back inside the viewport if either edge spilled out.
+      if (!pop.hidden) requestAnimationFrame(() => positionPopover(pop));
     });
   }
+
+  // Re-position any open popover on resize / orientation change so
+  // a phone rotation doesn't leave it stranded off-screen.
+  window.addEventListener("resize", () => {
+    for (const { pop } of popovers) {
+      if (!pop.hidden) positionPopover(pop);
+    }
+  });
+
+  // Single document-level handlers for outside-click + Escape so
+  // every popover dismisses together.
+  document.addEventListener("click", e => {
+    for (const { btn, pop } of popovers) {
+      if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) {
+        pop.hidden = true;
+        btn.setAttribute("aria-expanded", "false");
+      }
+    }
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closeAll();
+  });
+}
+
+// ============================================================
+// Topbar per-row alignment — when a cluster ends up alone on a
+// row, expand it to fill the row so its trailing item snaps to
+// the right edge via auto-margin. Driven by vertical centerline
+// comparison (align-items: center keeps row members on the same
+// centerline regardless of their individual heights, so offsetTop
+// alone gives false negatives for "same row").
+// ============================================================
+function _rowCenter(el) {
+  return el.offsetTop + el.offsetHeight / 2;
+}
+function _sameRow(a, b) {
+  if (!a || !b) return false;
+  return Math.abs(_rowCenter(a) - _rowCenter(b)) < 6;
+}
+function _wireTopbarFlat() {
+  const topbar = document.querySelector(".topbar");
+  const left = topbar?.querySelector(".topbar-left");
+  const right = topbar?.querySelector(".topbar-right");
+  if (!topbar || !window.ResizeObserver) return;
+  let raf = 0;
+  const recheck = () => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      left?.classList.remove("is-isolated");
+      right?.classList.remove("is-isolated");
+
+      // Single-row vs split: if the two clusters' centerlines
+      // disagree, the topbar has been forced into a 2-row split.
+      // Mark BOTH clusters isolated so each spans its full row
+      // and stretches its two children 50/50 — the user wants the
+      // 4 boxes to lay out as a clean 2×2 grid in that state.
+      if (left && right && !_sameRow(left, right)) {
+        left.classList.add("is-isolated");
+        right.classList.add("is-isolated");
+      }
+    });
+  };
+  recheck();
+  new ResizeObserver(recheck).observe(topbar);
+  // The topbar's content length changes whenever the subtitle
+  // re-renders (every 3s), so re-check on a timer too.
+  setInterval(recheck, 3000);
+}
+
+// ============================================================
+// System-log row fit detection — same pattern as _wireTopbarFlat.
+// The desktop .syslog-head grid (220px 110px 1fr auto) reserves
+// ~360px of fixed columns; on narrow widths a long event token
+// like `scheduler_configured` overflows the 1fr cell and visually
+// collides with the right-aligned timestamp. Rather than picking
+// a static viewport breakpoint (which fires too early or too late
+// depending on the longest event in view), measure each row's
+// natural single-row width. If any row would overflow, add
+// `.syslog-rows-wrapped` to the feed so all rows reflow into the
+// 2-row layout — keeping every row visually consistent.
+// ============================================================
+let _syslogFitObserver = null;
+let _syslogFitRaf = 0;
+function _recheckSyslogFit() {
+  const feed = document.getElementById("systemlog-feed");
+  if (!feed) return;
+  cancelAnimationFrame(_syslogFitRaf);
+  _syslogFitRaf = requestAnimationFrame(() => {
+    feed.classList.remove("syslog-rows-wrapped");
+    const heads = feed.querySelectorAll(".syslog-head");
+    if (!heads.length) return;
+    // Sample any head for its grid gap + container padding. All heads
+    // share the same .syslog-head rule so one is representative.
+    const sample = heads[0];
+    const cs = getComputedStyle(sample);
+    const gap = parseFloat(cs.columnGap || cs.gap || 10) || 10;
+    // Available row width = the head's own clientWidth minus its
+    // horizontal padding. The head is the grid container.
+    const padX = parseFloat(cs.paddingLeft || 0) + parseFloat(cs.paddingRight || 0);
+    const available = sample.clientWidth - padX;
+    if (available <= 0) return;
+    let maxNeeded = 0;
+    for (const head of heads) {
+      let w = 0;
+      let n = 0;
+      for (const child of head.children) {
+        // Skip elements that don't render (e.g. empty source span).
+        if (!child.scrollWidth && !child.offsetWidth) continue;
+        w += child.scrollWidth;
+        n++;
+      }
+      w += Math.max(0, n - 1) * gap;
+      if (w > maxNeeded) maxNeeded = w;
+    }
+    if (maxNeeded > available) {
+      feed.classList.add("syslog-rows-wrapped");
+    }
+  });
+}
+function _wireSyslogFit() {
+  const feed = document.getElementById("systemlog-feed");
+  if (!feed || !window.ResizeObserver) return;
+  if (_syslogFitObserver) return;
+  _syslogFitObserver = new ResizeObserver(_recheckSyslogFit);
+  _syslogFitObserver.observe(feed);
+  _recheckSyslogFit();
 }
 
 function setView(view) {
   state.view = view;
+  persistState.set("view", view);
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.classList.toggle("active", btn.dataset.view === view)
   );
@@ -138,6 +312,91 @@ function setView(view) {
     // stats are current, not up-to-30s stale from the slow-poll.
     updateStorageBar();
     state._lastStoragePoll = Date.now();
+  }
+}
+
+// ============================================================
+// Tiny localStorage state bag — survives page refresh. Used for
+// active tab, system-card collapse states, etc. Errors swallowed
+// so a disabled localStorage (private browsing, quota exceeded)
+// degrades silently instead of breaking the page.
+// ============================================================
+const PERSIST_STATE_KEY = "uscis_prober_state_v1";
+const persistState = {
+  _read() {
+    try {
+      return JSON.parse(localStorage.getItem(PERSIST_STATE_KEY) || "{}") || {};
+    } catch (_) { return {}; }
+  },
+  _write(obj) {
+    try { localStorage.setItem(PERSIST_STATE_KEY, JSON.stringify(obj)); }
+    catch (_) { /* ignore */ }
+  },
+  get(key) {
+    return this._read()[key];
+  },
+  set(key, value) {
+    const cur = this._read();
+    cur[key] = value;
+    this._write(cur);
+  },
+};
+
+// ============================================================
+// System-tab card collapse — every .sys-card with a data-card-id
+// gets a clickable title that toggles its body. Collapse state
+// persists across refresh via persistState. Each card's body
+// (everything except the .sys-card-title) is hidden by the
+// `.is-collapsed` CSS rule. Idempotent: safe to call repeatedly
+// after re-renders (the System log card replaces its title node
+// on every renderSystemLog call).
+// ============================================================
+function _wireSysCardCollapse() {
+  const cards = document.querySelectorAll(".sys-card[data-card-id]");
+  for (const card of cards) {
+    const id = card.dataset.cardId;
+    const collapsed = persistState.get(`card_${id}_collapsed`) === true;
+    card.classList.toggle("is-collapsed", collapsed);
+
+    // Inject / refresh the title chrome on whatever title node is
+    // currently in the card. Idempotent: skips if the chevron is
+    // already there. Re-applying aria-expanded picks up state
+    // changes since the last call.
+    const title = card.querySelector(".sys-card-title");
+    if (title) {
+      if (!title.querySelector(".sys-card-toggle")) {
+        const tog = document.createElement("span");
+        tog.className = "sys-card-toggle";
+        tog.setAttribute("aria-hidden", "true");
+        tog.textContent = "▼";
+        title.insertBefore(tog, title.firstChild);
+      }
+      title.setAttribute("role", "button");
+      title.setAttribute("tabindex", "0");
+      title.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    }
+
+    // Wire one delegated click listener per card (not per title)
+    // so re-rendering the title node doesn't lose handlers and
+    // doesn't pile up duplicates.
+    if (card.dataset.collapseWired === "true") continue;
+    card.dataset.collapseWired = "true";
+    const toggle = (e) => {
+      if (!e.target.closest(".sys-card-title")) return;
+      const nowCollapsed = !card.classList.contains("is-collapsed");
+      card.classList.toggle("is-collapsed", nowCollapsed);
+      const t = card.querySelector(".sys-card-title");
+      if (t) t.setAttribute("aria-expanded", nowCollapsed ? "false" : "true");
+      persistState.set(`card_${id}_collapsed`, nowCollapsed);
+    };
+    card.addEventListener("click", toggle);
+    card.addEventListener("keydown", (e) => {
+      if (!e.target.closest(".sys-card-title")) return;
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggle(e);
+      }
+    });
   }
 }
 
@@ -242,16 +501,9 @@ function updateVersionChip(version) {
   const prev = state.versionSha;
   state.versionSha = sha;
 
-  // Primary chip text: the commit's authored instant rendered in the
-  // operator's local timezone as
-  //     Version: YYYY-MM-DDTHH:MM:SS TZ
-  // e.g. `Version: 2026-04-24T17:28:04 EDT`. The "Version:" prefix
-  // makes it unambiguous that the timestamp identifies the deployed
-  // build (not e.g. last pull or current time). Format is still
-  // lexicographically comparable on the date+time portion so
-  // visually diffing two chips tells you which is newer. Falls back
-  // to the server-side UTC label, then to short SHA, on a box where
-  // `commit_date` is unavailable (no git).
+  // Chip text: "Version: <local-stamp>" on a single line. Lives in
+  // the System tab's Actions row now (was: topbar) — kept compact
+  // so it sits inline next to the DEBUG / Export-data buttons.
   const localStamp = _formatVersionChipLocal(commitDate);
   chip.textContent = localStamp
     ? `Version: ${localStamp}`
@@ -332,7 +584,14 @@ async function pollPullStatus() {
     btn.disabled = state.pullRunning;
     // Button label mirrors the state — the countdown box is the
     // ambient running indicator (was: separate "running…" spinner).
-    btn.textContent = state.pullRunning ? "Pulling…" : "Pull update";
+    // Two-line label at wide widths ("Manual" / "Pull Update");
+    // CSS collapses it to one line at narrow widths. When the pull
+    // is running, swap to a single "Pulling…" status so the button
+    // reads as state, not action.
+    btn.innerHTML = state.pullRunning
+      ? `<span class="pull-btn-line">Pulling…</span>`
+      : `<span class="pull-btn-line">Manual</span>` +
+        `<span class="pull-btn-line">Pull Update</span>`;
     document.getElementById("next-when").textContent =
       state.nextRun ? formatLocal(state.nextRun) : "—";
     updateCountdown();
@@ -398,10 +657,35 @@ function renderSummary() {
     .slice(-1)[0];
   // Announce the tz once here so individual timestamps can stay compact.
   const tz = getLocalTimezoneAbbrev();
-  document.getElementById("summary-line").textContent =
-    `${state.cases.length} cases · ${totalCaptures} snapshots` +
-    (last ? ` · last pull ${formatLocal(new Date(last))}` : "") +
-    ` · times in ${tz}`;
+  // Mirror the NEXT PULL countdown box layout — label / value / sub
+  // on 3 stacked lines at wide widths, single thin line when the
+  // topbar wraps. CSS collapses via media query.
+  //
+  // Label says LAST PULL so the value row drops the redundant
+  // "last pull" prefix. The timezone moved to its own dedicated
+  // pill (left of LAST PULL) so the value row stays clean.
+  const summaryEl = document.getElementById("summary-line");
+  const lastPullValue = last ? formatLocal(new Date(last)) : "—";
+  const subParts = [`${state.cases.length} cases`, `${totalCaptures} snapshots`];
+  summaryEl.innerHTML =
+    `<span class="chip-label">Last pull</span>` +
+    `<span class="chip-value">${escapeHtml(lastPullValue)}</span>` +
+    `<span class="chip-sub">${escapeHtml(subParts.join(" · "))}</span>`;
+
+  // Timezone chip lives in the System info card now (used to be a
+  // 3-line topbar pill — moved out so the topbar holds only at-a-
+  // glance live state). One line: "Timezone: EDT · America/New_York".
+  const tzEl = document.getElementById("tz-info");
+  if (tzEl) {
+    let ianaName = "";
+    try {
+      ianaName = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch (_) { /* ignore */ }
+    const text = ianaName
+      ? `Timezone: ${tz} · ${ianaName}`
+      : `Timezone: ${tz}`;
+    tzEl.textContent = text;
+  }
 }
 
 function renderCases() {
@@ -1006,24 +1290,34 @@ function renderSystemLog() {
     ? `Page ${page} of ${totalPages} · showing events ${windowStart}–${windowEnd} of ${total}`
     : `${total} event${total === 1 ? "" : "s"}`;
 
-  const head = document.createElement("div");
-  head.className = "updates-head syslog-head-row";
-  head.innerHTML =
-    `<div>` +
-      // Title styled to match the other System-tab card titles
-      // (Actions / Storage) — uppercase + tracking + muted colour.
-      `<h2 class="sys-card-title">System log` +
-        // Size indicator lives inside the header so the operator sees
-        // "should I clear this?" right next to the Clear log button.
-        `<span class="syslog-storage-line" id="syslog-storage-line"></span>` +
-      `</h2>` +
-      `<div class="updates-sub">` +
-        `${escapeHtml(countLine)} · ` +
-        `Persisted to <code>data/system_log.json</code>. Newest first.` +
-      `</div>` +
-    `</div>`;
-  head.appendChild(renderSystemLogControls());
-  root.appendChild(head);
+  // System log card header: title + subtitle. Title is rendered as
+  // a DIRECT child of the .sys-card section so the collapse rule
+  // (.sys-card.is-collapsed > *:not(.sys-card-title) { display:none })
+  // can hide the body while keeping the title visible. The subtitle
+  // is its own sibling and collapses with the rest.
+  const title = document.createElement("h2");
+  title.className = "sys-card-title";
+  title.textContent = "System log";
+  root.appendChild(title);
+  // Re-wire collapse handlers since the title was freshly rendered
+  // (the previous title node — if any — was wiped by root.innerHTML).
+  _wireSysCardCollapse();
+
+  const sub = document.createElement("div");
+  sub.className = "updates-sub syslog-card-sub";
+  sub.innerHTML =
+    `<span class="syslog-storage-line" id="syslog-storage-line"></span>` +
+    `${escapeHtml(countLine)} · ` +
+    `Persisted to <code>data/system_log.json</code>. Newest first.`;
+  root.appendChild(sub);
+
+  // Mount Export log + Clear log into the Actions card (if present).
+  // Render lazily here so the controls exist whenever the System log
+  // is rendered, even though the Actions card is in the static HTML.
+  const actionsMount = document.getElementById("syslog-controls-mount");
+  if (actionsMount && !actionsMount.firstChild) {
+    actionsMount.appendChild(renderSystemLogControls());
+  }
   // Paint the size line with whatever the latest /api/storage poll
   // returned. If no poll has landed yet, a lightweight fire-and-forget
   // fetch triggers one.
@@ -1048,6 +1342,13 @@ function renderSystemLog() {
   if (totalPages > 1) {
     root.appendChild(renderSystemLogPagination(page, totalPages, "bottom"));
   }
+
+  // Re-measure rows now that they're in the DOM. The ResizeObserver
+  // wired in _wireSyslogFit() handles width changes, but a fresh
+  // render replaces all .syslog-head nodes — so we trigger a check
+  // immediately so the wrapped class lands on first paint, not after
+  // the first resize event.
+  _recheckSyslogFit();
 }
 
 function renderSystemLogPagination(page, totalPages, position) {
@@ -1112,12 +1413,18 @@ function renderSystemLogPagination(page, totalPages, position) {
 // confused with the "Export data" button in the topbar (which exports
 // cases only — not the log).
 function renderSystemLogControls() {
-  const wrap = document.createElement("div");
+  // Wrap as `display: contents` so the buttons sit as direct
+  // siblings inside the parent `.sys-actions-row` flex container
+  // (matching DEBUG + Export data placement).
+  const wrap = document.createElement("span");
   wrap.className = "syslog-controls";
+  wrap.style.display = "contents";
 
   const exportBtn = document.createElement("a");
   exportBtn.href = "/api/system-log/export";
-  exportBtn.className = "syslog-export-btn";
+  // .action-btn for unified action-button geometry; the .syslog-export-btn
+  // class is preserved for any specialised rules (none currently).
+  exportBtn.className = "action-btn syslog-export-btn";
   exportBtn.textContent = "Export log";
   exportBtn.title = "Download this log as JSON";
 
@@ -1141,18 +1448,15 @@ function renderSystemLogControls() {
 //   in the body as a second gate. Cancel, Escape, and backdrop-click
 //   all close the dialog safely.
 function renderClearLogControl() {
-  const wrap = document.createElement("div");
-  wrap.className = "clear-log-control";
-
+  // Sit as a direct sibling in the parent flex row (no wrapper) so
+  // it lines up with DEBUG / Export data / Export log.
   const idle = document.createElement("button");
   idle.type = "button";
-  idle.className = "clear-log-btn";
+  idle.className = "action-btn clear-log-btn";
   idle.textContent = "Clear log";
   idle.title = "Permanently delete every event in this log";
   idle.addEventListener("click", openClearLogDialog);
-
-  wrap.appendChild(idle);
-  return wrap;
+  return idle;
 }
 
 function openClearLogDialog() {
@@ -2547,7 +2851,10 @@ function renderSyslogStorageLine(data) {
   const ratio = limit > 0 ? slBytes / limit : 0;
   el.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
   el.classList.toggle("critical", ratio >= 0.9);
-  el.textContent = `System log: ${formatBytes(slBytes)}`;
+  // Title above already says "System log", so drop the prefix here —
+  // the subtitle just shows the size value followed by the standard
+  // separator dot.
+  el.textContent = `${formatBytes(slBytes)} · `;
 }
 
 function formatBytes(n) {
