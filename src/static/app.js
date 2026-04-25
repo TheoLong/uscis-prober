@@ -1298,7 +1298,6 @@ function _renderFlatSystemLogRow(entry) {
     : "";
   block.innerHTML =
     `<div class="syslog-head">` +
-      `<span class="syslog-disclosure-spacer" aria-hidden="true"></span>` +
       `<span class="kind-tag kind-${info.tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
       `<span class="syslog-event">${escapeHtml(entry.event)}</span>` +
@@ -1416,17 +1415,49 @@ function _renderNestedSystemLogRow(entry) {
       `</div>`
     : "";
 
+  // The disclosure chevron is rendered INLINE with the `attempts`
+  // kv row, so the row reads `▶ attempts 2`. Click target is the
+  // chevron itself; the rest of the kv stays as-is.
+  const renderEnvelopeKvRow = (k) => {
+    const v = entry[k];
+    if (k === "attempts") {
+      // Replace the row's outer <div> opener with a flex variant
+      // and inject the chevron as the first child so the chevron,
+      // key, and value sit on a single horizontal line.
+      const inner = _detailKvHtml(k, v);
+      const chevron =
+        `<button type="button" class="syslog-disclosure" ` +
+        `aria-label="Expand steps" aria-controls="${disclosureId}">▶</button>`;
+      return inner.replace(
+        '<div class="syslog-detail">',
+        `<div class="syslog-detail syslog-detail-with-disclosure">${chevron}`,
+      );
+    }
+    return _detailKvHtml(k, v);
+  };
+  const envelopeKvWithDisclosureHtml = envelopeKvKeys.length
+    ? `<div class="syslog-details syslog-envelope-kv">` +
+        envelopeKvKeys.map(renderEnvelopeKvRow).join("") +
+      `</div>`
+    : `<div class="syslog-details syslog-envelope-kv">` +
+        `<div class="syslog-detail syslog-detail-with-disclosure">` +
+          `<button type="button" class="syslog-disclosure" ` +
+            `aria-label="Expand steps" aria-controls="${disclosureId}">▶</button>` +
+          `<span class="syslog-detail-k">steps</span>` +
+          `<span class="syslog-detail-v">${entry.steps?.length || 0}</span>` +
+        `</div>` +
+      `</div>`;
+
   block.innerHTML =
     `<button type="button" class="syslog-head syslog-head-expandable"` +
         ` aria-expanded="false" aria-controls="${disclosureId}">` +
-      `<span class="syslog-disclosure" aria-hidden="true">▶</span>` +
       `<span class="kind-tag kind-${tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
       `<span class="syslog-event syslog-event-envelope">${escapeHtml(entry.event)}</span>` +
       `<span class="syslog-ts">${escapeHtml(when)}</span>` +
     `</button>` +
     contentHtml +
-    envelopeKvHtml +
+    envelopeKvWithDisclosureHtml +
     `<div class="syslog-steps" id="${disclosureId}" hidden></div>`;
 
   // Populate the expandable body lazily — cheap, but keeps the first
@@ -1436,15 +1467,19 @@ function _renderNestedSystemLogRow(entry) {
     stepsContainer.appendChild(_renderNestedStepRow(step));
   }
 
-  // Wire the disclosure toggle.
+  // Wire the disclosure toggle. The chevron is now a button at the
+  // right edge of the envelope-kv strip; clicking it (or anywhere on
+  // the header row) toggles the steps panel below.
   const headBtn = block.querySelector(".syslog-head-expandable");
   const triangle = block.querySelector(".syslog-disclosure");
-  headBtn.addEventListener("click", () => {
+  const toggle = () => {
     const isOpen = !stepsContainer.hidden;
     stepsContainer.hidden = isOpen;
     headBtn.setAttribute("aria-expanded", String(!isOpen));
     triangle.textContent = isOpen ? "▶" : "▼";
-  });
+  };
+  headBtn.addEventListener("click", toggle);
+  triangle.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
 
   return block;
 }

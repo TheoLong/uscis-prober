@@ -565,7 +565,12 @@ main[hidden] { display: none; }
  */
 .syslog-head {
   display: grid;
-  grid-template-columns: 16px 220px 110px 1fr auto;
+  /* No leading column for the disclosure triangle anymore — the
+     triangle now lives in the envelope-content row below. Pills
+     align flush-left across both flat rows and expandable envelopes,
+     so a pull row's "PULL" pill starts at the same X as a flat row's
+     "SERVER STARTED" pill. */
+  grid-template-columns: 220px 110px 1fr auto;
   align-items: center;
   gap: 10px;
   font-size: 0.84rem;
@@ -636,16 +641,42 @@ main[hidden] { display: none; }
 .syslog-head-expandable:hover {
   background: var(--pill-bg);
 }
-.syslog-disclosure,
-.syslog-disclosure-spacer {
-  font-size: 0.7rem;
-  color: var(--muted);
-  width: 10px;
-  display: inline-block;
-  flex-shrink: 0;
+/* The "attempts" row in the envelope-kv strip gets a special inline
+   layout: `▶ attempts  2` on a single horizontal band. The default
+   `.syslog-detail` uses `display: contents` so its children flow into
+   the parent grid; the disclosure variant overrides with flex so the
+   chevron sits flush-left of the key. */
+.syslog-detail.syslog-detail-with-disclosure {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  grid-column: 1 / -1;
 }
-.syslog-disclosure-spacer {
-  visibility: hidden;   /* reserves width only; no glyph */
+.syslog-detail.syslog-detail-with-disclosure .syslog-detail-k {
+  /* Match the default kv key column width so this row aligns with
+     the kv pairs above (e.g. started_at, finished_at). */
+  min-width: 120px;
+}
+.syslog-disclosure {
+  /* Reset default <button> chrome and render as a small chevron
+     glyph that reads as the expand affordance. */
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  transition: color 0.12s;
+  line-height: 1;
+}
+.syslog-disclosure:hover { color: var(--text); }
+.syslog-disclosure:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 1px;
+  border-radius: 3px;
 }
 .syslog-event-envelope {
   font-weight: 600;
@@ -2231,16 +2262,18 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 /* ====================================================================== */
 @media (max-width: 640px) {
   .syslog-head {
-    grid-template-columns: 16px auto 1fr auto;
+    /* No leading disclosure column — chevron now lives in the
+       envelope-content row. 3 grid cells: pill (auto) | event (1fr)
+       | timestamp (auto, right-aligned), with source dropping to
+       row 2 next to the event identifier. */
+    grid-template-columns: auto 1fr auto;
     grid-template-areas:
-      "disc pill . ts"
-      ".    src  ev ev";
+      "pill .   ts"
+      "src  ev  ev";
     row-gap: 4px;
     column-gap: 8px;
     font-size: 0.78rem;
   }
-  .syslog-head > .syslog-disclosure,
-  .syslog-head > .syslog-disclosure-spacer { grid-area: disc; }
   .syslog-head > .kind-tag { grid-area: pill; }
   .syslog-head > .syslog-source { grid-area: src; }
   .syslog-head > .syslog-event { grid-area: ev; min-width: 0; }
