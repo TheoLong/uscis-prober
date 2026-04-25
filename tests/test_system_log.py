@@ -127,7 +127,7 @@ def _stub_server_config(monkeypatch, tmp_path, cases=None, auth=None):
         "auth": auth or {},
         "retry": 0,
         "retry_wait_seconds": 0,
-        "storage_limit_gb": 1.0,
+        "storage_limit_mb": 256,
     }))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
@@ -598,7 +598,7 @@ def test_api_system_log_returns_events(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -619,7 +619,7 @@ def test_api_system_log_respects_limit(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(20):
@@ -641,7 +641,7 @@ def test_api_system_log_paginates_with_offset(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(888):
@@ -667,7 +667,7 @@ def test_api_system_log_offset_past_end_returns_empty_slice(monkeypatch, tmp_pat
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for _ in range(10):
@@ -683,7 +683,7 @@ def test_api_system_log_clamps_limit_to_500(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(700):
@@ -700,7 +700,7 @@ def test_api_system_log_default_limit_is_page_size(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for _ in range(250):
@@ -717,7 +717,7 @@ def test_api_system_log_negative_offset_clamped_to_zero(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     for i in range(5):
@@ -743,7 +743,7 @@ def test_api_system_log_ignores_bad_limit(monkeypatch, tmp_path):
     import server
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     system_log.log("tick")
@@ -760,7 +760,7 @@ def test_api_system_log_clear_wipes_and_audits(monkeypatch, tmp_path):
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -792,7 +792,7 @@ def test_api_system_log_clear_rejects_without_confirm(monkeypatch, tmp_path):
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -830,7 +830,7 @@ def test_api_system_log_clear_on_empty_log_is_noop_plus_audit(monkeypatch, tmp_p
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -864,7 +864,7 @@ def test_api_export_excludes_system_log(monkeypatch, tmp_path):
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -892,7 +892,7 @@ def test_api_system_log_export_returns_zip_with_log_and_traces(monkeypatch, tmp_
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 
@@ -936,7 +936,7 @@ def test_api_system_log_export_on_empty_log_is_zip_with_empty_array(monkeypatch,
 
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_gb": 1.0}))
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
 

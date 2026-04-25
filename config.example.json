@@ -14,5 +14,5 @@
   },
   "retry": 2,
   "retry_wait_seconds": 180,
-  "storage_limit_gb": 1.0
+  "storage_limit_mb": 256
 }

@@ -182,40 +182,54 @@ def load_retry_policy(config: dict | None = None) -> RetryPolicy:
     return RetryPolicy(retry=clamped_retry, retry_wait_seconds=clamped_wait)
 
 
-# Storage quota. Clamped to [0.01, 100] GB. A 0 limit would mean
-# "immediately over quota" on every pull so we require > 0.
-STORAGE_MIN_GB = 0.01
-STORAGE_MAX_GB = 100.0
+# Storage quota. Specified in MB; clamped to [10, 102400] MB
+# (10 MB lower bound prevents "immediately over quota" on every pull
+# while still allowing tight limits; 100 GB upper bound is generous).
+# Default is 256 MB — fits years of snapshot history for typical
+# 3-cases-3x-daily usage with plenty of headroom for traces.
+STORAGE_MIN_MB = 10
+STORAGE_MAX_MB = 100 * 1024
+STORAGE_DEFAULT_MB = 256
 
 
 def load_storage_limit_bytes(config: dict | None = None) -> int:
-    """Read `storage_limit_gb` from config.json and return bytes.
+    """Read `storage_limit_mb` from config.json and return bytes.
 
-    REQUIRED field. Missing or non-numeric raises ConfigError.
-    Used both by the live storage bar (/api/storage) and the pull
-    post-condition check that fires `storage_limit_exceeded`.
+    Optional — defaults to STORAGE_DEFAULT_MB (256) when absent.
+    Present-but-invalid values still raise ConfigError so typos
+    surface at load time. Used by the live storage bar
+    (/api/storage) and the post-pull storage-quota check.
+
+    Backward compat: legacy configs that still carry
+    `storage_limit_gb` are honoured (silently converted to MB) so
+    older deployments keep working without an immediate config edit.
     """
     if config is None:
         config = load_config()
-    if "storage_limit_gb" not in config:
-        raise ConfigError(
-            "config.json is missing required key `storage_limit_gb` "
-            "(number of GB before storage alerts fire). See "
-            "config.example.json — recommended value is 1.0."
-        )
-    raw = config["storage_limit_gb"]
+    # Legacy GB key still supported — convert to MB at load time.
+    if "storage_limit_gb" in config and "storage_limit_mb" not in config:
+        try:
+            gb = float(config["storage_limit_gb"])
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"config.storage_limit_gb={config['storage_limit_gb']!r}"
+                f" is not numeric."
+            )
+        raw = gb * 1024
+    else:
+        raw = config.get("storage_limit_mb", STORAGE_DEFAULT_MB)
     try:
-        gb = float(raw)
+        mb = float(raw)
     except (TypeError, ValueError):
         raise ConfigError(
-            f"config.storage_limit_gb={raw!r} is not numeric."
+            f"config.storage_limit_mb={raw!r} is not numeric."
         )
-    if gb < STORAGE_MIN_GB or gb > STORAGE_MAX_GB:
+    if mb < STORAGE_MIN_MB or mb > STORAGE_MAX_MB:
         raise ConfigError(
-            f"config.storage_limit_gb={gb} out of range "
-            f"[{STORAGE_MIN_GB}, {STORAGE_MAX_GB}]."
+            f"config.storage_limit_mb={mb} out of range "
+            f"[{STORAGE_MIN_MB}, {STORAGE_MAX_MB}]."
         )
-    return int(gb * 1024 * 1024 * 1024)
+    return int(mb * 1024 * 1024)
 
 
 def load_trace_successful_pulls(config: dict | None = None) -> bool:
@@ -553,7 +567,7 @@ def _check_storage_limit_and_alert() -> list[dict]:
     """Post-pull storage-quota check.
 
     Compares total bytes (via /api/storage's same collector) against
-    `storage_limit_gb`. If over and we haven't already alerted for
+    `storage_limit_mb`. If over and we haven't already alerted for
     this crossing, emits `storage_limit_exceeded` (error) and sends
     an email.
 
@@ -690,7 +704,7 @@ def _send_storage_alert_email(
         f"(over by {_human(total_bytes - limit_bytes)})\n\n"
         f"Breakdown:\n{rows_plain}\n\n"
         f"Open the dashboard and clear the System log, or raise "
-        f"`storage_limit_gb` in config.json."
+        f"`storage_limit_mb` in config.json."
     )
     html = (
         f"<h3>USCIS Case Prober — storage limit reached</h3>"
@@ -701,7 +715,7 @@ def _send_storage_alert_email(
         f"<thead><tr><th>Category</th><th>Size</th><th>Files</th></tr>"
         f"</thead><tbody>{rows_html}</tbody></table>"
         f"<p style='color:#888'>Open the dashboard and clear the "
-        f"System log, or raise <code>storage_limit_gb</code> in "
+        f"System log, or raise <code>storage_limit_mb</code> in "
         f"config.json.</p>"
     )
 

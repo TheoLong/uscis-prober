@@ -65,9 +65,14 @@ body {
 }
 .topbar-left {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
+  /* Stack the title row (h1: brand + version chip + debug pill) on
+     top of the subtitle line. Putting them on separate rows means the
+     subtitle never has to fight the chip / debug pill for width — at
+     any viewport size the title row keeps its natural width and the
+     subtitle row gets its own clean line below. */
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   /* min-width:0 lets the subtitle truncate cleanly inside the
      flex container instead of forcing the parent wider. */
   min-width: 0;
@@ -90,7 +95,31 @@ body {
   min-width: 0;
   max-width: 100%;
 }
+.brand {
+  /* Brand block — logo + title bundled in a pill that stands out from
+     the supporting metadata pills around it without going dark.
+     White elevated surface + accent-colored border + accent-tinted
+     text gives the brand visual primacy in the topbar while staying
+     in the light/airy theme. */
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev);          /* clean white */
+  color: var(--accent-hot);            /* deep brand blue */
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 4px 14px 4px 8px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(58, 92, 216, 0.12);
+}
+.brand-name {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: inherit;
+}
 .brand-logo {
+  /* Logo sits flush on the white brand-pill surface. */
   display: block;
   flex-shrink: 0;
 }
@@ -130,10 +159,19 @@ body {
 
 .subtitle {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.78rem;
+  /* Box the subtitle as its own pill so the topbar reads as a row of
+     discrete info cards rather than loose text. Border + bg mirrors
+     the version chip + countdown box so the three "info zones" feel
+     unified. */
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 3px 12px;
   /* When the topbar squeezes, let the subtitle truncate with an
      ellipsis instead of wrapping to a new line and double-stacking. */
   min-width: 0;
+  max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -142,14 +180,129 @@ body {
   display: flex;
   align-items: center;
   gap: 16px;
-  /* Mirror the left side — wrap freely so countdown + buttons don't
-     squish at intermediate widths. */
+  /* Mirror the left side — wrap freely so the countdown can drop to
+     its own row when there's no room, while the action cluster
+     beneath it always stays intact (see .topbar-actions). */
   flex-wrap: wrap;
   justify-content: flex-end;
   row-gap: 10px;
 }
+/* Action cluster: every button + the spinner indicator MUST stay on
+   one row regardless of viewport width. flex-wrap:nowrap is the lock;
+   if the row genuinely doesn't fit a tiny phone, the cluster scrolls
+   horizontally rather than breaking up. */
+/* System tab — three stacked card sections (Actions / Storage /
+   System log). All share the same surface treatment + a
+   `.sys-card-title` header so each box self-identifies. Outer main
+   uses flex with a tight gap so cards almost touch — the box
+   outlines themselves are sufficient separators. */
+#systemlog-feed {
+  gap: 8px;
+}
+.sys-card,
+.system-actions,
+.storage-bar-wrap,
+#systemlog-content {
+  margin: 0;
+  background: var(--bg-elev, #fff);
+  border: 1px solid var(--border-soft, #e5e7eb);
+  border-radius: var(--radius-sm, 8px);
+  padding: 12px 14px;
+}
+/* The System log card hosts a header strip (.updates-head) with the
+   title + Export/Clear log buttons. Strip its own padding so the
+   visual top-edge lines up with Actions and Storage above. */
+#systemlog-content .updates-head {
+  padding: 0;
+  margin-bottom: 8px;
+}
+/* Section-title styling for every System-tab card. Uses
+   `&` doubled for specificity so it wins against
+   `.updates-head h2 { font-size: 1.2rem; font-weight: 600 }` which
+   the System log header reuses for layout. */
+.sys-card-title,
+.updates-head h2.sys-card-title {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2, #7e8aab);
+}
+/* The size suffix sitting inside the System-log title shouldn't
+   inherit uppercase / tracking — it's a value, not a label. */
+.sys-card-title .syslog-storage-line {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  margin-left: 8px;
+}
 
-.countdown { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.2; }
+/* Actions row inside the Actions card. Each button is wrapped in a
+   .action-with-info container so the small `i` info badge can sit at
+   the top-right corner of the button it describes (instead of as a
+   separate sibling competing for row space). */
+.sys-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.action-with-info {
+  position: relative;
+  display: inline-flex;
+}
+/* Unified size across every action button so the row reads as one
+   consistent button cluster. .action-btn is the modifier — the
+   button's own visual identity (color, weight, glyph) stays
+   intact via its base class (.debug-pill, .pull-btn, .pull-btn-secondary,
+   .syslog-export-btn, .clear-log-btn). */
+.action-btn {
+  height: 34px !important;
+  padding: 0 14px !important;
+  font-size: 0.85rem !important;
+  font-weight: 500 !important;
+  border-radius: var(--radius-sm) !important;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  line-height: 1;
+}
+
+/* Corner-positioned info badge: sits at the top-right of its host
+   button, overlapping by a few pixels so it reads as an annotation
+   on the button rather than its own row item. Combined selector
+   specificity (`.info-badge.info-badge-corner`) wins over the base
+   `.info-badge { background: transparent }` rule below — without
+   this we'd see the host button's color bleed through. */
+.info-badge.info-badge-corner {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 18px;
+  height: 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(26, 34, 64, 0.08);
+  z-index: 1;
+}
+.info-badge.info-badge-corner:hover,
+.info-badge.info-badge-corner[aria-expanded="true"] {
+  background: var(--pill-bg);
+}
+
+.countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+  /* Boxed to match the subtitle / version chip — three discrete info
+     zones in the topbar that all share the same surface treatment. */
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
 .countdown .label {
   font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--muted-2);
@@ -268,7 +421,9 @@ body {
 .pull-indicator {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px;
-  background: var(--pill-bg); border-radius: 999px;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
   font-size: 0.82rem; color: var(--muted);
 }
 .spinner {
@@ -740,9 +895,13 @@ main[hidden] { display: none; }
 }
 
 .syslog-export-btn {
+  /* Matches .debug-pill / .clear-log-btn / .pull-btn-secondary on
+     height + padding + radius + font so the System actions row
+     reads as one consistent button cluster. */
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 500;
+  height: 32px;
   padding: 6px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -750,13 +909,16 @@ main[hidden] { display: none; }
   color: var(--text);
   text-decoration: none;
   cursor: pointer;
-  transition: background 0.12s;
-  line-height: 1.2;
+  transition: background 0.12s, border-color 0.12s;
+  line-height: 1;
   display: inline-flex;
   align-items: center;
   box-sizing: border-box;
 }
-.syslog-export-btn:hover { background: var(--bg-elev); }
+.syslog-export-btn:hover {
+  background: var(--bg-elev);
+  border-color: var(--accent);
+}
 
 /* Pagination bar — one bar above and one below the 100-row list so the
    user doesn't have to scroll either direction to flip pages. */
@@ -808,17 +970,21 @@ main[hidden] { display: none; }
 .clear-log-control { display: inline-flex; }
 
 .clear-log-btn {
+  /* Matches .debug-pill / .syslog-export-btn / .pull-btn-secondary
+     on height + padding + radius + font. Border colour stays --bad
+     to preserve the destructive cue. */
   font: inherit;
   background: transparent;
   color: var(--bad);
   border: 1px solid var(--bad);
   border-radius: var(--radius-sm);
+  height: 32px;
   padding: 6px 12px;
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 500;
   transition: background 0.12s;
-  line-height: 1.2;
+  line-height: 1;
   display: inline-flex;
   align-items: center;
   box-sizing: border-box;
@@ -1570,10 +1736,31 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   .topbar-right { justify-content: space-between; gap: 10px; }
   /* The countdown label and timestamp are fine to hide at this size — the
      value alone is readable, and the timestamp duplicates info in the UI. */
-  .countdown { flex-direction: row; align-items: center; gap: 6px; }
+  /* Mobile countdown: keep ALL three bits (NEXT PULL · value · time)
+     on a single horizontal line so the boxed value doesn't end up
+     dangling without context. Trim font sizes + padding so the whole
+     line still fits a 360px-wide column. */
+  .countdown {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 10px;
+    flex-wrap: wrap;
+  }
+  .countdown .label { font-size: 0.62rem; letter-spacing: 0.1em; }
+  .countdown .when { font-size: 0.68rem; }
+  .countdown .value { font-size: 0.86rem; }
   .countdown .label,
-  .countdown .when { display: none; }
-  .countdown .value { font-size: 0.82rem; }
+  .countdown .value,
+  .countdown .when { display: inline-block; }
+
+  /* Mobile: keep the subtitle pill but trim its padding so it nests
+     cleanly with the other info-zone boxes (brand, version chip,
+     debug, countdown) without looking chunky. */
+  .subtitle {
+    font-size: 0.72rem;
+    padding: 2px 10px;
+  }
   .pull-btn {
     height: 32px;
     padding: 0 12px;
@@ -1696,11 +1883,10 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 14px 16px 16px;
-  margin: 0 0 12px;
-  background: var(--bg-elev, #fff);
-  border: 1px solid var(--border-soft, #e5e7eb);
-  border-radius: var(--radius-sm, 8px);
+  /* margin / padding / surface are now defined by the shared
+     `.sys-card` rule above so all System-tab cards line up. The
+     legacy 12px bottom margin was creating an inconsistent gap
+     between Storage and System log. */
   font-size: 0.78rem;
   color: var(--muted, #6b7280);
 }
@@ -1726,8 +1912,14 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 }
 .storage-bar-seg {
   height: 100%;
-  transition: flex-grow 0.4s ease;
-  min-width: 2px;
+  /* No min-width — segments must scale strictly proportionally with
+     the track. A 2px floor was previously distorting layout at
+     narrow widths (a tiny category was forced to 2px regardless of
+     its true share, throwing the whole bar's proportions off).
+     Animate the basis instead of grow since segments are sized via
+     `flex: 0 0 X%`. */
+  flex-shrink: 0;
+  transition: flex-basis 0.4s ease;
 }
 .storage-bar-seg:hover { filter: brightness(1.1); }
 /* Per-category colours — consistent hue per key across renders. */
@@ -1838,42 +2030,53 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
  * Toggle next to the version chip. Visually loud when ON so the
  * operator can't forget the disk cost of full-trace-on-success. */
 .debug-pill {
+  /* Sized identically to .syslog-export-btn / .clear-log-btn / the
+     secondary .pull-btn so the System actions row reads as one
+     consistent button cluster. The dot + uppercase label keep the
+     toggle visually distinct from the regular outlined buttons. */
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-left: 8px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid #d1d5db;
-  background: #f9fafb;
-  color: #6b7280;
-  font-size: 0.7rem;
+  padding: 6px 12px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.82rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+  line-height: 1;
   cursor: pointer;
+  box-sizing: border-box;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
-.debug-pill:hover { background: #f3f4f6; }
+.debug-pill:hover {
+  background: var(--bg-elev);
+  border-color: var(--accent);
+  color: var(--text);
+}
 .debug-pill:focus-visible {
-  outline: 2px solid #3b82f6;
-  outline-offset: 2px;
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 1px;
 }
 .debug-pill-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #d1d5db;
+  background: var(--border);
   transition: background 0.15s, box-shadow 0.15s;
 }
 .debug-pill[aria-checked="true"] {
-  background: #fef2f2;
-  color: #b91c1c;
-  border-color: #fca5a5;
+  background: var(--bad-tint);
+  color: var(--bad);
+  border-color: var(--bad);
 }
 .debug-pill[aria-checked="true"] .debug-pill-dot {
-  background: #ef4444;
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+  background: var(--bad);
+  box-shadow: 0 0 0 3px var(--bad-tint);
   animation: debug-pulse 1.4s ease-in-out infinite;
 }
 @keyframes debug-pulse {

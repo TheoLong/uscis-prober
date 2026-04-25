@@ -13,56 +13,35 @@
   <header class="topbar">
     <div class="topbar-left">
       <h1>
-        <img src="/static/logo.svg" alt="" class="brand-logo" width="28" height="28" />
-        USCIS Prober
+        <!-- Brand block — logo + title bundled in their own pill so
+             every topbar info-zone reads as a discrete box (matches
+             the version chip, debug pill, subtitle, and countdown). -->
+        <span class="brand">
+          <img src="/static/logo.svg" alt="" class="brand-logo" width="24" height="24" />
+          <span class="brand-name">USCIS Prober</span>
+        </span>
         <!-- Build-version chip — short SHA rendered as a small pill next
              to the title. Populated from /api/pull/status.version every
              3s, so a fresh deploy updates the chip automatically on the
              next poll without a hard refresh. Tooltip carries full SHA,
              commit date, and server boot time. -->
         <a id="version-chip" class="version-chip" href="#" title="" hidden></a>
-        <!-- Debug-mode pill: toggles config.trace_successful_pulls via
-             /api/debug-mode. When ON, every pull preserves its
-             Playwright trace.zip + mfa_trace/ sidecar under
-             data/full_traces/ so the operator can verify the capture
-             system against a healthy pull. Intentionally loud when
-             active so we don't forget to turn it off. -->
-        <button id="debug-mode-pill" class="debug-pill" type="button"
-                role="switch" aria-checked="false"
-                title="Off: traces only on failure. On: traces on every pull (disk-heavier).">
-          <span class="debug-pill-dot"></span>
-          <span class="debug-pill-label">debug</span>
-        </button>
       </h1>
       <span class="subtitle" id="summary-line">loading…</span>
     </div>
     <div class="topbar-right">
+      <!-- Topbar action: just the Pull-update trigger. The countdown
+           sits to its right as the live state indicator (it tells
+           you when the next auto-pull fires AND is updating in real
+           time, so a separate "running…" spinner was redundant).
+           Debug pill + Export data moved to the System tab — the
+           topbar holds only the things you might trigger every minute.
+      -->
+      <button id="pull-btn" class="pull-btn">Pull update</button>
       <div class="countdown" title="Next auto-pull">
         <span class="label">next pull</span>
         <span class="value" id="countdown">—</span>
         <span class="when" id="next-when"></span>
-      </div>
-      <div class="export-group">
-        <a id="export-btn" class="pull-btn pull-btn-secondary"
-           href="/api/export">Export data</a>
-        <button id="export-info-btn" class="info-badge" type="button"
-                aria-label="About the Export data button"
-                aria-expanded="false"
-                aria-controls="export-info-popover">i</button>
-        <div id="export-info-popover" class="info-popover" hidden role="tooltip">
-          <strong>Exports every case.</strong>
-          Downloads a single zip containing every
-          <code>data/{form}_case.json</code> (the full per-day snapshot
-          history of each case you track) plus a <code>manifest.json</code>
-          with each case's label, receipt number, and entry count.
-          Each snapshot is the raw USCIS API response — contains
-          applicant info, letter IDs, etc. Treat the file as PII.
-        </div>
-      </div>
-      <button id="pull-btn" class="pull-btn">Pull update</button>
-      <div class="pull-indicator" id="pull-indicator" hidden>
-        <span class="spinner"></span>
-        <span id="pull-indicator-text">running…</span>
       </div>
     </div>
   </header>
@@ -82,16 +61,71 @@
   <main id="case-list"></main>
   <main id="updates-feed" hidden></main>
 
-  <!-- System tab: two stacked sections.
-         1. Storage — stacked usage bar + per-category legend. Polls
-            /api/storage every 30s so the bar reflects growth
-            without the operator hitting refresh.
-         2. System log — paginated event feed, populated by
+  <!-- System tab: stacked sections.
+         1. System actions — debug toggle + data/log export + clear.
+            Bundled here (was: scattered across the topbar) because
+            none are frequent operations.
+         2. Storage — stacked usage bar + per-category legend.
+         3. System log — paginated event feed, populated by
             renderSystemLog() in app.js. -->
   <main id="systemlog-feed" hidden>
-    <section class="storage-bar-wrap" id="storage-bar" aria-label="Disk usage">
+    <section class="sys-card sys-actions-card" aria-label="System operations">
+      <h2 class="sys-card-title">Actions</h2>
+      <div class="sys-actions-row">
+        <!-- Each action is a wrapper that hosts the action button +
+             a small `i` info badge anchored to the wrapper's top-right
+             corner so the info chip doesn't compete for row space
+             with the button it describes. -->
+        <div class="action-with-info">
+          <!-- Debug-mode pill: toggles config.trace_successful_pulls
+               via /api/debug-mode. ON keeps the Playwright trace.zip
+               + MFA sidecar for every pull (disk-heavier; useful for
+               verifying capture against a healthy pull). -->
+          <button id="debug-mode-pill" class="action-btn debug-pill"
+                  type="button" role="switch" aria-checked="false"
+                  title="Off: traces only on failure. On: traces on every pull (disk-heavier).">
+            <span class="debug-pill-dot"></span>
+            <span class="debug-pill-label">debug</span>
+          </button>
+          <button id="debug-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the debug-mode toggle"
+                  aria-expanded="false"
+                  aria-controls="debug-info-popover">i</button>
+          <div id="debug-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Debug mode</strong> forces every pull (success or
+            failure) to preserve its full Playwright trace
+            (<code>trace.zip</code>) plus the <code>mfa_trace/</code>
+            sidecar with wire-level IMAP events and archived emails.
+            Off, traces are only kept when a pull fails. Use this to
+            verify the capture system against a known-good pull.
+            Disk-heavier — flip back off when done.
+          </div>
+        </div>
+        <div class="action-with-info">
+          <!-- Export data: zip of every data/{form}_case.json + manifest. -->
+          <a id="export-btn" class="action-btn pull-btn pull-btn-secondary"
+             href="/api/export">Export data</a>
+          <button id="export-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Export data button"
+                  aria-expanded="false"
+                  aria-controls="export-info-popover">i</button>
+          <div id="export-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Exports every case.</strong>
+            Downloads a single zip containing every
+            <code>data/{form}_case.json</code> (the full per-day snapshot
+            history of each case you track) plus a <code>manifest.json</code>
+            with each case's label, receipt number, and entry count.
+            Each snapshot is the raw USCIS API response — contains
+            applicant info, letter IDs, etc. Treat the file as PII.
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="storage-bar-wrap sys-card" id="storage-bar" aria-label="Disk usage">
+      <h2 class="sys-card-title">Storage</h2>
       <div class="storage-bar-header">
-        <span class="storage-bar-title">Storage</span>
         <span class="storage-bar-total" id="storage-bar-total">—</span>
         <span class="storage-bar-limit" id="storage-bar-limit"></span>
       </div>

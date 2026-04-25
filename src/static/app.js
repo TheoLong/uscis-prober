@@ -93,26 +93,34 @@ async function wireDebugPill() {
 }
 
 function wireExportInfo() {
-  const btn = document.getElementById("export-info-btn");
-  const pop = document.getElementById("export-info-popover");
-  if (!btn || !pop) return;
-  const close = () => {
-    pop.hidden = true;
-    btn.setAttribute("aria-expanded", "false");
-  };
-  btn.addEventListener("click", e => {
-    e.stopPropagation();
-    const open = pop.hidden;
-    pop.hidden = !open;
-    btn.setAttribute("aria-expanded", open ? "true" : "false");
-  });
-  // Dismiss when the user clicks anywhere else or presses Escape.
-  document.addEventListener("click", e => {
-    if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
-  });
-  document.addEventListener("keydown", e => {
-    if (e.key === "Escape") close();
-  });
+  // Wire each (info-badge, popover) pair on the System tab. Both the
+  // "Export data" badge and the "debug" badge share the same toggle
+  // semantics: click to open, click outside / Escape to dismiss.
+  const pairs = [
+    ["export-info-btn", "export-info-popover"],
+    ["debug-info-btn",  "debug-info-popover"],
+  ];
+  for (const [btnId, popId] of pairs) {
+    const btn = document.getElementById(btnId);
+    const pop = document.getElementById(popId);
+    if (!btn || !pop) continue;
+    const close = () => {
+      pop.hidden = true;
+      btn.setAttribute("aria-expanded", "false");
+    };
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const open = pop.hidden;
+      pop.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.addEventListener("click", e => {
+      if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape") close();
+    });
+  }
 }
 
 function setView(view) {
@@ -321,12 +329,10 @@ async function pollPullStatus() {
     const wasRunning = state.pullRunning;
     state.pullRunning = !!s.running;
     const btn = document.getElementById("pull-btn");
-    const ind = document.getElementById("pull-indicator");
     btn.disabled = state.pullRunning;
-    // Button label mirrors the state so it reads correctly whether the
-    // pull was triggered manually or fired by the scheduler.
+    // Button label mirrors the state — the countdown box is the
+    // ambient running indicator (was: separate "running…" spinner).
     btn.textContent = state.pullRunning ? "Pulling…" : "Pull update";
-    ind.hidden = !state.pullRunning;
     document.getElementById("next-when").textContent =
       state.nextRun ? formatLocal(state.nextRun) : "—";
     updateCountdown();
@@ -375,7 +381,6 @@ async function triggerPull() {
     // against the server state on the next tick.
     btn.disabled = true;
     btn.textContent = "Pulling…";
-    document.getElementById("pull-indicator").hidden = false;
     pollPullStatus();
   } catch (e) {
     toast("Network error triggering pull", "bad");
@@ -1005,7 +1010,9 @@ function renderSystemLog() {
   head.className = "updates-head syslog-head-row";
   head.innerHTML =
     `<div>` +
-      `<h2>System log` +
+      // Title styled to match the other System-tab card titles
+      // (Actions / Storage) — uppercase + tracking + muted colour.
+      `<h2 class="sys-card-title">System log` +
         // Size indicator lives inside the header so the operator sees
         // "should I clear this?" right next to the Clear log button.
         `<span class="syslog-storage-line" id="syslog-storage-line"></span>` +
