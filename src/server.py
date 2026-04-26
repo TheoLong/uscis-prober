@@ -42,7 +42,6 @@ from diff_utils import (
     EVENT_CODE_LABELS,
     bin_by_day,
     day_changes,
-    day_of,
     location_day_changes,
     summarize_case,
 )
@@ -51,7 +50,6 @@ from system_log import (
     JSONL_STDERR_ENV as _SYSLOG_JSONL_ENV,
     log as sys_log,
     read_all as read_system_log,
-    count as count_system_log,
     clear as clear_system_log,
     parse_jsonl_stderr_line as _parse_syslog_jsonl_line,
     push_capture as _syslog_push_capture,
@@ -986,7 +984,6 @@ def _run_pull_subprocess_inner(
     # blip or a mail error is not retry-worthy at this layer.
     while attempt_num < policy.total_attempts:
         attempt_num += 1
-        attempt_started_wall = time.time()
 
         if attempt_num > 1:
             # Announce that we're about to retry BEFORE sleeping so the
@@ -1053,9 +1050,7 @@ def _run_pull_subprocess_inner(
                 env=child_env,
             )
             attempt_exit = proc.returncode
-            stdout = proc.stdout or ""
             stderr = proc.stderr or ""
-            tail_lines = (stdout + "\n" + stderr).splitlines()[-80:]
 
             attempt_steps, attempt_plain_tail = _collect_subprocess_steps(
                 stderr

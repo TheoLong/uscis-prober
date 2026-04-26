@@ -410,6 +410,35 @@ system log + every preserved trace.
 
 Optional — skip if you're running only locally.
 
+> [!WARNING]
+> **Multiple instances against the same USCIS account must not
+> fire a scheduled pull at the same time.** Running several
+> servers side-by-side — a deployed VM, one or more local copies,
+> a one-off testing process — is fine for development, debugging,
+> or sanity-checking a config change, *as long as their scheduled
+> pulls don't overlap*. The hazard is two or more processes
+> hitting USCIS's OIDC + MFA flow within seconds of each other:
+> they'll race for the same MFA email in the IMAP inbox,
+> invalidate one another's session, and can trip rate limits or
+> lockouts on the underlying account.
+>
+> Two safe ways to coexist:
+>
+> - **Stop the others before the next scheduled fire.** If
+>   multiple instances share the same `pull_minute` cadence, shut
+>   all but one down (close the terminals running `python
+>   src/server.py`, or `sudo systemctl stop uscis-checker` on the
+>   VM) before that minute hits. Manual `/api/pull` triggers are
+>   fine to interleave — just don't let the schedulers fire
+>   concurrently.
+> - **Stagger the schedules.** Set different `pull_minute` values
+>   in each `config.json` (e.g. VM at `[0]`, local-A at `[20]`,
+>   local-B at `[40]`) so their auto-pulls never collide.
+>
+> The same applies to back-to-back browser logins via `python
+> src/session_fetch.py login`, or any setup where multiple
+> processes share the same `auth.uscis_email`.
+
 ### 1. Create the VM
 
 ```bash

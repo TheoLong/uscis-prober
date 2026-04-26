@@ -43,11 +43,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.sync_api import (
-    Error as PlaywrightError,
-    TimeoutError as PlaywrightTimeout,
-    sync_playwright,
-)
+from playwright.sync_api import sync_playwright
 
 from uscis_api import (
     ApiError,
