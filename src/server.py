@@ -2306,7 +2306,7 @@ def main() -> None:
     # Bind to all interfaces — production access is gated by the optional
     # access-code middleware (see access_gate.py) when auth.optional_access_code is set.
     try:
-        app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+        app.run(host="127.0.0.1", port=int(os.environ.get("USCIS_PORT", "8080")), debug=False, use_reloader=False)
     except Exception as e:
         # If `app.run` itself blows up (port already bound, etc.) we
         # still want a dashboard trail even if nothing is listening.
