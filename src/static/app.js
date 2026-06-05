@@ -10,7 +10,7 @@ const state = {
   rawSelection: {},        // "{receipt}:{source}" → capturedAt for raw view
   nextRun: null,
   pullRunning: false,
-  eventCodeLabels: {},     // e.g. { FTA0: "Database checks received..." }
+  eventCodeLabels: {},     // server sends {} — USCIS event codes are undocumented, shown raw
   view: "cases",           // "cases" | "updates" | "systemlog"
   updates: [],             // flat diff feed
   systemLog: [],           // current page of the event log (oldest-first, as returned by server)

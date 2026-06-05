@@ -45,35 +45,29 @@ _DECISION_FLAGS: frozenset[str] = frozenset(
     {"ackedByAdjudicatorAndCms", "closed", "actionRequired", "isPremiumProcessed"}
 )
 
-# Short labels for USCIS event codes we see in practice.
+# USCIS ELIS event codes observed on real I-485 / I-765 / I-131 records.
 #
-# Caveats from the research:
-#   - Codes are two-or-three letter action abbreviations + a digit variant.
-#     `0` is the default template; `1`/`2` are alternates for specific
-#     form types or situations (e.g. FTA1 vs FTA0).
-#   - Typical I-485 happy path: RCV0 → FTA0 → PRB0 → INT0 → APR0 → PRD0 → WCD0.
-#     Many I-485s skip INT0 (72% of EB cases qualify for interview waiver).
-#   - FTA0 is not itself a decision — it is a database-check workflow flag.
-#     Community lore: a third FTA0 is often followed by approval, but this
-#     is folklore, not guarantee.
-EVENT_CODE_LABELS: dict[str, str] = {
-    "RCV0": "Case received",
-    "IAF":  "Initial acknowledgement — form received",
-    "FTA0": "Biometrics received / fingerprints submitted to FBI",
-    "FTA1": "Biometrics database check (variant)",
-    "PRB0": "Pre-brief / pre-adjudication review",
-    "INT0": "Interview scheduled",
-    "RFE0": "Request for Evidence issued",
-    "NTR0": "Notice to Requester",
-    "NOID": "Notice of Intent to Deny",
-    "APR0": "Approval",
-    "H008": "Case approved (variant)",
-    "DNY0": "Denial",
-    "C1SC": "New card being produced",
-    "PRD0": "Card/document production",
-    "CRD0": "Card mailed",
-    "WCD0": "Welcome letter sent",
-}
+# IMPORTANT: USCIS does not publish the meaning of these internal event codes,
+# and there is no authoritative source for them. Earlier versions of this file
+# asserted English descriptions (e.g. "FTA1 = biometrics database check"), but
+# those were in-house guesses based on a "the trailing digit is just a variant
+# of the base code" heuristic — and at least one proved wrong in practice: a
+# case's public status flipped to "Case Is Being Actively Reviewed By USCIS"
+# immediately after an FTA1, which is not a biometrics step. Rather than annotate
+# codes with undocumented meanings, we surface the raw code (e.g. "FTA1 @ <date>")
+# and let the reader interpret it.
+#
+# The set below records only WHICH codes we have actually seen — no meaning is
+# claimed for any of them.
+OBSERVED_EVENT_CODES: frozenset[str] = frozenset({
+    "RCV0", "IAF", "FTA0", "FTA1", "PRB0", "INT0", "RFE0", "NTR0",
+    "NOID", "APR0", "H008", "DNY0", "C1SC", "PRD0", "CRD0", "WCD0",
+})
+
+# No human-readable annotations are asserted for event codes (see note above).
+# Kept as an (empty) mapping because the API responses and the mailer reference
+# it; empty means the UI and emails render the bare code with no caption.
+EVENT_CODE_LABELS: dict[str, str] = {}
 
 # Canonical happy-path sequence for I-485 / I-765 / I-131.
 #
