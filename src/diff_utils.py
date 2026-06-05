@@ -75,17 +75,22 @@ EVENT_CODE_LABELS: dict[str, str] = {}
 # The USCIS JSON exposes appointment notices with actionType == "Appointment
 # Scheduled" but gives no way to distinguish biometrics from interview from
 # biometrics re-takes, so a scheduled-biometrics stage can't be inferred
-# reliably from notices alone. Instead, a single FTA0 event means USCIS
-# received the fingerprints and started the database checks — by the time
-# it appears, biometrics has already happened. Collapsing the two into
-# "Biometrics & checks done" is what's actually observable.
+# reliably from notices alone. Instead, a single FTA0 event reliably appears
+# right after the biometrics appointment, so we use FTA0 as the observable
+# "Biometrics & checks done" marker.
+#
+# FTA1 is deliberately NOT a trigger here. Its meaning is undocumented, and in
+# practice it has appeared much later than FTA0 (post-transfer) — in one case
+# the public status flipped to "Case Is Being Actively Reviewed By USCIS" right
+# after an FTA1, i.e. it is NOT a biometrics step. FTA0 always precedes FTA1 on
+# real records, so dropping FTA1 here does not change any inferred stage.
 #
 # Each entry is (label, trigger_codes) — a stage is reached when ANY of
 # its trigger codes appears in the case's event list. The latest reached
 # is taken as the current stage.
 _HAPPY_PATH: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Received",                 ("RCV0", "IAF")),
-    ("Biometrics & checks done", ("FTA0", "FTA1")),
+    ("Biometrics & checks done", ("FTA0",)),
     ("Pre-adjudication",         ("PRB0",)),
     ("Interview scheduled",      ("INT0",)),
     ("Approved",                 ("APR0", "H008")),
