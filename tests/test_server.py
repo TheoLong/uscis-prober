@@ -154,6 +154,95 @@ def test_all_update_records_enriches_id(monkeypatch, tmp_path):
     assert records[0]["detectedOn"] == "2026-03-10"
 
 
+# -------- startup diff recompute --------------------------------------
+
+def test_recompute_diffs_at_startup_counts_each_case(monkeypatch, tmp_path):
+    """Walks every configured case, returns per-case counts, and emits a
+    diff_recomputed system-log event with the same payload."""
+    import system_log
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    # I-485: two snapshots with a decision flip → 1 case-diff.
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+    # I-765: single snapshot → no diffs (need a pair to compare).
+    (data_dir / "765_case.json").write_text(json.dumps([
+        {"capturedAt": "2026-04-01T00:00:00Z", "data": {
+            "receiptNumber": "IOE2", "formType": "I-765", "events": [],
+            "notices": [], "documents": [], "evidenceRequests": [],
+            "updatedAt": "2026-04-01"}},
+    ]))
+
+    cfg = {"cases": [
+        {"id": "IOE1", "label": "I-485"},
+        {"id": "IOE2", "label": "I-765"},
+    ]}
+    result = server._recompute_diffs_at_startup(cfg)
+
+    assert result == {"cases": [
+        {"label": "I-485", "case_changes": 1, "location_changes": 0},
+        {"label": "I-765", "case_changes": 0, "location_changes": 0},
+    ]}
+
+    # The system log entry mirrors the return value — single event,
+    # carrying the per-case summary so the operator can audit a restart.
+    events = [e for e in system_log.read_all() if e.get("event") == "diff_recomputed"]
+    assert len(events) == 1
+    assert events[0]["cases"] == result["cases"]
+    assert events[0]["source"] == "server"
+
+
+def test_recompute_diffs_at_startup_skips_cases_without_label(monkeypatch, tmp_path):
+    """Malformed config entries (missing label) are silently skipped — the
+    recompute is best-effort and should never crash on bad config."""
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path / "data")
+    (tmp_path / "data").mkdir()
+    cfg = {"cases": [
+        {"id": "IOE1"},        # no label
+        {"id": "IOE2", "label": ""},  # empty label
+    ]}
+    assert server._recompute_diffs_at_startup(cfg) == {"cases": []}
+
+
+def test_recompute_diffs_at_startup_handles_empty_config(monkeypatch, tmp_path):
+    """No cases configured → no-op return, no exception, no log noise."""
+    import system_log
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    assert server._recompute_diffs_at_startup({}) == {"cases": []}
+    assert server._recompute_diffs_at_startup({"cases": None}) == {"cases": []}
+    # A diff_recomputed event still fires (so a "no cases yet" install is
+    # auditable in the log) but with an empty cases array.
+    events = [e for e in system_log.read_all() if e.get("event") == "diff_recomputed"]
+    assert len(events) == 2
+    assert all(e["cases"] == [] for e in events)
+
+
+def test_recompute_diffs_at_startup_swallows_errors_and_logs(monkeypatch, tmp_path):
+    """A crash inside day_changes() must not propagate — it would prevent
+    the server from finishing startup. The error is logged and an empty
+    payload is returned so callers can keep going."""
+    import system_log
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+    def _boom(_entries):
+        raise RuntimeError("synthetic diff explosion")
+    monkeypatch.setattr(server, "day_changes", _boom)
+
+    cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
+    result = server._recompute_diffs_at_startup(cfg)
+
+    assert result["cases"] == []
+    assert "synthetic diff explosion" in result["error"]
+    failures = [e for e in system_log.read_all() if e.get("event") == "diff_recompute_failed"]
+    assert len(failures) == 1
+    assert failures[0]["level"] == "warning"
+
+
 # -------- notification dispatcher -------------------------------------
 
 def test_send_notifications_for_new_noop_when_empty(monkeypatch):

@@ -2370,6 +2370,26 @@ function renderUpdateRecord(u) {
 // silent update we've detected, merged chronologically (newest first).
 // Date + code only — no interpretation, no community folklore, no stage
 // inference. Form-agnostic: works the same for I-140, I-485, I-765, I-131…
+//
+// PURELY OBSERVED — NO USCIS-CLAIMED DATES
+//
+// Every row is dated by the day *we* first observed it in our snapshot
+// history. We never display USCIS's self-reported eventDateTime, because
+// USCIS occasionally backdates an event row at insertion — registering
+// a fresh row today but stamping it with an older eventDateTime. Showing
+// the claimed date would be repeating USCIS's story, not reporting what
+// we observed.
+//
+// Source of truth per row:
+//   - Events added after the seed snapshot: dated by the snapshot in
+//     which they first appeared (diff feed → change.to of the diff that
+//     added the eventId).
+//   - Events already present in the seed snapshot (the very first pull
+//     of this case): dated by the seed snapshot's capturedAt. That's
+//     literally the first day we have data for this case — the earliest
+//     observation we can attest to.
+//   - Silent updates: dated by the snapshot in which we observed the
+//     updatedAt bump (change.to).
 function renderObservedEventCodes(c) {
   const section = document.createElement("section");
   section.className = "events-section";
@@ -2379,20 +2399,40 @@ function renderObservedEventCodes(c) {
   heading.textContent = "Timeline";
   section.appendChild(heading);
 
-  // 1. Raw events from the latest snapshot.
-  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
-  const rows = events.map(e => ({
-    date: (e.eventDateTime || e.createdAt || "").slice(0, 10) || "—",
-    code: e.eventCode || "?",
-  }));
-
-  // 2. Silent updates from the diff history. Each one is an `updatedAt`
-  // bump USCIS made with no event / notice change — surface it as its
-  // own row dated by the advanced updatedAt value.
   const hist = state.histories[c.label];
-  for (const ch of (hist && hist.changes) || []) {
+  const changes = (hist && hist.changes) || [];
+  const days = (hist && hist.days) || [];
+
+  // 1. eventId -> day-first-observed (from diff history)
+  // Walk the diff feed oldest -> newest and record the first day an
+  // eventId appears in an `added` list.
+  const firstObserved = new Map();
+  for (const ch of changes) {
+    const added = (ch.events && ch.events.added) || [];
+    for (const e of added) {
+      const eid = e.eventId;
+      if (!eid || firstObserved.has(eid)) continue;
+      firstObserved.set(eid, (ch.to || "").slice(0, 10));
+    }
+  }
+
+  // 2. Seed-snapshot fallback. Events already present in the first
+  // snapshot have no diff that added them, so we fall back to the seed
+  // snapshot's capturedAt — the first day this case existed in our data.
+  const seedDay = (days[0] && (days[0].capturedAt || "")).slice(0, 10);
+
+  // 3. Raw events from the latest snapshot, dated by observation only.
+  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
+  const rows = events.map(e => {
+    const eid = e.eventId;
+    const observed = (eid && firstObserved.get(eid)) || seedDay || "—";
+    return { date: observed, code: e.eventCode || "?" };
+  });
+
+  // 4. Silent updates from the diff history.
+  for (const ch of changes) {
     if (ch.kind !== "silent_update") continue;
-    const when = (ch.scalars?.updatedAt?.to || ch.to || "").slice(0, 10) || "—";
+    const when = (ch.to || "").slice(0, 10) || "—";
     rows.push({ date: when, code: "silent update", silent: true });
   }
 
