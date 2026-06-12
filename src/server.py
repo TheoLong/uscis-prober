@@ -2233,6 +2233,65 @@ def api_version():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _recompute_diffs_at_startup(config: dict) -> dict:
+    """Walk every configured case's snapshot history, recompute the diff feed,
+    and emit a `diff_recomputed` system-log event with per-case counts.
+
+    Rationale
+    ---------
+    Diffs are *derived* state: `day_changes()` runs live off the snapshot
+    JSONs on every API call and nothing is cached server-side. So adding
+    or replacing a snapshot file by hand is automatically picked up by
+    the next page load — no restart is required for correctness.
+
+    What an operator-driven restart *does* need is **observability**:
+    proof that the new data made it through the pipeline. This helper
+    walks the diff feed for every configured case and emits a single
+    `diff_recomputed` event carrying the per-case change counts. The
+    operator can open the system log after a restart and confirm at a
+    glance that the recompute happened against the current on-disk data.
+
+    Failure is non-fatal — the live API path still works (and will
+    surface the same error there). We emit `diff_recompute_failed` and
+    return an empty payload.
+
+    Returns
+    -------
+    The event payload that was logged (excluding the wrapper keys) so
+    tests can assert on the per-case summary without scraping the log.
+    """
+    try:
+        cases_summary = []
+        for c in (config.get("cases") or []):
+            label = c.get("label")
+            if not label:
+                continue
+            case_changes = day_changes(load_case_entries(label))
+            loc_changes = location_day_changes(load_location_entries(label))
+            cases_summary.append({
+                "label": label,
+                "case_changes": len(case_changes),
+                "location_changes": len(loc_changes),
+            })
+        sys_log("diff_recomputed", source="server", cases=cases_summary)
+        logger.info(
+            "Diff recomputed: %s",
+            ", ".join(
+                f"{c['label']}=case:{c['case_changes']}+loc:{c['location_changes']}"
+                for c in cases_summary
+            ) or "(no cases configured)",
+        )
+        return {"cases": cases_summary}
+    except Exception as e:
+        sys_log(
+            "diff_recompute_failed",
+            level="warning", source="server",
+            error=f"{type(e).__name__}: {e}"[:200],
+        )
+        logger.exception("Diff recompute failed; live API will retry per request.")
+        return {"cases": [], "error": f"{type(e).__name__}: {e}"}
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -2240,6 +2299,7 @@ def main() -> None:
     )
     # Install the access gate before the scheduler / blueprint work —
     # pulls auth.optional_access_code out of config.json; no-op if it's empty.
+    config: dict = {}
     try:
         config = load_config()
         optional_access_code = (config.get("auth") or {}).get("optional_access_code") or ""
@@ -2302,6 +2362,14 @@ def main() -> None:
         schedule_timezone=SCHEDULER_TZ,
         access_gate_armed=bool(optional_access_code),
     )
+
+    # Recompute the diff feed eagerly so an operator dropping a backfilled
+    # snapshot in by hand can confirm via the system log that the restart
+    # re-read the data. The live API path is already cache-free, so this
+    # is observability rather than a correctness requirement — see the
+    # helper docstring for details.
+    _recompute_diffs_at_startup(config)
+
     # Don't use reloader — it spawns two processes and double-schedules jobs.
     # Bind to all interfaces — production access is gated by the optional
     # access-code middleware (see access_gate.py) when auth.optional_access_code is set.
