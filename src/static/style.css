@@ -1665,8 +1665,67 @@ main[hidden] { display: none; }
   font-family: var(--font-mono); font-size: 0.8rem;
 }
 .change-scalar .field { color: var(--muted); }
-.change-scalar .from { color: var(--bad); text-decoration: line-through; opacity: 0.75; }
+/* `from` side is faded to "before" by a muted color — NOT by `opacity`.
+ * CSS opacity cascades into pseudo-elements, which would drag the UTC
+ * tooltip's ::after down to the same alpha and make it look translucent
+ * on hover. Use color-mix so the strikethrough text still reads as
+ * de-emphasised while the tooltip box stays fully opaque. */
+.change-scalar .from {
+  color: color-mix(in srgb, var(--bad) 75%, var(--muted) 25%);
+  text-decoration: line-through;
+}
 .change-scalar .to { color: var(--ok); }
+
+/* UTC ISO timestamps inside a scalar diff row get a subtle dotted
+ * underline so the operator knows the value is hoverable. The custom
+ * tooltip (CSS pseudo-element fed by `data-tooltip`) renders the same
+ * instant in the browser's local timezone; the visible text stays UTC
+ * so it matches USCIS's payload byte-for-byte.
+ *
+ * We don't use the native `title` attribute because its delay is
+ * browser-controlled (~700ms) and feels sluggish in a dense diff list.
+ * --utc-tooltip-delay tunes the hover-before-show delay; bump it up
+ * if the tooltip feels twitchy when sweeping across a row. */
+:root {
+  --utc-tooltip-delay: 120ms;
+  --utc-tooltip-bg: #1f2330;
+  --utc-tooltip-fg: #e8ecf3;
+}
+.utc-ts {
+  position: relative;
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
+}
+.utc-ts::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  background: var(--utc-tooltip-bg);
+  color: var(--utc-tooltip-fg);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 80ms ease-out;
+  transition-delay: 0s;        /* fade out immediately on leave */
+  z-index: 10;
+  /* Restore line-height — parent's line-through / strikethrough leaks
+   * through `text-decoration: inherit` on some browsers otherwise. */
+  line-height: 1.2;
+}
+.utc-ts:hover::after,
+.utc-ts:focus-visible::after {
+  opacity: 1;
+  transition-delay: var(--utc-tooltip-delay);   /* applies on hover-in only */
+}
+.change-scalar .from .utc-ts { text-decoration: none; } /* avoid double underline w/ line-through */
 .change-item-added, .change-item-removed {
   font-family: var(--font-mono); font-size: 0.78rem;
   padding: 3px 8px; border-radius: 4px; display: inline-block;

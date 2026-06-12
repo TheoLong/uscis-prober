@@ -1072,8 +1072,8 @@ function renderChangeBlock(ch) {
       row.className = "change-scalar";
       row.innerHTML =
         `<span class="field">${escapeHtml(k)}</span>` +
-        `<span class="from">${escapeHtml(formatValue(v.from))}</span>` +
-        `<span class="to">${escapeHtml(formatValue(v.to))}</span>`;
+        `<span class="from">${formatScalarValueHtml(v.from)}</span>` +
+        `<span class="to">${formatScalarValueHtml(v.to)}</span>`;
       sec.appendChild(row);
     }
     block.appendChild(sec);
@@ -2328,8 +2328,8 @@ function renderUpdateRecord(u) {
       row.className = "change-scalar";
       row.innerHTML =
         `<span class="field">${escapeHtml(k)}</span>` +
-        `<span class="from">${escapeHtml(formatValue(v.from))}</span>` +
-        `<span class="to">${escapeHtml(formatValue(v.to))}</span>`;
+        `<span class="from">${formatScalarValueHtml(v.from)}</span>` +
+        `<span class="to">${formatScalarValueHtml(v.to)}</span>`;
       sec.appendChild(row);
     }
     block.appendChild(sec);
@@ -2774,6 +2774,63 @@ function formatValue(v) {
   if (v === null) return "null";
   if (typeof v === "boolean") return v ? "true" : "false";
   return String(v);
+}
+
+// Format a scalar diff value (the `from` / `to` side of a `change-scalar`
+// row) as HTML. Identical to escapeHtml(formatValue(v)) except that any
+// ISO-8601 UTC timestamp embedded in the value is wrapped in a
+// `<span class="utc-ts">` carrying a `title` attribute with the same
+// instant rendered in the browser's local timezone — so the operator can
+// hover over a raw `updatedAtTimestamp` and read the wall-clock time
+// without doing the conversion in their head.
+//
+// The browser's timezone comes from
+// Intl.DateTimeFormat().resolvedOptions().timeZone, computed once per
+// page load. The displayed string stays UTC (preserves USCIS's exact
+// payload byte-for-byte) — only the tooltip is localised.
+function formatScalarValueHtml(v) {
+  const raw = formatValue(v);
+  // ISO-8601 UTC: YYYY-MM-DDTHH:MM:SS(.fraction)?Z. We match the whole
+  // string (formatValue never embeds these inside other text) so the
+  // split-and-wrap below is simple — full match → wrap, otherwise →
+  // escape verbatim.
+  const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+  if (!ISO_UTC.test(raw)) return escapeHtml(raw);
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return escapeHtml(raw);
+  const local = formatLocalDateTime(d, { withSeconds: true });
+  const tz = _localTimezoneAbbrev(d);
+  const title = tz ? `${local} ${tz}` : local;
+  // data-tooltip + CSS pseudo-element (see .utc-ts in style.css) so we
+  // control the hover delay. The native `title` attribute fires after
+  // a browser-controlled ~700ms which feels sluggish for a high-density
+  // diff view; our CSS uses --utc-tooltip-delay (default 120ms).
+  return `<span class="utc-ts" data-tooltip="${escapeHtml(title)}">${escapeHtml(raw)}</span>`;
+}
+
+// Best-effort short timezone abbreviation for the browser's locale —
+// "EDT", "PST", "JST" etc. Falls back to the IANA name (e.g.
+// "America/New_York") when the runtime can't produce a short form.
+let _LOCAL_TZ_NAME = null;
+function _localTimezoneAbbrev(d) {
+  try {
+    // `timeZoneName: "short"` includes the abbreviation in the formatted
+    // output. We extract it from `formatToParts` so we don't have to
+    // string-search the rendered date.
+    const parts = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric", timeZoneName: "short",
+    }).formatToParts(d);
+    const tz = parts.find(p => p.type === "timeZoneName");
+    if (tz && tz.value) return tz.value;
+  } catch (_) { /* fall through */ }
+  if (_LOCAL_TZ_NAME === null) {
+    try {
+      _LOCAL_TZ_NAME = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch (_) {
+      _LOCAL_TZ_NAME = "";
+    }
+  }
+  return _LOCAL_TZ_NAME;
 }
 
 function badge(text, kind) {
