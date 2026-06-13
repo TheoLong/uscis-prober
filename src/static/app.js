@@ -2371,25 +2371,28 @@ function renderUpdateRecord(u) {
 // Date + code only — no interpretation, no community folklore, no stage
 // inference. Form-agnostic: works the same for I-140, I-485, I-765, I-131…
 //
-// PURELY OBSERVED — NO USCIS-CLAIMED DATES
+// DATE-SOURCE POLICY (timeline UI)
 //
-// Every row is dated by the day *we* first observed it in our snapshot
-// history. We never display USCIS's self-reported eventDateTime, because
-// USCIS occasionally backdates an event row at insertion — registering
-// a fresh row today but stamping it with an older eventDateTime. Showing
-// the claimed date would be repeating USCIS's story, not reporting what
-// we observed.
+// Events have intrinsic dates (eventDateTime); use them. Observation
+// date is only a fallback for things without an intrinsic date.
+//
+// Why this differs from the prediction report: the report's cohort math
+// is sensitive to mis-dating by months, so it dates by firstObservedDay
+// to defend against USCIS backdating a row. The timeline UI's job is
+// different — it shows the user what USCIS says happened on this case,
+// in chronological order. Dating everything by observation would push
+// genuine Feb/March events into whatever day our seed snapshot ran,
+// which is *more* misleading than trusting the event's own date.
 //
 // Source of truth per row:
-//   - Events added after the seed snapshot: dated by the snapshot in
-//     which they first appeared (diff feed → change.to of the diff that
-//     added the eventId).
-//   - Events already present in the seed snapshot (the very first pull
-//     of this case): dated by the seed snapshot's capturedAt. That's
-//     literally the first day we have data for this case — the earliest
-//     observation we can attest to.
-//   - Silent updates: dated by the snapshot in which we observed the
-//     updatedAt bump (change.to).
+//   - Events with eventDateTime: that date (the event's own claim of
+//     when it happened). When it differs materially from firstObservedDay
+//     — i.e. USCIS may have backdated — we surface the first-observed
+//     day as a hover annotation so the signal isn't lost.
+//   - Events without eventDateTime (rare): firstObservedDay, else seed.
+//   - Silent updates: change.to of the diff that detected the
+//     updatedAt bump. These genuinely have no intrinsic date; the
+//     observation IS the event.
 function renderObservedEventCodes(c) {
   const section = document.createElement("section");
   section.className = "events-section";
@@ -2421,12 +2424,32 @@ function renderObservedEventCodes(c) {
   // snapshot's capturedAt — the first day this case existed in our data.
   const seedDay = (days[0] && (days[0].capturedAt || "")).slice(0, 10);
 
-  // 3. Raw events from the latest snapshot, dated by observation only.
+  // 3. Raw events from the latest snapshot.
+  //
+  // Dating order: event's own eventDateTime (intrinsic, preferred) →
+  // firstObservedDay (if no eventDateTime) → seedDay (last resort).
+  //
+  // Backdating annotation: only flagged when the event appeared in our
+  // diff feed AFTER the seed snapshot (i.e. firstObservedDay > seedDay)
+  // AND USCIS's eventDateTime claims an older date. For events already
+  // present in the seed snapshot we have no prior history, so we can't
+  // honestly claim backdating — we just trust the intrinsic date.
   const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
   const rows = events.map(e => {
     const eid = e.eventId;
-    const observed = (eid && firstObserved.get(eid)) || seedDay || "—";
-    return { date: observed, code: e.eventCode || "?" };
+    const intrinsic = (e.eventDateTime || "").slice(0, 10);
+    const firstObs = eid ? firstObserved.get(eid) : null; // post-seed only
+    const observed = firstObs || seedDay || "";
+    const date = intrinsic || observed || "—";
+    // Honest backdating signal: we had snapshots that didn't include
+    // this eventId, then it surfaced with an older claimed date.
+    const backdated =
+      !!(intrinsic && firstObs && intrinsic < firstObs);
+    return {
+      date,
+      code: e.eventCode || "?",
+      observed: backdated ? firstObs : null,
+    };
   });
 
   // 4. Silent updates from the diff history.
@@ -2452,9 +2475,20 @@ function renderObservedEventCodes(c) {
   for (const r of rows) {
     const item = document.createElement("li");
     item.className = "events-item";
+    // The parent .events-list is a 2-column grid and .events-item is
+    // `display: contents`, so each row MUST emit exactly two grid
+    // children or the columns misalign. Wrap the code + optional
+    // backdated badge in a single span to preserve the column count.
+    let codeInner =
+      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
+    if (r.observed) {
+      const tip = `First observed in our snapshots ${formatDate(r.observed)} — USCIS likely backdated this row.`;
+      codeInner +=
+        ` <span class="events-backdated utc-ts" data-tooltip="${escapeHtml(tip)}">backdated</span>`;
+    }
     item.innerHTML =
       `<span class="events-date">${escapeHtml(formatDate(r.date))}</span>` +
-      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
+      `<span class="events-code-cell">${codeInner}</span>`;
     list.appendChild(item);
   }
   section.appendChild(list);
