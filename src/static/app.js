@@ -30,6 +30,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   _wireSyslogFit();
   _wireTopbarFlat();
   _wireSysCardCollapse();
+  _wireEventsTooltipTap();
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.addEventListener("click", () => setView(btn.dataset.view))
   );
@@ -398,6 +399,97 @@ function _wireSysCardCollapse() {
       }
     });
   }
+}
+
+// ============================================================
+// Timeline-event hover/tap popup. Why this isn't a CSS-pseudo tooltip:
+// `.events-tooltip::after` would be a pure-CSS solution, but pseudo
+// elements can't be repositioned by JS — they inherit their parent's
+// position absolute, and a trigger near the right edge always pushes
+// the popup off-screen. Mobile-correct positioning needs a real DOM
+// node we can run through positionPopover().
+//
+// One singleton popup div, reparented to <body>, fed by the active
+// pill's data-tooltip. Hover or focus opens it; outside click /
+// Escape / tap elsewhere dismisses. On a hover-capable device it
+// follows the cursor; on touch it tap-toggles.
+// ============================================================
+function _wireEventsTooltipTap() {
+  if (document.body.dataset.eventsTapWired === "true") return;
+  document.body.dataset.eventsTapWired = "true";
+
+  // Singleton popup, attached to body so it never inherits a clipping
+  // overflow from card / panel ancestors.
+  const pop = document.createElement("div");
+  pop.className = "events-popup";
+  pop.hidden = true;
+  pop.setAttribute("role", "tooltip");
+  document.body.appendChild(pop);
+
+  let activePill = null;
+  const hoverCapable = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+  const closePopup = () => {
+    pop.hidden = true;
+    pop.style.transform = "";
+    pop.style.top = "";
+    pop.style.left = "";
+    activePill = null;
+  };
+
+  const openFor = (pill) => {
+    const text = pill.getAttribute("data-tooltip") || "";
+    if (!text) return;
+    pop.textContent = text;
+    pop.hidden = false;
+    activePill = pill;
+    // Position above the pill; positionPopover then snaps it back
+    // inside the viewport if either edge spilled out.
+    requestAnimationFrame(() => {
+      const r = pill.getBoundingClientRect();
+      const popR = pop.getBoundingClientRect();
+      // Anchor above the pill; if no room, drop below.
+      const above = r.top - popR.height - 6;
+      const below = r.bottom + 6;
+      const top = above >= 8 ? above : below;
+      pop.style.top = `${top + window.scrollY}px`;
+      pop.style.left = `${r.left + window.scrollX}px`;
+      positionPopover(pop);
+    });
+  };
+
+  // Hover (desktop). Use pointerenter/leave so it works with mouse + pen
+  // but not touch (touch fires pointerdown→click without a hover state).
+  if (hoverCapable) {
+    document.addEventListener("pointerenter", (e) => {
+      const pill = e.target?.closest?.(".events-tooltip");
+      if (pill) openFor(pill);
+    }, true);
+    document.addEventListener("pointerleave", (e) => {
+      const pill = e.target?.closest?.(".events-tooltip");
+      if (pill && pill === activePill) closePopup();
+    }, true);
+  }
+
+  // Click / tap. On hover-capable devices, also lets click pin the
+  // popup; on touch it's the primary open mechanism.
+  document.addEventListener("click", (e) => {
+    const pill = e.target.closest(".events-tooltip");
+    if (pill) {
+      if (pill === activePill) closePopup();
+      else openFor(pill);
+      return;
+    }
+    if (activePill && !pop.contains(e.target)) closePopup();
+  });
+
+  // Escape dismisses, and a resize / orientation change reflows.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && activePill) closePopup();
+  });
+  window.addEventListener("resize", () => {
+    if (activePill) openFor(activePill);   // re-anchor cleanly
+  });
 }
 
 // ---------- data loading ----------
@@ -962,9 +1054,12 @@ function renderLocationRow(c) {
 
 // Generic info-badge / popover wiring. Mirrors #export-info-btn behaviour
 // so the UX is consistent: click toggles, outside click or Escape dismisses.
+// Also runs positionPopover after opening so the popup never spills past
+// the viewport edge (matters on mobile where most badges sit near an edge).
 function wireInfoPopover(btn, pop) {
   const close = () => {
     pop.hidden = true;
+    pop.style.transform = "";
     btn.setAttribute("aria-expanded", "false");
   };
   btn.addEventListener("click", e => {
@@ -972,12 +1067,17 @@ function wireInfoPopover(btn, pop) {
     const open = pop.hidden;
     pop.hidden = !open;
     btn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!pop.hidden) requestAnimationFrame(() => positionPopover(pop));
   });
   document.addEventListener("click", e => {
     if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") close();
+  });
+  // Reposition on resize so an orientation change doesn't strand it.
+  window.addEventListener("resize", () => {
+    if (!pop.hidden) positionPopover(pop);
   });
 }
 
@@ -2371,25 +2471,14 @@ function renderUpdateRecord(u) {
 // Date + code only — no interpretation, no community folklore, no stage
 // inference. Form-agnostic: works the same for I-140, I-485, I-765, I-131…
 //
-// PURELY OBSERVED — NO USCIS-CLAIMED DATES
+// Events have eventIds, so they ARE the records — one row per eventId
+// from the latest snapshot, dated by its own eventDateTime. No editorial
+// layer. If USCIS adds, removes, or re-emits an eventId, the timeline
+// reflects that directly.
 //
-// Every row is dated by the day *we* first observed it in our snapshot
-// history. We never display USCIS's self-reported eventDateTime, because
-// USCIS occasionally backdates an event row at insertion — registering
-// a fresh row today but stamping it with an older eventDateTime. Showing
-// the claimed date would be repeating USCIS's story, not reporting what
-// we observed.
-//
-// Source of truth per row:
-//   - Events added after the seed snapshot: dated by the snapshot in
-//     which they first appeared (diff feed → change.to of the diff that
-//     added the eventId).
-//   - Events already present in the seed snapshot (the very first pull
-//     of this case): dated by the seed snapshot's capturedAt. That's
-//     literally the first day we have data for this case — the earliest
-//     observation we can attest to.
-//   - Silent updates: dated by the snapshot in which we observed the
-//     updatedAt bump (change.to).
+// Silent updates are the only thing that needs the diff feed: they have
+// no intrinsic id or date, so we anchor them on the day we observed the
+// updatedAt bump.
 function renderObservedEventCodes(c) {
   const section = document.createElement("section");
   section.className = "events-section";
@@ -2401,39 +2490,39 @@ function renderObservedEventCodes(c) {
 
   const hist = state.histories[c.label];
   const changes = (hist && hist.changes) || [];
-  const days = (hist && hist.days) || [];
 
-  // 1. eventId -> day-first-observed (from diff history)
-  // Walk the diff feed oldest -> newest and record the first day an
-  // eventId appears in an `added` list.
-  const firstObserved = new Map();
-  for (const ch of changes) {
-    const added = (ch.events && ch.events.added) || [];
-    for (const e of added) {
-      const eid = e.eventId;
-      if (!eid || firstObserved.has(eid)) continue;
-      firstObserved.set(eid, (ch.to || "").slice(0, 10));
+  // 1. Raw events from the latest snapshot, deduped by eventId.
+  // eventId is USCIS's own natural key — collisions across the same
+  // payload would be a server bug, not something to paper over here.
+  //
+  // Dated by createdAtTimestamp — USCIS's "we wrote this row" timestamp.
+  // This is the honest record of when USCIS actually committed the row,
+  // separate from eventDateTime (which is the date USCIS claims the event
+  // occurred and which USCIS occasionally backdates). When a row is
+  // re-emitted with a new eventId at a later date, createdAt reflects
+  // the re-emit day directly, no editorial layer required.
+  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
+  const seen = new Set();
+  const rows = [];
+  for (const e of events) {
+    const eid = e.eventId;
+    if (eid) {
+      if (seen.has(eid)) continue;
+      seen.add(eid);
     }
+    rows.push({
+      date: (e.createdAt || e.createdAtTimestamp || "").slice(0, 10) || "—",
+      code: e.eventCode || "?",
+      event: e,
+    });
   }
 
-  // 2. Seed-snapshot fallback. Events already present in the first
-  // snapshot have no diff that added them, so we fall back to the seed
-  // snapshot's capturedAt — the first day this case existed in our data.
-  const seedDay = (days[0] && (days[0].capturedAt || "")).slice(0, 10);
-
-  // 3. Raw events from the latest snapshot, dated by observation only.
-  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
-  const rows = events.map(e => {
-    const eid = e.eventId;
-    const observed = (eid && firstObserved.get(eid)) || seedDay || "—";
-    return { date: observed, code: e.eventCode || "?" };
-  });
-
-  // 4. Silent updates from the diff history.
+  // 2. Silent updates from the diff history (no intrinsic date — anchor
+  // on the day we observed the updatedAt bump).
   for (const ch of changes) {
     if (ch.kind !== "silent_update") continue;
     const when = (ch.to || "").slice(0, 10) || "—";
-    rows.push({ date: when, code: "silent update", silent: true });
+    rows.push({ date: when, code: "silent update", silent: true, change: ch });
   }
 
   if (!rows.length) {
@@ -2452,13 +2541,77 @@ function renderObservedEventCodes(c) {
   for (const r of rows) {
     const item = document.createElement("li");
     item.className = "events-item";
+    const tooltip = r.silent
+      ? buildSilentUpdateTooltip(r.change)
+      : buildEventTooltip(r.event);
+    const codeClasses =
+      `events-code${r.silent ? " events-code-silent" : ""}` +
+      (tooltip ? " events-tooltip" : "");
+    const tooltipAttr = tooltip ? ` data-tooltip="${escapeHtml(tooltip)}"` : "";
     item.innerHTML =
       `<span class="events-date">${escapeHtml(formatDate(r.date))}</span>` +
-      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
+      `<span class="${codeClasses}"${tooltipAttr}>${escapeHtml(r.code)}</span>`;
     list.appendChild(item);
   }
   section.appendChild(list);
   return section;
+}
+
+// Format an ISO timestamp for an event/silent-update hover tooltip in the
+// user's local timezone (e.g. "MM/DD/YYYY h:mm:ssAM EDT"). Returns the raw
+// value if it doesn't look like a timestamp so we never silently swallow
+// non-ISO data.
+function formatTimestampLocal(v) {
+  if (!v) return "—";
+  const s = String(v);
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(s)) return s;
+  try {
+    return formatLocalDateTime(s, { withSeconds: true });
+  } catch (_) {
+    return s;
+  }
+}
+
+// Event hover: surface USCIS's two timestamps (when *they* wrote it vs
+// when *they* claim it happened). Localized so the user sees their own
+// wall-clock time. The first line states the timezone explicitly so a
+// hover-only reader knows the times below are local, not UTC.
+function buildEventTooltip(e) {
+  if (!e) return "";
+  const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
+  if (e.eventCode) lines.push(`Code:    ${e.eventCode}`);
+  if (e.updatedAtTimestamp) {
+    lines.push(`Updated: ${formatTimestampLocal(e.updatedAtTimestamp)}`);
+  } else if (e.updatedAt) {
+    lines.push(`Updated: ${e.updatedAt}`);
+  }
+  if (e.eventTimestamp) {
+    lines.push(`Event:   ${formatTimestampLocal(e.eventTimestamp)}`);
+  } else if (e.eventDateTime) {
+    lines.push(`Event:   ${e.eventDateTime}`);
+  }
+  return lines.join("\n");
+}
+
+// Silent-update hover: render each scalar diff as a labeled block with
+// Before/After on indented lines so the two values line up vertically
+// and the eye can compare them at a glance. "After:" is padded with an
+// extra space so the colons (and thus the value column) align with
+// "Before:". First line states the timezone so the hover is
+// self-explanatory.
+function buildSilentUpdateTooltip(ch) {
+  if (!ch) return "";
+  const scalars = ch.scalars || {};
+  const keys = Object.keys(scalars);
+  if (!keys.length) return "";
+  const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
+  for (const key of keys) {
+    const { from, to } = scalars[key];
+    lines.push(`${key}:`);
+    lines.push(`    Before: ${formatTimestampLocal(from)}`);
+    lines.push(`    After:  ${formatTimestampLocal(to)}`);
+  }
+  return lines.join("\n");
 }
 
 function callout(tone, title, body) {
