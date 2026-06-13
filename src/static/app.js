@@ -30,6 +30,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   _wireSyslogFit();
   _wireTopbarFlat();
   _wireSysCardCollapse();
+  _wireEventsTooltipTap();
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.addEventListener("click", () => setView(btn.dataset.view))
   );
@@ -398,6 +399,97 @@ function _wireSysCardCollapse() {
       }
     });
   }
+}
+
+// ============================================================
+// Timeline-event hover/tap popup. Why this isn't a CSS-pseudo tooltip:
+// `.events-tooltip::after` would be a pure-CSS solution, but pseudo
+// elements can't be repositioned by JS — they inherit their parent's
+// position absolute, and a trigger near the right edge always pushes
+// the popup off-screen. Mobile-correct positioning needs a real DOM
+// node we can run through positionPopover().
+//
+// One singleton popup div, reparented to <body>, fed by the active
+// pill's data-tooltip. Hover or focus opens it; outside click /
+// Escape / tap elsewhere dismisses. On a hover-capable device it
+// follows the cursor; on touch it tap-toggles.
+// ============================================================
+function _wireEventsTooltipTap() {
+  if (document.body.dataset.eventsTapWired === "true") return;
+  document.body.dataset.eventsTapWired = "true";
+
+  // Singleton popup, attached to body so it never inherits a clipping
+  // overflow from card / panel ancestors.
+  const pop = document.createElement("div");
+  pop.className = "events-popup";
+  pop.hidden = true;
+  pop.setAttribute("role", "tooltip");
+  document.body.appendChild(pop);
+
+  let activePill = null;
+  const hoverCapable = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+  const closePopup = () => {
+    pop.hidden = true;
+    pop.style.transform = "";
+    pop.style.top = "";
+    pop.style.left = "";
+    activePill = null;
+  };
+
+  const openFor = (pill) => {
+    const text = pill.getAttribute("data-tooltip") || "";
+    if (!text) return;
+    pop.textContent = text;
+    pop.hidden = false;
+    activePill = pill;
+    // Position above the pill; positionPopover then snaps it back
+    // inside the viewport if either edge spilled out.
+    requestAnimationFrame(() => {
+      const r = pill.getBoundingClientRect();
+      const popR = pop.getBoundingClientRect();
+      // Anchor above the pill; if no room, drop below.
+      const above = r.top - popR.height - 6;
+      const below = r.bottom + 6;
+      const top = above >= 8 ? above : below;
+      pop.style.top = `${top + window.scrollY}px`;
+      pop.style.left = `${r.left + window.scrollX}px`;
+      positionPopover(pop);
+    });
+  };
+
+  // Hover (desktop). Use pointerenter/leave so it works with mouse + pen
+  // but not touch (touch fires pointerdown→click without a hover state).
+  if (hoverCapable) {
+    document.addEventListener("pointerenter", (e) => {
+      const pill = e.target?.closest?.(".events-tooltip");
+      if (pill) openFor(pill);
+    }, true);
+    document.addEventListener("pointerleave", (e) => {
+      const pill = e.target?.closest?.(".events-tooltip");
+      if (pill && pill === activePill) closePopup();
+    }, true);
+  }
+
+  // Click / tap. On hover-capable devices, also lets click pin the
+  // popup; on touch it's the primary open mechanism.
+  document.addEventListener("click", (e) => {
+    const pill = e.target.closest(".events-tooltip");
+    if (pill) {
+      if (pill === activePill) closePopup();
+      else openFor(pill);
+      return;
+    }
+    if (activePill && !pop.contains(e.target)) closePopup();
+  });
+
+  // Escape dismisses, and a resize / orientation change reflows.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && activePill) closePopup();
+  });
+  window.addEventListener("resize", () => {
+    if (activePill) openFor(activePill);   // re-anchor cleanly
+  });
 }
 
 // ---------- data loading ----------
@@ -962,9 +1054,12 @@ function renderLocationRow(c) {
 
 // Generic info-badge / popover wiring. Mirrors #export-info-btn behaviour
 // so the UX is consistent: click toggles, outside click or Escape dismisses.
+// Also runs positionPopover after opening so the popup never spills past
+// the viewport edge (matters on mobile where most badges sit near an edge).
 function wireInfoPopover(btn, pop) {
   const close = () => {
     pop.hidden = true;
+    pop.style.transform = "";
     btn.setAttribute("aria-expanded", "false");
   };
   btn.addEventListener("click", e => {
@@ -972,12 +1067,17 @@ function wireInfoPopover(btn, pop) {
     const open = pop.hidden;
     pop.hidden = !open;
     btn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!pop.hidden) requestAnimationFrame(() => positionPopover(pop));
   });
   document.addEventListener("click", e => {
     if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) close();
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") close();
+  });
+  // Reposition on resize so an orientation change doesn't strand it.
+  window.addEventListener("resize", () => {
+    if (!pop.hidden) positionPopover(pop);
   });
 }
 
