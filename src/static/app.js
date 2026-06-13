@@ -2394,6 +2394,13 @@ function renderObservedEventCodes(c) {
   // 1. Raw events from the latest snapshot, deduped by eventId.
   // eventId is USCIS's own natural key — collisions across the same
   // payload would be a server bug, not something to paper over here.
+  //
+  // Dated by createdAtTimestamp — USCIS's "we wrote this row" timestamp.
+  // This is the honest record of when USCIS actually committed the row,
+  // separate from eventDateTime (which is the date USCIS claims the event
+  // occurred and which USCIS occasionally backdates). When a row is
+  // re-emitted with a new eventId at a later date, createdAt reflects
+  // the re-emit day directly, no editorial layer required.
   const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
   const seen = new Set();
   const rows = [];
@@ -2404,7 +2411,7 @@ function renderObservedEventCodes(c) {
       seen.add(eid);
     }
     rows.push({
-      date: (e.eventDateTime || "").slice(0, 10) || "—",
+      date: (e.createdAt || e.createdAtTimestamp || "").slice(0, 10) || "—",
       code: e.eventCode || "?",
     });
   }
