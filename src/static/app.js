@@ -2413,6 +2413,7 @@ function renderObservedEventCodes(c) {
     rows.push({
       date: (e.createdAt || e.createdAtTimestamp || "").slice(0, 10) || "—",
       code: e.eventCode || "?",
+      event: e,
     });
   }
 
@@ -2421,7 +2422,7 @@ function renderObservedEventCodes(c) {
   for (const ch of changes) {
     if (ch.kind !== "silent_update") continue;
     const when = (ch.to || "").slice(0, 10) || "—";
-    rows.push({ date: when, code: "silent update", silent: true });
+    rows.push({ date: when, code: "silent update", silent: true, change: ch });
   }
 
   if (!rows.length) {
@@ -2440,13 +2441,73 @@ function renderObservedEventCodes(c) {
   for (const r of rows) {
     const item = document.createElement("li");
     item.className = "events-item";
+    const tooltip = r.silent
+      ? buildSilentUpdateTooltip(r.change)
+      : buildEventTooltip(r.event);
+    const codeClasses =
+      `events-code${r.silent ? " events-code-silent" : ""}` +
+      (tooltip ? " events-tooltip" : "");
+    const tooltipAttr = tooltip ? ` data-tooltip="${escapeHtml(tooltip)}"` : "";
     item.innerHTML =
       `<span class="events-date">${escapeHtml(formatDate(r.date))}</span>` +
-      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
+      `<span class="${codeClasses}"${tooltipAttr}>${escapeHtml(r.code)}</span>`;
     list.appendChild(item);
   }
   section.appendChild(list);
   return section;
+}
+
+// Format an ISO timestamp for an event/silent-update hover tooltip in the
+// user's local timezone (e.g. "MM/DD/YYYY h:mm:ssAM EDT"). Returns the raw
+// value if it doesn't look like a timestamp so we never silently swallow
+// non-ISO data.
+function formatTimestampLocal(v) {
+  if (!v) return "—";
+  const s = String(v);
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(s)) return s;
+  try {
+    return formatLocalDateTime(s, { withSeconds: true });
+  } catch (_) {
+    return s;
+  }
+}
+
+// Event hover: surface USCIS's two timestamps (when *they* wrote it vs
+// when *they* claim it happened). Localized so the user sees their own
+// wall-clock time. The first line states the timezone explicitly so a
+// hover-only reader knows the times below are local, not UTC.
+function buildEventTooltip(e) {
+  if (!e) return "";
+  const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
+  if (e.eventCode) lines.push(`Code:    ${e.eventCode}`);
+  if (e.updatedAtTimestamp) {
+    lines.push(`Updated: ${formatTimestampLocal(e.updatedAtTimestamp)}`);
+  } else if (e.updatedAt) {
+    lines.push(`Updated: ${e.updatedAt}`);
+  }
+  if (e.eventTimestamp) {
+    lines.push(`Event:   ${formatTimestampLocal(e.eventTimestamp)}`);
+  } else if (e.eventDateTime) {
+    lines.push(`Event:   ${e.eventDateTime}`);
+  }
+  return lines.join("\n");
+}
+
+// Silent-update hover: show each scalar that changed between the two
+// snapshots as "key: from → to", with any ISO timestamp localized so
+// the dates the user actually thinks in are what gets rendered. First
+// line states the timezone so the hover is self-explanatory.
+function buildSilentUpdateTooltip(ch) {
+  if (!ch) return "";
+  const scalars = ch.scalars || {};
+  const keys = Object.keys(scalars);
+  if (!keys.length) return "";
+  const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
+  for (const key of keys) {
+    const { from, to } = scalars[key];
+    lines.push(`${key}: ${formatTimestampLocal(from)} → ${formatTimestampLocal(to)}`);
+  }
+  return lines.join("\n");
 }
 
 function callout(tone, title, body) {
