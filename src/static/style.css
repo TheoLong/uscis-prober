@@ -950,16 +950,7 @@ main[hidden] { display: none; }
   padding: 1px 8px;
   background: var(--pill-bg);
   border-radius: var(--radius-sm);
-}
-/* Wrapper for the right grid column: keeps the event code pill + the
- * optional `.events-backdated` badge as ONE grid cell so the parent
- * 2-column grid stays aligned (.events-item uses `display: contents`,
- * so each <li> must emit exactly two children). */
-.events-code-cell {
   justify-self: start;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0;
 }
 /* Silent-update rows get a de-emphasised variant — same shape, muted
  * palette — so the factual event codes remain the visual anchor. */
@@ -968,23 +959,6 @@ main[hidden] { display: none; }
   background: transparent;
   border: 1px dashed var(--border);
   font-weight: 500;
-}
-/* Backdating annotation: small inline badge next to the event code when
- * USCIS's claimed eventDateTime is older than the day we first observed
- * the row in our snapshots. Hover reveals the first-observed day via the
- * shared `.utc-ts[data-tooltip]` mechanism. */
-.events-backdated {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 0 6px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--warning, #b45309);
-  background: color-mix(in srgb, var(--warning, #b45309) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warning, #b45309) 35%, transparent);
-  border-radius: var(--radius-sm);
-  cursor: help;
-  vertical-align: baseline;
 }
 
 /* ---------- system log view ----------

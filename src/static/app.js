@@ -2371,28 +2371,14 @@ function renderUpdateRecord(u) {
 // Date + code only — no interpretation, no community folklore, no stage
 // inference. Form-agnostic: works the same for I-140, I-485, I-765, I-131…
 //
-// DATE-SOURCE POLICY (timeline UI)
+// Events have eventIds, so they ARE the records — one row per eventId
+// from the latest snapshot, dated by its own eventDateTime. No editorial
+// layer. If USCIS adds, removes, or re-emits an eventId, the timeline
+// reflects that directly.
 //
-// Events have intrinsic dates (eventDateTime); use them. Observation
-// date is only a fallback for things without an intrinsic date.
-//
-// Why this differs from the prediction report: the report's cohort math
-// is sensitive to mis-dating by months, so it dates by firstObservedDay
-// to defend against USCIS backdating a row. The timeline UI's job is
-// different — it shows the user what USCIS says happened on this case,
-// in chronological order. Dating everything by observation would push
-// genuine Feb/March events into whatever day our seed snapshot ran,
-// which is *more* misleading than trusting the event's own date.
-//
-// Source of truth per row:
-//   - Events with eventDateTime: that date (the event's own claim of
-//     when it happened). When it differs materially from firstObservedDay
-//     — i.e. USCIS may have backdated — we surface the first-observed
-//     day as a hover annotation so the signal isn't lost.
-//   - Events without eventDateTime (rare): firstObservedDay, else seed.
-//   - Silent updates: change.to of the diff that detected the
-//     updatedAt bump. These genuinely have no intrinsic date; the
-//     observation IS the event.
+// Silent updates are the only thing that needs the diff feed: they have
+// no intrinsic id or date, so we anchor them on the day we observed the
+// updatedAt bump.
 function renderObservedEventCodes(c) {
   const section = document.createElement("section");
   section.className = "events-section";
@@ -2404,55 +2390,27 @@ function renderObservedEventCodes(c) {
 
   const hist = state.histories[c.label];
   const changes = (hist && hist.changes) || [];
-  const days = (hist && hist.days) || [];
 
-  // 1. eventId -> day-first-observed (from diff history)
-  // Walk the diff feed oldest -> newest and record the first day an
-  // eventId appears in an `added` list.
-  const firstObserved = new Map();
-  for (const ch of changes) {
-    const added = (ch.events && ch.events.added) || [];
-    for (const e of added) {
-      const eid = e.eventId;
-      if (!eid || firstObserved.has(eid)) continue;
-      firstObserved.set(eid, (ch.to || "").slice(0, 10));
+  // 1. Raw events from the latest snapshot, deduped by eventId.
+  // eventId is USCIS's own natural key — collisions across the same
+  // payload would be a server bug, not something to paper over here.
+  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
+  const seen = new Set();
+  const rows = [];
+  for (const e of events) {
+    const eid = e.eventId;
+    if (eid) {
+      if (seen.has(eid)) continue;
+      seen.add(eid);
     }
+    rows.push({
+      date: (e.eventDateTime || "").slice(0, 10) || "—",
+      code: e.eventCode || "?",
+    });
   }
 
-  // 2. Seed-snapshot fallback. Events already present in the first
-  // snapshot have no diff that added them, so we fall back to the seed
-  // snapshot's capturedAt — the first day this case existed in our data.
-  const seedDay = (days[0] && (days[0].capturedAt || "")).slice(0, 10);
-
-  // 3. Raw events from the latest snapshot.
-  //
-  // Dating order: event's own eventDateTime (intrinsic, preferred) →
-  // firstObservedDay (if no eventDateTime) → seedDay (last resort).
-  //
-  // Backdating annotation: only flagged when the event appeared in our
-  // diff feed AFTER the seed snapshot (i.e. firstObservedDay > seedDay)
-  // AND USCIS's eventDateTime claims an older date. For events already
-  // present in the seed snapshot we have no prior history, so we can't
-  // honestly claim backdating — we just trust the intrinsic date.
-  const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
-  const rows = events.map(e => {
-    const eid = e.eventId;
-    const intrinsic = (e.eventDateTime || "").slice(0, 10);
-    const firstObs = eid ? firstObserved.get(eid) : null; // post-seed only
-    const observed = firstObs || seedDay || "";
-    const date = intrinsic || observed || "—";
-    // Honest backdating signal: we had snapshots that didn't include
-    // this eventId, then it surfaced with an older claimed date.
-    const backdated =
-      !!(intrinsic && firstObs && intrinsic < firstObs);
-    return {
-      date,
-      code: e.eventCode || "?",
-      observed: backdated ? firstObs : null,
-    };
-  });
-
-  // 4. Silent updates from the diff history.
+  // 2. Silent updates from the diff history (no intrinsic date — anchor
+  // on the day we observed the updatedAt bump).
   for (const ch of changes) {
     if (ch.kind !== "silent_update") continue;
     const when = (ch.to || "").slice(0, 10) || "—";
@@ -2475,20 +2433,9 @@ function renderObservedEventCodes(c) {
   for (const r of rows) {
     const item = document.createElement("li");
     item.className = "events-item";
-    // The parent .events-list is a 2-column grid and .events-item is
-    // `display: contents`, so each row MUST emit exactly two grid
-    // children or the columns misalign. Wrap the code + optional
-    // backdated badge in a single span to preserve the column count.
-    let codeInner =
-      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
-    if (r.observed) {
-      const tip = `First observed in our snapshots ${formatDate(r.observed)} — USCIS likely backdated this row.`;
-      codeInner +=
-        ` <span class="events-backdated utc-ts" data-tooltip="${escapeHtml(tip)}">backdated</span>`;
-    }
     item.innerHTML =
       `<span class="events-date">${escapeHtml(formatDate(r.date))}</span>` +
-      `<span class="events-code-cell">${codeInner}</span>`;
+      `<span class="events-code${r.silent ? " events-code-silent" : ""}">${escapeHtml(r.code)}</span>`;
     list.appendChild(item);
   }
   section.appendChild(list);
