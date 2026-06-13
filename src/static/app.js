@@ -2593,10 +2593,12 @@ function buildEventTooltip(e) {
   return lines.join("\n");
 }
 
-// Silent-update hover: show each scalar that changed between the two
-// snapshots as "key: from → to", with any ISO timestamp localized so
-// the dates the user actually thinks in are what gets rendered. First
-// line states the timezone so the hover is self-explanatory.
+// Silent-update hover: render each scalar diff as a labeled block with
+// Before/After on indented lines so the two values line up vertically
+// and the eye can compare them at a glance. "After:" is padded with an
+// extra space so the colons (and thus the value column) align with
+// "Before:". First line states the timezone so the hover is
+// self-explanatory.
 function buildSilentUpdateTooltip(ch) {
   if (!ch) return "";
   const scalars = ch.scalars || {};
@@ -2605,7 +2607,9 @@ function buildSilentUpdateTooltip(ch) {
   const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
   for (const key of keys) {
     const { from, to } = scalars[key];
-    lines.push(`${key}: ${formatTimestampLocal(from)} → ${formatTimestampLocal(to)}`);
+    lines.push(`${key}:`);
+    lines.push(`    Before: ${formatTimestampLocal(from)}`);
+    lines.push(`    After:  ${formatTimestampLocal(to)}`);
   }
   return lines.join("\n");
 }
