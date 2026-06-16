@@ -1960,7 +1960,7 @@ def api_recompute_diff():
         config = {}
         
     _recompute_diffs_at_startup(config)
-    return {"ok": True}
+    return jsonify({"ok": True})
 
 
 @app.route("/api/full-trace/<dir_name>/<path:subpath>")
