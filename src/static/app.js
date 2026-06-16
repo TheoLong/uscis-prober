@@ -2732,7 +2732,8 @@ function renderRaw(panel, c) {
   copyOne.addEventListener("click", async () => {
     const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
-    const text = JSON.stringify(entry, null, 2);
+    const payload = entry.data || entry; // extract data envelope if present
+    const text = JSON.stringify(payload, null, 2);
     const ok = await copyToClipboard(text);
     copyOne.textContent = ok ? "Copied ✓" : "Copy failed";
     copyOne.classList.toggle("raw-btn-copied", ok);
@@ -2754,8 +2755,9 @@ function renderRaw(panel, c) {
   function updateRawBody() {
     const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
+    const payload = entry.data || entry; // extract data envelope if present
     // 4-space indent + syntax highlight — written as HTML so colours work.
-    pre.innerHTML = highlightJson(JSON.stringify(entry, null, 4));
+    pre.innerHTML = highlightJson(JSON.stringify(payload, null, 4));
   }
 }
 
