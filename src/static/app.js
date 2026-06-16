@@ -1194,13 +1194,13 @@ function renderChangeBlock(ch) {
     for (const a of c.added || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-added";
-      chip.textContent = "+ " + describeItem(key, a);
+      chip.innerHTML = "+ " + describeItem(key, a);
       sec.appendChild(chip);
     }
     for (const r of c.removed || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-removed";
-      chip.textContent = "− " + describeItem(key, r);
+      chip.innerHTML = "− " + describeItem(key, r);
       sec.appendChild(chip);
     }
     block.appendChild(sec);
@@ -1212,8 +1212,12 @@ function describeItem(kind, obj) {
   if (kind === "events") {
     const code = obj.eventCode || "?";
     const caption = state.eventCodeLabels[code];
-    const when = (obj.createdAtTimestamp || obj.createdAt || obj.eventDateTime) ? formatDate(obj.createdAtTimestamp || obj.createdAt || obj.eventDateTime) : "—";
-    return caption ? `${code} (${caption}) @ ${when}` : `${code} @ ${when}`;
+    const bestTimestamp = obj.createdAtTimestamp || obj.createdAt || obj.eventDateTime;
+    const whenFormatted = bestTimestamp || "—";
+    const whenHover = bestTimestamp && String(bestTimestamp).includes("T") ? ` data-tooltip="${escapeHtml(formatLocalDateTime(bestTimestamp))}"` : "";
+    const whenClass = bestTimestamp && String(bestTimestamp).includes("T") ? ` class="utc-ts"` : "";
+    const whenStr = `<span${whenClass}${whenHover}>${escapeHtml(whenFormatted)}</span>`;
+    return caption ? `${code} (${caption}) @ ${whenStr}` : `${code} @ ${whenStr}`;
   }
   if (kind === "notices") {
     const appt = obj.appointmentDateTime
@@ -2451,13 +2455,13 @@ function renderUpdateRecord(u) {
     for (const a of coll.added || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-added";
-      chip.textContent = "+ " + describeItem(key, a);
+      chip.innerHTML = "+ " + describeItem(key, a);
       sec.appendChild(chip);
     }
     for (const r of coll.removed || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-removed";
-      chip.textContent = "− " + describeItem(key, r);
+      chip.innerHTML = "− " + describeItem(key, r);
       sec.appendChild(chip);
     }
     block.appendChild(sec);
