@@ -25,6 +25,7 @@ const state = {
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
   wireExportInfo();
+  wireRecomputeDiff();
   wireDebugPill();
   wireMfaModal();
   _wireSyslogFit();
@@ -138,6 +139,7 @@ function wireExportInfo() {
   const pairs = [
     ["export-info-btn", "export-info-popover"],
     ["debug-info-btn",  "debug-info-popover"],
+    ["recompute-diff-info-btn", "recompute-diff-info-popover"],
   ];
   const popovers = pairs
     .map(([btnId, popId]) => ({
@@ -191,10 +193,37 @@ function wireExportInfo() {
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") closeAll();
   });
-}
-
-// ============================================================
-// Topbar per-row alignment — when a cluster ends up alone on a
+  }
+ 
+  function wireRecomputeDiff() {
+  const btn = document.getElementById("recompute-diff-btn");
+  if (btn) {
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Recomputing...";
+    try {
+      const res = await fetch("/api/recompute-diff", { method: "POST" });
+      if (!res.ok) throw new Error("Recompute failed");
+      btn.textContent = "Done ✓";
+      setTimeout(() => {
+        btn.textContent = "Recompute diff";
+        btn.disabled = false;
+      }, 2000);
+      await refreshAll();
+    } catch (err) {
+      console.error(err);
+      btn.textContent = "Failed";
+      setTimeout(() => {
+        btn.textContent = "Recompute diff";
+        btn.disabled = false;
+      }, 2000);
+    }
+  });
+  }
+  }
+ 
+  // ============================================================
+  // Topbar per-row alignment — when a cluster ends up alone on a
 // row, expand it to fill the row so its trailing item snaps to
 // the right edge via auto-margin. Driven by vertical centerline
 // comparison (align-items: center keeps row members on the same
@@ -2511,7 +2540,7 @@ function renderObservedEventCodes(c) {
       seen.add(eid);
     }
     rows.push({
-      date: (e.createdAt || e.createdAtTimestamp || "").slice(0, 10) || "—",
+      date: (e.createdAtTimestamp || e.createdAt || "").slice(0, 10) || "—",
       code: e.eventCode || "?",
       event: e,
     });
@@ -2732,7 +2761,7 @@ function renderRaw(panel, c) {
   copyOne.addEventListener("click", async () => {
     const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
-    const text = JSON.stringify(entry, null, 2);
+    const text = JSON.stringify(entry.data || entry, null, 2);
     const ok = await copyToClipboard(text);
     copyOne.textContent = ok ? "Copied ✓" : "Copy failed";
     copyOne.classList.toggle("raw-btn-copied", ok);
@@ -2755,7 +2784,7 @@ function renderRaw(panel, c) {
     const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
     // 4-space indent + syntax highlight — written as HTML so colours work.
-    pre.innerHTML = highlightJson(JSON.stringify(entry, null, 4));
+    pre.innerHTML = highlightJson(JSON.stringify(entry.data || entry, null, 4));
   }
 }
 

@@ -668,8 +668,15 @@ def test_api_debug_mode_rejects_non_bool(client, tmp_path):
     _write_full_cfg(cfg_path, enabled=False)
     r = client.post("/api/debug-mode", json={"enabled": "yes"})
     assert r.status_code == 400
-
-
+ 
+ 
+def test_api_recompute_diff(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.post("/api/recompute-diff")
+    assert r.status_code == 200
+    assert r.get_json() == {"ok": True}
+ 
 def test_api_full_trace_serves_zip_jsonl_eml(client, tmp_path):
     """Serves trace.zip + mfa_trace/events.jsonl + mfa_trace/email_*.eml
     with correct MIME types. Path-traversal is rejected."""

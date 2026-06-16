@@ -1951,6 +1951,18 @@ def api_debug_mode():
     return jsonify({"ok": True, "enabled": desired})
 
 
+@app.route("/api/recompute-diff", methods=["POST"])
+def api_recompute_diff():
+    """Force a recompute of the diff feed for all cases."""
+    try:
+        config = load_config()
+    except Exception:
+        config = {}
+        
+    _recompute_diffs_at_startup(config)
+    return {"ok": True}
+
+
 @app.route("/api/full-trace/<dir_name>/<path:subpath>")
 def api_full_trace(dir_name: str, subpath: str):
     """Serve a single file from `data/full_traces/<dir>/<subpath>`.
