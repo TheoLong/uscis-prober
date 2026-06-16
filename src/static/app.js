@@ -26,6 +26,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
   wireExportInfo();
   wireDebugPill();
+  initRecomputeButton();
   wireMfaModal();
   _wireSyslogFit();
   _wireTopbarFlat();
@@ -138,6 +139,7 @@ function wireExportInfo() {
   const pairs = [
     ["export-info-btn", "export-info-popover"],
     ["debug-info-btn",  "debug-info-popover"],
+    ["recompute-info-btn", "recompute-info-popover"],
   ];
   const popovers = pairs
     .map(([btnId, popId]) => ({
@@ -190,6 +192,28 @@ function wireExportInfo() {
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") closeAll();
+  });
+}
+
+function initRecomputeButton() {
+  const btn = document.getElementById("recompute-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = "Recomputing...";
+    try {
+      const res = await fetch("/api/system-log/recompute", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // Success, refresh the current tab to see the log
+      await reloadData();
+    } catch (e) {
+      console.error(e);
+      alert("Failed to recompute diffs.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
   });
 }
 
@@ -1251,6 +1275,13 @@ const SYSTEMLOG_EVENT_INFO = {
       return n === 0
         ? "log was already empty"
         : `${n} ${n === 1 ? "entry" : "entries"} cleared`;
+    } },
+  diff_recomputed:             { tone: "info",  label: "Diff recomputed",
+    summarize: e => {
+      if (!Array.isArray(e.cases)) return "0 cases recomputed";
+      return e.cases.map(c => 
+        `${c.label} (${c.case_changes} case, ${c.location_changes} loc)`
+      ).join(" · ");
     } },
 
   // Subprocess lifecycle wrapping the pull
