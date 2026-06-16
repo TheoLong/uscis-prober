@@ -1812,17 +1812,6 @@ def api_system_log_export():
     )
 
 
-@app.route("/api/system-log/recompute", methods=["POST"])
-def api_system_log_recompute():
-    """Manually force a diff recompute across all cases.
-    
-    This invokes the same `_recompute_diffs_at_startup` routine that
-    runs when the server starts. It logs a clean summary event.
-    """
-    config = load_config()
-    stats = _recompute_diffs_at_startup(config)
-    return jsonify({"ok": True, "stats": stats})
-
 @app.route("/api/system-log/clear", methods=["POST"])
 def api_system_log_clear():
     """Wipe the system log AND every persisted trace.
