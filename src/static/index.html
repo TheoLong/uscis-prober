@@ -143,6 +143,25 @@
             applicant info, letter IDs, etc. Treat the file as PII.
           </div>
         </div>
+        <div class="action-with-info">
+          <!-- Recompute diff: forces a fresh chronological diff trace
+               on the backend and logs a diff_recomputed event. -->
+          <button id="recompute-btn" class="action-btn pull-btn pull-btn-secondary"
+                  type="button">Recompute diff</button>
+          <button id="recompute-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Recompute diff button"
+                  aria-expanded="false"
+                  aria-controls="recompute-info-popover">i</button>
+          <div id="recompute-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Recomputes every diff.</strong>
+            Clears cached diffs and forces a fresh chronological diff
+            trace across every case you track, re-walking each case's
+            full snapshot history. A <code>diff_recomputed</code> event
+            with per-case change counts is appended to the log below so
+            you can confirm the data flowed through.
+          </div>
+        </div>
         <!-- Mount slot for Export log + Clear log buttons (rendered
              into here from app.js so they sit alongside DEBUG and
              Export data in this single Actions cluster). -->

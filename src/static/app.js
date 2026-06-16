@@ -26,6 +26,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
   wireExportInfo();
   wireDebugPill();
+  wireRecomputeButton();
   wireMfaModal();
   _wireSyslogFit();
   _wireTopbarFlat();
@@ -136,8 +137,9 @@ function wireExportInfo() {
   // Only one popover may be open at a time — opening one closes the
   // others so they can't visually block each other.
   const pairs = [
-    ["export-info-btn", "export-info-popover"],
-    ["debug-info-btn",  "debug-info-popover"],
+    ["export-info-btn",    "export-info-popover"],
+    ["debug-info-btn",     "debug-info-popover"],
+    ["recompute-info-btn", "recompute-info-popover"],
   ];
   const popovers = pairs
     .map(([btnId, popId]) => ({
@@ -190,6 +192,36 @@ function wireExportInfo() {
   });
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") closeAll();
+  });
+}
+
+// Recompute diff button (System tab). POSTs to the backend recompute
+// endpoint, which appends a fresh `diff_recomputed` event, then reloads
+// page 1 of the log so that confirmation lands at the top in view.
+function wireRecomputeButton() {
+  const btn = document.getElementById("recompute-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Recomputing…";
+    try {
+      const res = await fetch("/api/system-log/recompute", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json().catch(() => ({}));
+      if (body && body.ok === false) throw new Error("recompute reported failure");
+      // The new diff_recomputed event is the newest entry — jump to
+      // page 1 and re-render so the operator sees the confirmation.
+      state.systemLogPage = 1;
+      await loadAndRenderSystemLog();
+      toast("Diff recomputed — see the log below.", "ok");
+    } catch (e) {
+      console.error("Recompute diff failed:", e);
+      toast("Recompute failed — diff feed not refreshed.", "bad");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
   });
 }
 
@@ -1341,6 +1373,46 @@ const SYSTEMLOG_EVENT_INFO = {
 
   // Config + debug mode
   pull_config_error:           { tone: "bad",   label: "Pull config error" },
+
+  // Manual / startup diff recompute. The raw `cases` array is suppressed
+  // from the kv detail dump (hideKeys) and rendered instead as a compact
+  // per-case breakdown below the header (renderContent), with a one-line
+  // roll-up next to the label (summarize).
+  diff_recomputed:             { tone: "info",  label: "Diff recomputed",
+    hideKeys: ["cases"],
+    summarize: e => {
+      if (!Array.isArray(e.cases) || !e.cases.length) {
+        return e.error ? "recompute failed" : "no cases configured";
+      }
+      const n = e.cases.length;
+      const caseTotal = e.cases.reduce((s, c) => s + (Number(c.case_changes) || 0), 0);
+      const locTotal  = e.cases.reduce((s, c) => s + (Number(c.location_changes) || 0), 0);
+      const parts = [
+        `${n} case${n === 1 ? "" : "s"}`,
+        `${caseTotal} case change${caseTotal === 1 ? "" : "s"}`,
+      ];
+      if (locTotal) parts.push(`${locTotal} location change${locTotal === 1 ? "" : "s"}`);
+      return parts.join(" · ");
+    },
+    renderContent: e => {
+      if (!Array.isArray(e.cases) || !e.cases.length) return "";
+      const rows = e.cases.map(c => {
+        const cc = Number(c.case_changes) || 0;
+        const lc = Number(c.location_changes) || 0;
+        return `<div class="diffrc-row">` +
+          `<span class="diffrc-label">${escapeHtml(c.label ?? "?")}</span>` +
+          `<span class="diffrc-metric">` +
+            `<span class="diffrc-num">${cc}</span>` +
+            `<span class="diffrc-unit">case change${cc === 1 ? "" : "s"}</span>` +
+          `</span>` +
+          `<span class="diffrc-metric${lc ? "" : " is-zero"}">` +
+            `<span class="diffrc-num">${lc}</span>` +
+            `<span class="diffrc-unit">location change${lc === 1 ? "" : "s"}</span>` +
+          `</span>` +
+        `</div>`;
+      }).join("");
+      return `<div class="diffrc-table">${rows}</div>`;
+    } },
 };
 
 function _eventInfo(entry) {
@@ -1681,7 +1753,12 @@ function _renderFlatSystemLogRow(entry) {
   const block = document.createElement("div");
   block.className = `change-block syslog-block syslog-${info.tone}`;
 
-  const detailKeys = Object.keys(entry).filter(k => !_SYSLOG_SKELETON.has(k));
+  // Events may opt specific keys out of the raw kv detail dump (e.g.
+  // diff_recomputed hides its `cases` array, rendering it as a styled
+  // breakdown via renderContent instead of a JSON blob).
+  const hideKeys = Array.isArray(info.hideKeys) ? new Set(info.hideKeys) : null;
+  const detailKeys = Object.keys(entry).filter(
+    k => !_SYSLOG_SKELETON.has(k) && !(hideKeys && hideKeys.has(k)));
   const when = formatLocalDateTime(new Date(entry.ts), { withSeconds: true });
   const sourceTag = entry.source
     ? `<span class="syslog-source">${escapeHtml(entry.source)}</span>`
@@ -1703,13 +1780,20 @@ function _renderFlatSystemLogRow(entry) {
     ? `<span class="syslog-summary">${escapeHtml(summary)}</span>`
     : "";
 
+  // Optional rich content band — structured HTML the event renders
+  // itself (e.g. diff_recomputed's per-case breakdown). Returns a
+  // string; trusted to escape its own interpolated values.
+  const richHtml = typeof info.renderContent === "function"
+    ? (info.renderContent(entry) || "")
+    : "";
+
   // Header is a 5-column grid so every row aligns:
   //   [disc-spacer] [pill] [source] [event] [ts-right]
   // Summary (when present — e.g. "343 entries cleared" on
   // system_log_cleared) lives in a content band BELOW the header so
   // it can't disturb column alignment.
-  const contentHtml = summaryHtml
-    ? `<div class="syslog-envelope-content">${summaryHtml}</div>`
+  const contentHtml = (summaryHtml || richHtml)
+    ? `<div class="syslog-envelope-content">${summaryHtml}${richHtml}</div>`
     : "";
   block.innerHTML =
     `<div class="syslog-head">` +

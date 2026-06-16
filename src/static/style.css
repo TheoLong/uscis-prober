@@ -1004,6 +1004,57 @@ main[hidden] { display: none; }
 .syslog-envelope-content .trace-open-group {
   flex: 0 0 auto;
 }
+
+/* ---------- diff_recomputed per-case breakdown ----------
+   Replaces a raw JSON dump of the `cases` array with a compact,
+   aligned mini-table: one row per case, mono label + two metric
+   columns (case changes / location changes). Zero-valued metrics
+   are dimmed so the eye lands on the cases that actually moved. */
+.diffrc-table {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  font-size: 0.78rem;
+}
+.diffrc-row {
+  display: grid;
+  grid-template-columns: minmax(48px, auto) minmax(118px, 1fr) minmax(118px, 1fr);
+  gap: 16px;
+  align-items: baseline;
+  padding: 5px 12px;
+  background: var(--bg-elev);
+}
+.diffrc-label {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+}
+.diffrc-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+.diffrc-num {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.diffrc-unit {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.diffrc-metric.is-zero .diffrc-num,
+.diffrc-metric.is-zero .diffrc-unit {
+  color: var(--muted-2);
+  font-weight: 500;
+}
 /* Five-column grid so every row aligns regardless of pill length:
  *   col 1 — disclosure triangle OR invisible spacer of same width
  *   col 2 — pill (natural width, left-aligned inside a fixed cell)
