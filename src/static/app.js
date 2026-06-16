@@ -1212,7 +1212,7 @@ function describeItem(kind, obj) {
   if (kind === "events") {
     const code = obj.eventCode || "?";
     const caption = state.eventCodeLabels[code];
-    const when = obj.eventDateTime ? formatDate(obj.eventDateTime) : "—";
+    const when = (obj.createdAtTimestamp || obj.createdAt || obj.eventDateTime) ? formatDate(obj.createdAtTimestamp || obj.createdAt || obj.eventDateTime) : "—";
     return caption ? `${code} (${caption}) @ ${when}` : `${code} @ ${when}`;
   }
   if (kind === "notices") {
