@@ -1694,7 +1694,7 @@ const _SYSLOG_SKELETON = new Set(["ts", "event", "level", "pid", "source"]);
 // entry (pull, etc.), not repeated in the kv detail block.
 const _SYSLOG_ENVELOPE_EXTRA = new Set([
   "trigger", "duration_seconds", "exit_code", "timed_out",
-  "started_at", "finished_at", "summary", "steps",
+  "started_at", "finished_at", "summary", "steps", "cases"
 ]);
 
 function renderSystemLogRow(entry) {
