@@ -206,7 +206,7 @@ function initRecomputeButton() {
       const res = await fetch("/api/system-log/recompute", { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       // Success, refresh the current tab to see the log
-      await reloadData();
+      await refreshAll();
     } catch (e) {
       console.error(e);
       alert("Failed to recompute diffs.");
