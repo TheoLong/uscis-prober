@@ -2423,7 +2423,7 @@ function renderUpdateRecord(u) {
   // Only show the "Update date" tail when it genuinely differs from the
   // detection date — compare at the day level since realUpdateDate has
   // no time component.
-  const detectedDay = (u.to || u.detectedOn || "").slice(0, 10);
+  const detectedDay = u.realUpdateDate ? u.realUpdateDate.slice(0, 10) : (u.to || u.detectedOn || "").slice(0, 10);
   const dateLine = realDisplay && realDisplay !== formatDate(detectedDay)
     ? `Detected ${detectedDisplay} · Update date ${realDisplay}`
     : `Detected ${detectedDisplay}`;
