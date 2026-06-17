@@ -32,6 +32,7 @@ export function makeStubEl() {
     get textContent() { return _text; },
     hidden: false,
     disabled: false,
+    dataset: {},
     classList: {
       _set: new Set(),
       add(c) { this._set.add(c); },

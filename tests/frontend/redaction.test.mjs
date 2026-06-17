@@ -3,12 +3,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp } from "./_appsandbox.mjs";
+import { loadApp, makeStubEl } from "./_appsandbox.mjs";
 
 const EXPOSE = [
-  "redactSnapshot", "redactDisplay", "redactDetailValue", "scrubText",
+  "redactSnapshot", "redactDisplay", "redactDetailValue", "redactMaybe", "scrubText",
   "REDACT_KEYS", "REDACTION_MASK", "state", "wireRedactionPill",
-  "loadRedactionState", "_detailKvHtml",
+  "loadRedactionState", "_detailKvHtml", "renderSystemLogRow", "renderUpdateRecord",
 ];
 
 function load(extra = {}) {
@@ -219,4 +219,67 @@ test("loadRedactionState GETs the server flag and reflects it on the pill", asyn
   await h.T.loadRedactionState();
   assert.equal(h.T.state.redacted, true);
   assert.equal(h.pill.getAttribute("aria-checked"), "true");
+});
+
+// ---------------- redactMaybe (state-gated free-text scrub) ----------------
+
+test("redactMaybe scrubs only when redaction is on", () => {
+  const { T } = load();
+  T.state.redacted = false;
+  assert.equal(T.redactMaybe("id IOE0935749409"), "id IOE0935749409");
+  T.state.redacted = true;
+  assert.ok(!T.redactMaybe("id IOE0935749409").includes("IOE0935749409"));
+});
+
+// ---------------- pull-row expansion lock (System tab, most-PII steps) ----------------
+
+function pullEntry() {
+  return {
+    ts: "2026-06-16T23:59:52Z", event: "pull", level: "info", source: "scheduler",
+    exit_code: 0,
+    steps: [
+      { ts: "2026-06-16T23:59:50Z", event: "case_snapshot_appended", level: "info", receipt: "IOE0935749409" },
+      { ts: "2026-06-16T23:59:51Z", event: "auth_submit_result", level: "info" },
+    ],
+  };
+}
+
+test("redacted pull row is locked and its steps are never rendered into the DOM", () => {
+  const { T, sandbox } = load();
+  let created = 0;
+  sandbox.document.createElement = () => { created += 1; return makeStubEl(); };
+
+  T.state.redacted = true;
+  const lockedBlock = T.renderSystemLogRow(pullEntry());
+  const lockedCount = created;
+  assert.ok(lockedBlock.classList.contains("syslog-nested-locked"),
+    "redacted pull envelope must be marked locked");
+
+  created = 0;
+  T.state.redacted = false;
+  T.renderSystemLogRow(pullEntry());
+  const unlockedCount = created;
+
+  // Unlocked path builds a node per step (via _renderNestedStepRow); the
+  // locked path returns early before that loop, so it creates strictly fewer.
+  assert.ok(unlockedCount > lockedCount,
+    `locked render should skip step nodes (locked=${lockedCount}, unlocked=${unlockedCount})`);
+});
+
+// ---------------- Updates tab masking (renderUpdateRecord) ----------------
+
+test("renderUpdateRecord masks the receipt in its header when redacted", () => {
+  const { T } = load();
+  const u = {
+    caseLabel: "I-485", receiptNumber: "IOE0935749409",
+    to: "2026-06-16T12:00:00Z", kind: "status", scalars: {},
+  };
+  T.state.redacted = false;
+  assert.ok(T.renderUpdateRecord(u).innerHTML.includes("IOE0935749409"));
+
+  T.state.redacted = true;
+  const html = T.renderUpdateRecord(u).innerHTML;
+  assert.ok(!html.includes("IOE0935749409"), "receipt must be masked");
+  assert.ok(html.includes(T.REDACTION_MASK));
+  assert.ok(html.includes("I-485"), "non-PII form label kept");
 });
