@@ -18,15 +18,58 @@ const state = {
   systemLogPage: 1,        // 1-indexed page (page 1 = newest)
   systemLogPageSize: 100,
   versionSha: null,        // last-seen short SHA from /api/pull/status
+  redacted: false,         // when true, mask PII across the dashboard (share/screenshot mode)
 };
+
+// ---------- redaction (share/screenshot privacy mode) ----------
+//
+// Client-side masking so the dashboard can be screenshotted or screen-shared
+// without exposing private data. Sensitive *values* are replaced (not just
+// blurred) wherever they render, and the snapshot download/copy actions are
+// disabled so full data can't leak out while the mode is on.
+
+// Object keys whose string values are PII: the case/receipt number, the
+// applicant's name, and the representative's name. Matched anywhere in the
+// snapshot tree (so nested receipt numbers in concurrentCases[] etc. are
+// caught too).
+const REDACT_KEYS = new Set(["receiptNumber", "applicantName", "representativeName"]);
+
+// A fixed mask — fixed width so it leaks nothing about the original length.
+const REDACTION_MASK = "••••••••";
+
+// Deep-clone a snapshot, replacing every PII value with the mask. Keys are
+// preserved so the JSON structure still reads normally. Pure — never mutates
+// the input.
+function redactSnapshot(value) {
+  if (Array.isArray(value)) return value.map(redactSnapshot);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = (REDACT_KEYS.has(k) && v != null && typeof v !== "object")
+        ? REDACTION_MASK
+        : redactSnapshot(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+// Mask a single display value when redaction is on; otherwise pass it through.
+function redactDisplay(value) {
+  return state.redacted ? REDACTION_MASK : value;
+}
 
 // ---------- boot ----------
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
+  // Restore redaction preference before the first render so masking is
+  // applied on the initial paint, not flipped in afterwards.
+  state.redacted = persistState.get("redacted") === true;
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
+  wireRedactionPill();
   wireMfaModal();
   _wireSyslogFit();
   _wireTopbarFlat();
@@ -140,6 +183,7 @@ function wireExportInfo() {
     ["export-info-btn",    "export-info-popover"],
     ["debug-info-btn",     "debug-info-popover"],
     ["recompute-info-btn", "recompute-info-popover"],
+    ["redaction-info-btn", "redaction-info-popover"],
   ];
   const popovers = pairs
     .map(([btnId, popId]) => ({
@@ -222,6 +266,28 @@ function wireRecomputeButton() {
       btn.disabled = false;
       btn.textContent = original;
     }
+  });
+}
+
+// Redaction toggle (System tab). A purely client-side, per-browser privacy
+// switch: flips state.redacted, persists it, and re-renders the cases so the
+// masking is applied/removed everywhere at once.
+function wireRedactionPill() {
+  const pill = document.getElementById("redaction-pill");
+  if (!pill) return;
+  // Reflect the restored preference (set in boot from persistState).
+  pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+  pill.addEventListener("click", () => {
+    state.redacted = !state.redacted;
+    persistState.set("redacted", state.redacted);
+    pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+    renderCases();
+    toast(
+      state.redacted
+        ? "Redaction ON — sensitive data masked, downloads disabled"
+        : "Redaction OFF — sensitive data visible",
+      state.redacted ? "warn" : "",
+    );
   });
 }
 
@@ -823,14 +889,21 @@ function renderCases() {
     article.dataset.receipt = c.receiptNumber;
 
     article.querySelector(".case-label").textContent = c.label;
-    article.querySelector(".case-receipt").textContent = c.receiptNumber;
+    const receiptEl = article.querySelector(".case-receipt");
+    receiptEl.textContent = redactDisplay(c.receiptNumber);
+    receiptEl.classList.toggle("redacted-text", state.redacted);
 
     const meta = article.querySelector(".case-meta");
     meta.innerHTML = "";
     if (c.applicantName) {
       const a = document.createElement("span");
       a.className = "big";
-      a.textContent = formatApplicant(c.applicantName);
+      if (state.redacted) {
+        a.textContent = REDACTION_MASK;
+        a.classList.add("redacted-text");
+      } else {
+        a.textContent = formatApplicant(c.applicantName);
+      }
       meta.appendChild(a);
     }
     if (c.formName) {
@@ -1116,11 +1189,13 @@ function wireInfoPopover(btn, pop) {
 function _renderSubFacts(c, latest) {
   const sub = document.createElement("div");
   sub.className = "sub-facts";
-  const reps = latest.representativeName ? formatApplicant(latest.representativeName) : "";
+  let reps = latest.representativeName ? formatApplicant(latest.representativeName) : "";
+  // Representative is PII — mask it (keeping the "—" when there is none).
+  if (state.redacted && reps) reps = REDACTION_MASK;
   const facts = [
     { k: "Submitted",      v: latest.submissionDate ? formatDate(latest.submissionDate) : "—" },
     { k: "Channel",        v: latest.elisChannelType || "—" },
-    { k: "Representative", v: reps || "—" },
+    { k: "Representative", v: reps || "—", redacted: state.redacted && !!latest.representativeName },
     { k: "Snapshots",      v: `${c.captures ?? 0}` },
     { k: "Days logged",    v: `${c.days ?? 0}` },
     { k: "Last pulled",    v: c.capturedAt ? formatLocalDateTime(c.capturedAt) : "—", mono: true },
@@ -1128,9 +1203,10 @@ function _renderSubFacts(c, latest) {
   for (const f of facts) {
     const el = document.createElement("div");
     el.className = "sub-fact";
+    const vClass = (f.mono ? " mono" : "") + (f.redacted ? " redacted-text" : "");
     el.innerHTML =
       `<span class="sub-fact-k">${escapeHtml(f.k)}</span>` +
-      `<span class="sub-fact-v${f.mono ? " mono" : ""}">${escapeHtml(String(f.v))}</span>`;
+      `<span class="sub-fact-v${vClass}">${escapeHtml(String(f.v))}</span>`;
     sub.appendChild(el);
   }
   return sub;
@@ -1202,10 +1278,15 @@ function renderChangeBlock(ch) {
     for (const [k, v] of Object.entries(ch.scalars)) {
       const row = document.createElement("div");
       row.className = "change-scalar";
+      // Mask the before/after values when the changed field is PII.
+      const mask = state.redacted && REDACT_KEYS.has(k);
+      const fromHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.from);
+      const toHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.to);
+      const valClass = mask ? " redacted-text" : "";
       row.innerHTML =
         `<span class="field">${escapeHtml(k)}</span>` +
-        `<span class="from">${formatScalarValueHtml(v.from)}</span>` +
-        `<span class="to">${formatScalarValueHtml(v.to)}</span>`;
+        `<span class="from${valClass}">${fromHtml}</span>` +
+        `<span class="to${valClass}">${toHtml}</span>`;
       sec.appendChild(row);
     }
     block.appendChild(sec);
@@ -2807,6 +2888,7 @@ function renderRaw(panel, c) {
   dlAll.textContent = `Download full history (${entries.length})`;
   dlAll.title = "Download every capture for this case as a single JSON file";
   dlAll.addEventListener("click", () => {
+    if (state.redacted) return; // guarded: disabled while redaction is on
     const num = (c.label || "").match(/(\d+)/);
     const fname = num
       ? `${num[1]}${src.fileSuffix}`
@@ -2822,6 +2904,7 @@ function renderRaw(panel, c) {
   copyOne.textContent = COPY_IDLE_LABEL;
   copyOne.title = "Copy the currently selected snapshot as JSON to the clipboard";
   copyOne.addEventListener("click", async () => {
+    if (state.redacted) return; // guarded: disabled while redaction is on
     const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
     const payload = entry.data || entry; // extract data envelope if present
@@ -2836,6 +2919,16 @@ function renderRaw(panel, c) {
   });
   actions.appendChild(copyOne);
 
+  // Redaction mode: gray out + disable both data-exfil actions so full,
+  // unmasked data can't leave the page while you're sharing/screenshotting.
+  if (state.redacted) {
+    for (const b of [dlAll, copyOne]) {
+      b.disabled = true;
+      b.classList.add("is-disabled");
+      b.title = "Disabled while redaction is on";
+    }
+  }
+
   controls.appendChild(actions);
   panel.appendChild(controls);
 
@@ -2847,7 +2940,10 @@ function renderRaw(panel, c) {
   function updateRawBody() {
     const ca = state.rawSelection[selKey];
     const entry = entries.find(e => e.capturedAt === ca) || entries[entries.length - 1];
-    const payload = entry.data || entry; // extract data envelope if present
+    let payload = entry.data || entry; // extract data envelope if present
+    // Mask PII values in-place (clone) when redaction is on, so the rendered
+    // JSON is screenshot-safe while keeping its structure readable.
+    if (state.redacted) payload = redactSnapshot(payload);
     // 4-space indent + syntax highlight — written as HTML so colours work.
     pre.innerHTML = highlightJson(JSON.stringify(payload, null, 4));
   }
