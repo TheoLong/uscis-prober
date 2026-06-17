@@ -243,6 +243,50 @@ def test_recompute_diffs_at_startup_swallows_errors_and_logs(monkeypatch, tmp_pa
     assert failures[0]["level"] == "warning"
 
 
+# -------- manual recompute route --------------------------------------
+
+def test_api_system_log_recompute_returns_stats_and_logs_event(client, tmp_path):
+    """POST /api/system-log/recompute walks the configured case, returns the
+    per-case stats, and appends exactly one diff_recomputed event."""
+    import system_log
+
+    data_dir = tmp_path / "data"
+    # I-485 (IOE1, from the client fixture config): two snapshots with a
+    # decision flip → one case-diff to count.
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+
+    r = client.post("/api/system-log/recompute")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["stats"]["cases"] == [
+        {"label": "I-485", "case_changes": 1, "location_changes": 0},
+    ]
+
+    events = [e for e in system_log.read_all() if e.get("event") == "diff_recomputed"]
+    assert len(events) == 1
+    assert events[0]["cases"] == body["stats"]["cases"]
+
+
+def test_api_system_log_recompute_reports_failure(client, monkeypatch):
+    """A crash inside the diff walk surfaces as ok=False (HTTP 200, since the
+    live API path still works) and a diff_recompute_failed event."""
+    import system_log
+
+    def _boom(_entries):
+        raise RuntimeError("synthetic diff explosion")
+    monkeypatch.setattr(server, "day_changes", _boom)
+
+    r = client.post("/api/system-log/recompute")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is False
+    failures = [e for e in system_log.read_all() if e.get("event") == "diff_recompute_failed"]
+    assert len(failures) == 1
+
+
 # -------- notification dispatcher -------------------------------------
 
 def test_send_notifications_for_new_noop_when_empty(monkeypatch):

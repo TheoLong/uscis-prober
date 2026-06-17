@@ -1812,6 +1812,27 @@ def api_system_log_export():
     )
 
 
+@app.route("/api/system-log/recompute", methods=["POST"])
+def api_system_log_recompute():
+    """Force a fresh chronological diff recompute across every configured case.
+
+    Diffs are derived state — `day_changes()` runs live off the snapshot
+    JSONs on each API call and nothing is cached server-side, so this
+    endpoint never *needs* to run for correctness. What it provides is
+    observability on demand: it re-walks the full diff feed for every
+    case and appends a single `diff_recomputed` event (per-case change
+    counts) to the system log, the same routine the server runs at
+    startup. The operator can fire it after dropping in a backfilled
+    snapshot and confirm at a glance that the data flowed through.
+
+    Returns the per-case stats payload that was logged so the UI can
+    surface a confirmation without re-scraping the log.
+    """
+    config = load_config()
+    stats = _recompute_diffs_at_startup(config)
+    return jsonify({"ok": "error" not in stats, "stats": stats})
+
+
 @app.route("/api/system-log/clear", methods=["POST"])
 def api_system_log_clear():
     """Wipe the system log AND every persisted trace.
