@@ -6,8 +6,8 @@ import assert from "node:assert/strict";
 import { loadApp } from "./_appsandbox.mjs";
 
 const EXPOSE = [
-  "redactSnapshot", "redactDisplay", "REDACT_KEYS", "REDACTION_MASK",
-  "state", "wireRedactionPill",
+  "redactSnapshot", "redactDisplay", "redactDetailValue", "scrubText",
+  "REDACT_KEYS", "REDACTION_MASK", "state", "wireRedactionPill", "_detailKvHtml",
 ];
 
 function load(extra = {}) {
@@ -71,10 +71,71 @@ test("redactSnapshot leaves null/missing values alone", () => {
   assert.equal(out.applicantName, MASK);
 });
 
-test("REDACT_KEYS holds exactly the three PII keys", () => {
+test("REDACT_KEYS covers both receipt key spellings + the two names", () => {
   const { T } = load();
   const keys = [...T.REDACT_KEYS].sort();
-  assert.deepEqual(keys, ["applicantName", "receiptNumber", "representativeName"]);
+  assert.deepEqual(keys, ["applicantName", "receipt", "receiptNumber", "representativeName"]);
+});
+
+test("redactSnapshot masks the system-log style `receipt` key", () => {
+  const { T } = load();
+  const out = T.redactSnapshot({ receipt: "IOE0935749409", label: "I-485" });
+  assert.equal(out.receipt, T.REDACTION_MASK);
+  assert.equal(out.label, "I-485"); // form type kept
+});
+
+test("redactSnapshot scrubs receipt numbers embedded in free-text strings", () => {
+  const { T } = load();
+  const out = T.redactSnapshot({
+    url: "https://egov.uscis.gov/casestatus/IOE0935749409/detail",
+    note: "no identifiers here",
+  });
+  assert.ok(!out.url.includes("IOE0935749409"), "embedded receipt should be scrubbed");
+  assert.ok(out.url.includes(T.REDACTION_MASK));
+  assert.equal(out.note, "no identifiers here");
+});
+
+// ---------------- scrubText (pure pattern scrub) ----------------
+
+test("scrubText removes receipt numbers and emails, keeps form types/dates", () => {
+  const { T } = load();
+  assert.equal(T.scrubText("case IOE0935749409 updated"), `case ${T.REDACTION_MASK} updated`);
+  assert.equal(T.scrubText("ping me at a.b@example.com please").includes("@"), false);
+  assert.equal(T.scrubText("form I-485 on 2026-06-16"), "form I-485 on 2026-06-16");
+  assert.equal(T.scrubText(42), 42); // non-strings pass through
+});
+
+// ---------------- redactDetailValue (system-log chokepoint logic) ----------------
+
+test("redactDetailValue masks PII keys, scrubs strings, no-ops when off", () => {
+  const { T } = load();
+  T.state.redacted = false;
+  assert.equal(T.redactDetailValue("receipt", "IOE0935749409"), "IOE0935749409");
+
+  T.state.redacted = true;
+  assert.equal(T.redactDetailValue("receipt", "IOE0935749409"), T.REDACTION_MASK);
+  assert.equal(T.redactDetailValue("pid", 12345), 12345);            // non-PII number kept
+  assert.equal(T.redactDetailValue("label", "I-485"), "I-485");      // form type kept
+  assert.ok(!T.redactDetailValue("url", "x/IOE0935749409").includes("IOE0935749409"));
+});
+
+// ---------------- _detailKvHtml integration (System tab) ----------------
+
+test("_detailKvHtml masks a receipt detail row when redaction is on", () => {
+  const { T } = load();
+  T.state.redacted = true;
+  const html = T._detailKvHtml("receipt", "IOE0935749409");
+  assert.ok(!html.includes("IOE0935749409"), "raw receipt must not render");
+  assert.ok(html.includes(T.REDACTION_MASK));
+});
+
+test("_detailKvHtml leaves non-PII rows untouched and is a no-op when off", () => {
+  const { T } = load();
+  T.state.redacted = true;
+  assert.ok(T._detailKvHtml("pid", 4242).includes("4242"));
+
+  T.state.redacted = false;
+  assert.ok(T._detailKvHtml("receipt", "IOE0935749409").includes("IOE0935749409"));
 });
 
 // ---------------- redactDisplay (single-value mask, state-gated) ----------------

@@ -28,18 +28,34 @@ const state = {
 // blurred) wherever they render, and the snapshot download/copy actions are
 // disabled so full data can't leak out while the mode is on.
 
-// Object keys whose string values are PII: the case/receipt number, the
-// applicant's name, and the representative's name. Matched anywhere in the
-// snapshot tree (so nested receipt numbers in concurrentCases[] etc. are
-// caught too).
-const REDACT_KEYS = new Set(["receiptNumber", "applicantName", "representativeName"]);
+// Object keys whose values are PII, matched anywhere in any payload tree:
+// the case/receipt number (both the snapshot's `receiptNumber` and the
+// system-log's `receipt`), the applicant's name, and the representative's
+// name. Nested occurrences (e.g. concurrentCases[].receiptNumber) are caught.
+const REDACT_KEYS = new Set([
+  "receiptNumber", "receipt", "applicantName", "representativeName",
+]);
 
 // A fixed mask — fixed width so it leaks nothing about the original length.
 const REDACTION_MASK = "••••••••";
 
-// Deep-clone a snapshot, replacing every PII value with the mask. Keys are
-// preserved so the JSON structure still reads normally. Pure — never mutates
-// the input.
+// PII embedded in otherwise-free text (URLs, titles, log messages): USCIS
+// receipt numbers (e.g. IOE0935749409) and email addresses.
+const REDACT_PATTERNS = [
+  /\b[A-Z]{3}\d{7,}\b/g,
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+];
+
+// Pure: scrub PII *patterns* out of a free-text string. Non-strings pass
+// through untouched. Always scrubs — callers decide when redaction is on.
+function scrubText(s) {
+  if (typeof s !== "string") return s;
+  return REDACT_PATTERNS.reduce((acc, re) => acc.replace(re, REDACTION_MASK), s);
+}
+
+// Pure: deep-clone a payload, masking PII-keyed values outright and scrubbing
+// PII embedded in any remaining string. Keys are preserved so structure still
+// reads normally. Never mutates the input.
 function redactSnapshot(value) {
   if (Array.isArray(value)) return value.map(redactSnapshot);
   if (value && typeof value === "object") {
@@ -51,12 +67,28 @@ function redactSnapshot(value) {
     }
     return out;
   }
-  return value;
+  return scrubText(value);
 }
 
-// Mask a single display value when redaction is on; otherwise pass it through.
+// State-gated: mask a single display value (e.g. a receipt number in a
+// header) when redaction is on; otherwise pass it through.
 function redactDisplay(value) {
   return state.redacted ? REDACTION_MASK : value;
+}
+
+// State-gated: redact a key/value detail (system-log rows, etc.) — mask the
+// value outright if its key is PII, deep-redact nested objects, else scrub
+// any PII embedded in the string. No-op when redaction is off.
+function redactDetailValue(key, value) {
+  if (!state.redacted) return value;
+  if (REDACT_KEYS.has(key)) return REDACTION_MASK;
+  if (value && typeof value === "object") return redactSnapshot(value);
+  return scrubText(value);
+}
+
+// State-gated convenience: scrub free text only when redaction is on.
+function redactMaybe(s) {
+  return state.redacted ? scrubText(s) : s;
 }
 
 // ---------- boot ----------
@@ -281,7 +313,13 @@ function wireRedactionPill() {
     state.redacted = !state.redacted;
     persistState.set("redacted", state.redacted);
     pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+    // Re-render so masking applies/clears everywhere at once. Cases are
+    // always re-rendered (they aren't re-rendered on tab switch); the
+    // Updates / System views re-render only when currently visible (a tab
+    // switch re-renders them fresh via setView()).
     renderCases();
+    if (state.view === "updates") renderUpdates();
+    else if (state.view === "systemlog") renderSystemLog();
     toast(
       state.redacted
         ? "Redaction ON — sensitive data masked, downloads disabled"
@@ -1307,13 +1345,13 @@ function renderChangeBlock(ch) {
     for (const a of c.added || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-added";
-      chip.innerHTML = "+ " + describeItem(key, a);
+      chip.innerHTML = "+ " + redactMaybe(describeItem(key, a));
       sec.appendChild(chip);
     }
     for (const r of c.removed || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-removed";
-      chip.innerHTML = "− " + describeItem(key, r);
+      chip.innerHTML = "− " + redactMaybe(describeItem(key, r));
       sec.appendChild(chip);
     }
     block.appendChild(sec);
@@ -2116,6 +2154,9 @@ function _detailKvHtml(k, v) {
       `</div>`
     );
   }
+  // Redaction chokepoint for every system-log detail value: mask PII-keyed
+  // values and scrub PII embedded in any string. No-op when redaction is off.
+  v = redactDetailValue(k, v);
   const shown = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
   return (
     `<div class="syslog-detail">` +
@@ -2582,7 +2623,8 @@ function renderUpdateRecord(u) {
     `<header class="update-head">` +
       `<div class="update-head-left">` +
         `<span class="update-case">${escapeHtml(u.caseLabel || "?")}</span>` +
-        `<span class="update-receipt">${escapeHtml(u.receiptNumber || "")}</span>` +
+        `<span class="update-receipt${state.redacted ? " redacted-text" : ""}">` +
+          `${escapeHtml(redactDisplay(u.receiptNumber || ""))}</span>` +
         sourceBadge +
       `</div>` +
       `<span class="kind-tag kind-${info.tone || "n"}" ` +
@@ -2599,10 +2641,14 @@ function renderUpdateRecord(u) {
     for (const [k, v] of Object.entries(scalars)) {
       const row = document.createElement("div");
       row.className = "change-scalar";
+      const mask = state.redacted && REDACT_KEYS.has(k);
+      const fromHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.from);
+      const toHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.to);
+      const valClass = mask ? " redacted-text" : "";
       row.innerHTML =
         `<span class="field">${escapeHtml(k)}</span>` +
-        `<span class="from">${formatScalarValueHtml(v.from)}</span>` +
-        `<span class="to">${formatScalarValueHtml(v.to)}</span>`;
+        `<span class="from${valClass}">${fromHtml}</span>` +
+        `<span class="to${valClass}">${toHtml}</span>`;
       sec.appendChild(row);
     }
     block.appendChild(sec);
@@ -2624,13 +2670,13 @@ function renderUpdateRecord(u) {
     for (const a of coll.added || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-added";
-      chip.innerHTML = "+ " + describeItem(key, a);
+      chip.innerHTML = "+ " + redactMaybe(describeItem(key, a));
       sec.appendChild(chip);
     }
     for (const r of coll.removed || []) {
       const chip = document.createElement("span");
       chip.className = "change-item-removed";
-      chip.innerHTML = "− " + describeItem(key, r);
+      chip.innerHTML = "− " + redactMaybe(describeItem(key, r));
       sec.appendChild(chip);
     }
     block.appendChild(sec);
