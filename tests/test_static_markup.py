@@ -76,6 +76,7 @@ def test_redaction_popover_explains_what_is_masked():
     for term in ("case", "name", "download", "snapshot"):
         assert term in pop, f"redaction popover should mention {term!r}"
     assert "screenshot" in pop or "shar" in pop, "popover should explain the share/screenshot purpose"
+    assert "server" in pop, "popover should state masking is server-side"
 
 
 def test_redaction_styles_ship():
@@ -83,6 +84,8 @@ def test_redaction_styles_ship():
     # The disabled snapshot actions must have a grayed style.
     assert re.search(r"\.raw-btn(:disabled|\.is-disabled)", STYLE_CSS), \
         "missing disabled/is-disabled style for raw buttons"
+    # The locked (non-expandable) pull row style.
+    assert ".syslog-nested-locked" in STYLE_CSS, "missing locked pull-row style"
 
 
 def test_diff_recomputed_breakdown_styles_ship():

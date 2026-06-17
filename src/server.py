@@ -46,6 +46,7 @@ from diff_utils import (
     summarize_case,
 )
 from mailer import notify_update
+from redaction import redact_obj as _redact_obj
 from system_log import (
     JSONL_STDERR_ENV as _SYSLOG_JSONL_ENV,
     log as sys_log,
@@ -247,6 +248,25 @@ def load_trace_successful_pulls(config: dict | None = None) -> bool:
             f"config.trace_successful_pulls={raw!r} must be a boolean."
         )
     return raw
+
+
+def load_redaction_enabled(config: dict | None = None) -> bool:
+    """Read `redaction_enabled` (bool) from config.json.
+
+    Optional field — default `false`. When true, the server masks PII in
+    every JSON response (see the after-request hook) and blocks the data
+    exports, so the dashboard can be shared without leaking private data.
+    Toggled from the UI via /api/redaction-mode. Missing = false; a
+    non-boolean is treated as false (defensive: a bad value must never
+    accidentally *disable* sharing-safety, and reads happen per-response).
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            return False
+    return config.get("redaction_enabled", False) is True
+
 
 _FORM_NUM_RE = re.compile(r"I-?(\d+)")
 
@@ -1344,6 +1364,27 @@ def _no_cache(resp):
     return resp
 
 
+@app.after_request
+def _redact_json(resp):
+    """When redaction mode is on, mask PII in every JSON response *before* it
+    leaves the server. This is the security backbone of redaction: the masked
+    data is never sent, so it can't be recovered from the console, the network
+    tab, or page source. Non-JSON responses (static assets, zip exports) are
+    untouched here — exports are blocked separately at their endpoints.
+    """
+    try:
+        ctype = resp.content_type or ""
+        if resp.direct_passthrough or "application/json" not in ctype:
+            return resp
+        if not load_redaction_enabled():
+            return resp
+        data = json.loads(resp.get_data(as_text=True))
+    except Exception:
+        return resp  # never let redaction break a response
+    resp.set_data(json.dumps(_redact_obj(data)))
+    return resp
+
+
 @app.errorhandler(Exception)
 def _catch_all_exception(exc):
     """Catch-all for any route that raises without its own try/except.
@@ -1513,6 +1554,8 @@ def api_export():
     so the archive is self-describing. Produced in memory — the repo's
     snapshot history is tiny (a few MB at most).
     """
+    if load_redaction_enabled():
+        return jsonify({"ok": False, "error": "redaction_enabled"}), 403
     config = load_config()
     now_iso = _now_iso()
     buf = io.BytesIO()
@@ -1784,6 +1827,8 @@ def api_system_log_export():
     diagnostics contain email bodies, HTTP bodies, etc. that the
     operator may want to hand-review before sharing.
     """
+    if load_redaction_enabled():
+        return jsonify({"ok": False, "error": "redaction_enabled"}), 403
     entries = read_system_log()
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
     buf = io.BytesIO()
@@ -1923,6 +1968,43 @@ def _wipe_tree_contents(root: Path, errors: list[str]) -> int:
     except OSError as e:  # pragma: no cover
         errors.append(f"iter {root}: {e}")
     return removed
+
+
+@app.route("/api/redaction-mode", methods=["GET", "POST"])
+def api_redaction_mode():
+    """Read / toggle `redaction_enabled` in config.json.
+
+    GET  → {"enabled": bool}
+    POST {"enabled": bool} → persists the change to config.json.
+
+    When enabled, the server masks PII in every JSON response (see the
+    `_redact_json` after-request hook) and blocks the data exports, so the
+    dashboard can be screenshotted or shared without private data leaving
+    the process. It's a global, server-side switch — the masking is not
+    recoverable client-side. Writes are atomic (tmp file + os.replace).
+    """
+    if request.method == "GET":
+        return jsonify({"enabled": load_redaction_enabled()})
+
+    body = request.get_json(silent=True) or {}
+    desired = body.get("enabled")
+    if not isinstance(desired, bool):
+        return jsonify({"ok": False, "error": "enabled_must_be_bool"}), 400
+
+    try:
+        cfg = load_config()
+    except Exception as e:  # pragma: no cover — defensive
+        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+
+    cfg["redaction_enabled"] = desired
+    try:
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:  # pragma: no cover — filesystem should not fail
+        return jsonify({"ok": False, "error": f"config_write_failed: {e}"}), 500
+
+    return jsonify({"ok": True, "enabled": desired})
 
 
 @app.route("/api/debug-mode", methods=["GET", "POST"])

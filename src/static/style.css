@@ -1893,6 +1893,16 @@ main[hidden] { display: none; }
   border-color: var(--border);
 }
 
+/* Redaction: a locked pull envelope can't be expanded (its steps hold the
+   most PII). Gray the chevron and drop the header's interactive affordance. */
+.syslog-nested-locked .syslog-head-expandable {
+  cursor: default;
+}
+.syslog-nested-locked .syslog-disclosure.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* Redaction bar: hides the masked value behind a solid block so a value is
    visibly struck out (and screenshot-safe) rather than just hidden text. */
 .redacted-text {

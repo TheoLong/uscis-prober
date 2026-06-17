@@ -95,9 +95,6 @@ function redactMaybe(s) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
-  // Restore redaction preference before the first render so masking is
-  // applied on the initial paint, not flipped in afterwards.
-  state.redacted = persistState.get("redacted") === true;
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
@@ -117,6 +114,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (savedView && ["cases", "updates", "systemlog"].includes(savedView)) {
     setView(savedView);
   }
+  // Learn the server's redaction state before the first data render so
+  // masking treatment (bars, disabled exports, locked pull rows) is applied
+  // on the initial paint. The data itself is already redacted server-side.
+  await loadRedactionState();
   await refreshAll();
   setInterval(updateCountdown, 1000);
 
@@ -301,31 +302,56 @@ function wireRecomputeButton() {
   });
 }
 
-// Redaction toggle (System tab). A purely client-side, per-browser privacy
-// switch: flips state.redacted, persists it, and re-renders the cases so the
-// masking is applied/removed everywhere at once.
+// Sync the redaction pill + state.redacted from the server. Called in boot
+// before the first render and reused by the pill wiring.
+async function loadRedactionState() {
+  try {
+    const r = await fetch("/api/redaction-mode");
+    if (r.ok) state.redacted = (await r.json()).enabled === true;
+  } catch (_e) { /* leave as-is; server may be warming up */ }
+  const pill = document.getElementById("redaction-pill");
+  if (pill) pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+}
+
+// Redaction toggle (System tab). Redaction is a SERVER-SIDE switch: the
+// server masks PII in every response and blocks exports, so private data is
+// never sent to the browser (not recoverable from console/network/source).
+// The pill flips that server flag, then re-fetches so the now-(un)masked data
+// repaints. state.redacted drives the local masking treatment (bars, disabled
+// exports, locked pull rows).
 function wireRedactionPill() {
   const pill = document.getElementById("redaction-pill");
   if (!pill) return;
-  // Reflect the restored preference (set in boot from persistState).
   pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
-  pill.addEventListener("click", () => {
-    state.redacted = !state.redacted;
-    persistState.set("redacted", state.redacted);
-    pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
-    // Re-render so masking applies/clears everywhere at once. Cases are
-    // always re-rendered (they aren't re-rendered on tab switch); the
-    // Updates / System views re-render only when currently visible (a tab
-    // switch re-renders them fresh via setView()).
-    renderCases();
-    if (state.view === "updates") renderUpdates();
-    else if (state.view === "systemlog") renderSystemLog();
-    toast(
-      state.redacted
-        ? "Redaction ON — sensitive data masked, downloads disabled"
-        : "Redaction OFF — sensitive data visible",
-      state.redacted ? "warn" : "",
-    );
+  pill.addEventListener("click", async () => {
+    const desired = !state.redacted;
+    pill.disabled = true;
+    try {
+      const r = await fetch("/api/redaction-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: desired }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      state.redacted = (await r.json()).enabled === true;
+      pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+      // Re-fetch every view's data (now masked / unmasked at the source) and
+      // repaint. refreshAll re-renders cases; the visible feed is repainted
+      // below (a later tab switch re-renders the others via setView()).
+      await refreshAll();
+      if (state.view === "updates") renderUpdates();
+      else if (state.view === "systemlog") renderSystemLog();
+      toast(
+        state.redacted
+          ? "Redaction ON — PII masked server-side, downloads disabled"
+          : "Redaction OFF — sensitive data visible",
+        state.redacted ? "warn" : "",
+      );
+    } catch (e) {
+      toast(`Redaction toggle failed: ${e.message}`, "error");
+    } finally {
+      pill.disabled = false;
+    }
   });
 }
 
@@ -2084,9 +2110,29 @@ function _renderNestedSystemLogRow(entry) {
     envelopeKvWithDisclosureHtml +
     `<div class="syslog-steps" id="${disclosureId}" hidden></div>`;
 
+  const stepsContainer = block.querySelector(".syslog-steps");
+  const headBtn = block.querySelector(".syslog-head-expandable");
+  const triangle = block.querySelector(".syslog-disclosure");
+
+  // Redaction: a pull's steps carry the most PII (auth / MFA / case-fetch
+  // events). Lock the row shut — never render the steps into the DOM at all,
+  // and disable the expand controls so they can't be revealed. The server
+  // also redacts step values, but not rendering them is belt-and-braces.
+  if (state.redacted) {
+    block.classList.add("syslog-nested-locked");
+    headBtn.setAttribute("aria-disabled", "true");
+    headBtn.setAttribute("title", "Steps hidden while redaction is on");
+    if (triangle) {
+      triangle.textContent = "🔒";
+      triangle.disabled = true;
+      triangle.classList.add("is-disabled");
+      triangle.setAttribute("aria-label", "Steps hidden while redaction is on");
+    }
+    return block;
+  }
+
   // Populate the expandable body lazily — cheap, but keeps the first
   // paint light for pages with many nested rows.
-  const stepsContainer = block.querySelector(".syslog-steps");
   for (const step of entry.steps) {
     stepsContainer.appendChild(_renderNestedStepRow(step));
   }
@@ -2094,8 +2140,6 @@ function _renderNestedSystemLogRow(entry) {
   // Wire the disclosure toggle. The chevron is now a button at the
   // right edge of the envelope-kv strip; clicking it (or anywhere on
   // the header row) toggles the steps panel below.
-  const headBtn = block.querySelector(".syslog-head-expandable");
-  const triangle = block.querySelector(".syslog-disclosure");
   const toggle = () => {
     const isOpen = !stepsContainer.hidden;
     stepsContainer.hidden = isOpen;

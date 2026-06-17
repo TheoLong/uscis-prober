@@ -7,7 +7,8 @@ import { loadApp } from "./_appsandbox.mjs";
 
 const EXPOSE = [
   "redactSnapshot", "redactDisplay", "redactDetailValue", "scrubText",
-  "REDACT_KEYS", "REDACTION_MASK", "state", "wireRedactionPill", "_detailKvHtml",
+  "REDACT_KEYS", "REDACTION_MASK", "state", "wireRedactionPill",
+  "loadRedactionState", "_detailKvHtml",
 ];
 
 function load(extra = {}) {
@@ -152,60 +153,70 @@ test("redactDisplay returns the mask when redaction is on", () => {
   assert.equal(T.redactDisplay("IOE0935749409"), T.REDACTION_MASK);
 });
 
-// ---------------- wireRedactionPill (toggle flow) ----------------
+// ---------------- wireRedactionPill / loadRedactionState (server-backed) ----------------
 
-function harness() {
-  const store = new Map();
-  const localStorage = {
-    getItem: (k) => (store.has(k) ? store.get(k) : null),
-    setItem: (k, v) => store.set(k, String(v)),
-  };
-  const calls = { render: 0, toast: [] };
-  const { T, sandbox } = load({ localStorage });
-  sandbox.renderCases = () => { calls.render += 1; };
-  sandbox.toast = (msg, kind) => calls.toast.push({ msg, kind });
-  const pill = {
+function makePill() {
+  return {
+    disabled: false,
     _checked: "false",
-    addEventListener(ev, fn) { this._handlers = this._handlers || {}; this._handlers[ev] = fn; },
+    addEventListener(ev, fn) { (this._h = this._h || {})[ev] = fn; },
     setAttribute(k, v) { if (k === "aria-checked") this._checked = v; },
     getAttribute(k) { return k === "aria-checked" ? this._checked : null; },
-    _click() { return this._handlers.click(); },
+    _click() { return this._h.click(); },
   };
-  sandbox.document.getElementById = (id) => (id === "redaction-pill" ? pill : null);
-  return { T, sandbox, pill, calls, store };
 }
 
-test("wireRedactionPill toggles state ON: persists, re-renders, warns", () => {
+function harness(view = "cases") {
+  const calls = { fetch: [], toast: [], refresh: 0 };
+  const { T, sandbox } = load();
+  T.state.view = view;
+  sandbox.refreshAll = async () => { calls.refresh += 1; };
+  sandbox.renderUpdates = () => {};
+  sandbox.renderSystemLog = () => {};
+  sandbox.toast = (msg, kind) => calls.toast.push({ msg, kind });
+  sandbox.fetch = async (url, opts) => {
+    const enabled = opts ? JSON.parse(opts.body).enabled : false;
+    calls.fetch.push({ url, method: opts && opts.method, enabled });
+    return { ok: true, json: async () => ({ ok: true, enabled }) };
+  };
+  const pill = makePill();
+  sandbox.document.getElementById = (id) => (id === "redaction-pill" ? pill : null);
+  return { T, sandbox, pill, calls };
+}
+
+test("wireRedactionPill ON: POSTs enabled=true to the server, refreshes, warns", async () => {
   const h = harness();
   h.T.state.redacted = false;
   h.T.wireRedactionPill();
-  h.pill._click();
+  await h.pill._click();
 
+  assert.equal(h.calls.fetch[0].url, "/api/redaction-mode");
+  assert.equal(h.calls.fetch[0].method, "POST");
+  assert.equal(h.calls.fetch[0].enabled, true);
   assert.equal(h.T.state.redacted, true);
-  assert.equal(h.store.get("uscis_prober_state_v1") !== undefined, true);
-  assert.match(h.store.get("uscis_prober_state_v1"), /"redacted":true/);
   assert.equal(h.pill.getAttribute("aria-checked"), "true");
-  assert.equal(h.calls.render, 1, "re-renders cards so masking applies");
-  assert.equal(h.calls.toast.length, 1);
-  assert.equal(h.calls.toast[0].kind, "warn");
+  assert.equal(h.calls.refresh, 1, "re-fetches now-masked data");
+  assert.equal(h.calls.toast.at(-1).kind, "warn");
 });
 
-test("wireRedactionPill toggles OFF again: persists false, re-renders", () => {
+test("wireRedactionPill OFF: POSTs enabled=false, refreshes, neutral toast", async () => {
   const h = harness();
   h.T.state.redacted = true;
   h.T.wireRedactionPill();
-  h.pill._click();
+  await h.pill._click();
 
+  assert.equal(h.calls.fetch[0].enabled, false);
   assert.equal(h.T.state.redacted, false);
-  assert.match(h.store.get("uscis_prober_state_v1"), /"redacted":false/);
   assert.equal(h.pill.getAttribute("aria-checked"), "false");
-  assert.equal(h.calls.render, 1);
-  assert.equal(h.calls.toast[0].kind, "");
+  assert.equal(h.calls.refresh, 1);
+  assert.equal(h.calls.toast.at(-1).kind, "");
 });
 
-test("wireRedactionPill reflects the restored preference on wire", () => {
+test("loadRedactionState GETs the server flag and reflects it on the pill", async () => {
   const h = harness();
-  h.T.state.redacted = true;       // as boot would set from persistState
-  h.T.wireRedactionPill();
+  h.T.state.redacted = false;
+  h.sandbox.fetch = async () => ({ ok: true, json: async () => ({ enabled: true }) });
+  await h.T.loadRedactionState();
+  assert.equal(h.T.state.redacted, true);
   assert.equal(h.pill.getAttribute("aria-checked"), "true");
 });
