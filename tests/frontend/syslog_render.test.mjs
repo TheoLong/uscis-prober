@@ -16,17 +16,31 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_JS = path.resolve(__dirname, "../../src/static/app.js");
 
-// Minimal stand-in for a DOM element: _renderFlatSystemLogRow only ever
-// sets .className and .innerHTML on the node it creates, so capturing those
-// two properties is enough to assert on the rendered markup.
+// Generic DOM-element stand-in. The renderers create a node, set
+// className/innerHTML, and (for nested rows) querySelector + wire listeners.
+// This stub captures className/innerHTML for assertions and tolerates the
+// rest as no-ops so _renderNestedSystemLogRow runs to completion.
 function makeStubEl() {
   let _class = "";
   let _html = "";
+  let _text = "";
+  const handlers = {};
   return {
     set className(v) { _class = v; },
     get className() { return _class; },
     set innerHTML(v) { _html = v; },
     get innerHTML() { return _html; },
+    set textContent(v) { _text = v; },
+    get textContent() { return _text; },
+    hidden: false,
+    disabled: false,
+    querySelector: () => makeStubEl(),
+    querySelectorAll: () => [],
+    appendChild() {},
+    addEventListener(ev, fn) { handlers[ev] = fn; },
+    setAttribute() {},
+    // test helper: invoke a registered listener (returns its promise)
+    _click() { return handlers.click && handlers.click(); },
   };
 }
 
@@ -35,18 +49,18 @@ function loadAppHelpers() {
   const sandbox = {
     document: { addEventListener() {}, createElement: () => makeStubEl() },
     window: {},
-    console,
+    console: { ...console, error() {} },
   };
   vm.createContext(sandbox);
   const exposed =
     src +
     "\n;globalThis.__T = { _syslogEventId, escapeHtml, SYSTEMLOG_EVENT_INFO," +
-    " _renderFlatSystemLogRow };";
+    " _renderFlatSystemLogRow, renderSystemLogRow, wireRecomputeButton, state };";
   vm.runInContext(exposed, sandbox, { filename: "app.js" });
-  return sandbox.__T;
+  return { T: sandbox.__T, sandbox };
 }
 
-const T = loadAppHelpers();
+const { T } = loadAppHelpers();
 const diffRecomputed = () => T.SYSTEMLOG_EVENT_INFO.diff_recomputed;
 
 // ---------------- _syslogEventId (duplicate-id suppression) ----------------
@@ -180,4 +194,77 @@ test("flat row keeps a non-duplicate event id (server_startup)", () => {
   });
   assert.ok(block.innerHTML.includes('<span class="syslog-event">server_startup</span>'),
             "a curated-label event keeps its id");
+});
+
+// ---------------- nested (pull envelope) header dedup ----------------
+
+test("nested pull row blanks its duplicate event id too", () => {
+  // entry.steps[] makes renderSystemLogRow dispatch to the nested renderer.
+  const block = T.renderSystemLogRow({
+    ts: "2026-06-16T23:59:52Z",
+    event: "pull",
+    level: "info",
+    source: "scheduler",
+    exit_code: 0,
+    steps: [{ ts: "2026-06-16T23:59:50Z", event: "case_snapshot_appended", level: "info" }],
+  });
+  const html = block.innerHTML;
+  assert.match(html, /kind-tag[^>]*>Pull</);                       // "Pull" pill present
+  assert.ok(html.includes('<span class="syslog-event syslog-event-envelope"></span>'),
+            "nested header's duplicate 'pull' id should be blank");
+});
+
+// ---------------- wireRecomputeButton (click flow) ----------------
+
+function setupButtonHarness() {
+  const { T: t, sandbox } = loadAppHelpers();
+  const btn = makeStubEl();
+  btn.disabled = false;
+  btn.textContent = "Recompute diff";
+  sandbox.document.getElementById = (id) => (id === "recompute-btn" ? btn : null);
+  const calls = { fetch: [], toast: [], reload: 0 };
+  sandbox.toast = (msg, kind) => calls.toast.push({ msg, kind });
+  sandbox.loadAndRenderSystemLog = async () => { calls.reload += 1; };
+  t.wireRecomputeButton();
+  return { t, sandbox, btn, calls, click: () => btn._click() };
+}
+
+test("recompute click POSTs, refreshes page 1, and toasts success", async () => {
+  const h = setupButtonHarness();
+  h.sandbox.fetch = async (url, opts) => {
+    h.calls.fetch.push({ url, opts });
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  await h.btn._click();
+
+  assert.equal(h.calls.fetch.length, 1);
+  assert.equal(h.calls.fetch[0].url, "/api/system-log/recompute");
+  assert.equal(h.calls.fetch[0].opts.method, "POST");
+  assert.equal(h.t.state.systemLogPage, 1, "jumps to newest page");
+  assert.equal(h.calls.reload, 1, "re-renders the log");
+  assert.equal(h.calls.toast.length, 1);
+  assert.equal(h.calls.toast[0].kind, "ok");
+  // Button restored after the run.
+  assert.equal(h.btn.disabled, false);
+  assert.equal(h.btn.textContent, "Recompute diff");
+});
+
+test("recompute click surfaces a bad toast on HTTP error and restores the button", async () => {
+  const h = setupButtonHarness();
+  h.sandbox.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  await h.btn._click();
+
+  assert.equal(h.calls.reload, 0, "no refresh on failure");
+  assert.equal(h.calls.toast.length, 1);
+  assert.equal(h.calls.toast[0].kind, "bad");
+  assert.equal(h.btn.disabled, false, "button re-enabled even on error");
+  assert.equal(h.btn.textContent, "Recompute diff");
+});
+
+test("recompute click treats {ok:false} body as a failure", async () => {
+  const h = setupButtonHarness();
+  h.sandbox.fetch = async () => ({ ok: true, json: async () => ({ ok: false }) });
+  await h.btn._click();
+  assert.equal(h.calls.toast[0].kind, "bad");
+  assert.equal(h.calls.reload, 0);
 });
