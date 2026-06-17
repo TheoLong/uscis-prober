@@ -1023,7 +1023,7 @@ main[hidden] { display: none; }
 }
 .diffrc-row {
   display: grid;
-  grid-template-columns: minmax(48px, auto) minmax(118px, 1fr) minmax(118px, 1fr);
+  grid-template-columns: minmax(48px, auto) minmax(90px, 1fr);
   gap: 16px;
   align-items: baseline;
   padding: 5px 12px;

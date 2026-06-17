@@ -1385,29 +1385,20 @@ const SYSTEMLOG_EVENT_INFO = {
         return e.error ? "recompute failed" : "no cases configured";
       }
       const n = e.cases.length;
-      const caseTotal = e.cases.reduce((s, c) => s + (Number(c.case_changes) || 0), 0);
-      const locTotal  = e.cases.reduce((s, c) => s + (Number(c.location_changes) || 0), 0);
-      const parts = [
-        `${n} case${n === 1 ? "" : "s"}`,
-        `${caseTotal} case change${caseTotal === 1 ? "" : "s"}`,
-      ];
-      if (locTotal) parts.push(`${locTotal} location change${locTotal === 1 ? "" : "s"}`);
-      return parts.join(" · ");
+      const total = e.cases.reduce(
+        (s, c) => s + (Number(c.case_changes) || 0) + (Number(c.location_changes) || 0), 0);
+      return `${n} case${n === 1 ? "" : "s"} · ${total} update${total === 1 ? "" : "s"}`;
     },
     renderContent: e => {
       if (!Array.isArray(e.cases) || !e.cases.length) return "";
+      // Per case, sum case-diffs + location-diffs into a single "updates" total.
       const rows = e.cases.map(c => {
-        const cc = Number(c.case_changes) || 0;
-        const lc = Number(c.location_changes) || 0;
+        const total = (Number(c.case_changes) || 0) + (Number(c.location_changes) || 0);
         return `<div class="diffrc-row">` +
           `<span class="diffrc-label">${escapeHtml(c.label ?? "?")}</span>` +
-          `<span class="diffrc-metric">` +
-            `<span class="diffrc-num">${cc}</span>` +
-            `<span class="diffrc-unit">case change${cc === 1 ? "" : "s"}</span>` +
-          `</span>` +
-          `<span class="diffrc-metric${lc ? "" : " is-zero"}">` +
-            `<span class="diffrc-num">${lc}</span>` +
-            `<span class="diffrc-unit">location change${lc === 1 ? "" : "s"}</span>` +
+          `<span class="diffrc-metric${total ? "" : " is-zero"}">` +
+            `<span class="diffrc-num">${total}</span>` +
+            `<span class="diffrc-unit">update${total === 1 ? "" : "s"}</span>` +
           `</span>` +
         `</div>`;
       }).join("");
@@ -1748,6 +1739,19 @@ function renderSystemLogRow(entry) {
   return _renderFlatSystemLogRow(entry);
 }
 
+// The raw event id (e.g. `system_log_cleared`) shown in the header's
+// third column is pure duplication when the pill label is just its
+// humanized form ("System log cleared"). In that case return "" so the
+// row shows the label once; callers keep an empty span so the grid
+// columns stay aligned. A curated label that differs from the event
+// (e.g. "MFA — code received" for `mfa_fetch_succeeded`) is preserved.
+function _syslogEventId(info, entry) {
+  const ev = entry.event || "";
+  const evNorm = ev.replace(/_/g, " ").trim().toLowerCase();
+  const labelNorm = (info.label || "").trim().toLowerCase();
+  return evNorm && evNorm === labelNorm ? "" : ev;
+}
+
 function _renderFlatSystemLogRow(entry) {
   const info = _eventInfo(entry);
   const block = document.createElement("div");
@@ -1799,7 +1803,7 @@ function _renderFlatSystemLogRow(entry) {
     `<div class="syslog-head">` +
       `<span class="kind-tag kind-${info.tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
-      `<span class="syslog-event">${escapeHtml(entry.event)}</span>` +
+      `<span class="syslog-event">${escapeHtml(_syslogEventId(info, entry))}</span>` +
       `<span class="syslog-ts">${escapeHtml(when)}</span>` +
     `</div>` +
     contentHtml +
@@ -1952,7 +1956,7 @@ function _renderNestedSystemLogRow(entry) {
         ` aria-expanded="false" aria-controls="${disclosureId}">` +
       `<span class="kind-tag kind-${tone}">${escapeHtml(info.label)}</span>` +
       sourceTag +
-      `<span class="syslog-event syslog-event-envelope">${escapeHtml(entry.event)}</span>` +
+      `<span class="syslog-event syslog-event-envelope">${escapeHtml(_syslogEventId(info, entry))}</span>` +
       `<span class="syslog-ts">${escapeHtml(when)}</span>` +
     `</button>` +
     contentHtml +
