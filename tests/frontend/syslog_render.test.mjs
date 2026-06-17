@@ -16,12 +16,32 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_JS = path.resolve(__dirname, "../../src/static/app.js");
 
+// Minimal stand-in for a DOM element: _renderFlatSystemLogRow only ever
+// sets .className and .innerHTML on the node it creates, so capturing those
+// two properties is enough to assert on the rendered markup.
+function makeStubEl() {
+  let _class = "";
+  let _html = "";
+  return {
+    set className(v) { _class = v; },
+    get className() { return _class; },
+    set innerHTML(v) { _html = v; },
+    get innerHTML() { return _html; },
+  };
+}
+
 function loadAppHelpers() {
   const src = fs.readFileSync(APP_JS, "utf8");
-  const sandbox = { document: { addEventListener() {} }, window: {}, console };
+  const sandbox = {
+    document: { addEventListener() {}, createElement: () => makeStubEl() },
+    window: {},
+    console,
+  };
   vm.createContext(sandbox);
   const exposed =
-    src + "\n;globalThis.__T = { _syslogEventId, escapeHtml, SYSTEMLOG_EVENT_INFO };";
+    src +
+    "\n;globalThis.__T = { _syslogEventId, escapeHtml, SYSTEMLOG_EVENT_INFO," +
+    " _renderFlatSystemLogRow };";
   vm.runInContext(exposed, sandbox, { filename: "app.js" });
   return sandbox.__T;
 }
@@ -113,4 +133,51 @@ test("diff_recomputed suppresses the raw cases[] array from the kv dump", () => 
   const hk = diffRecomputed().hideKeys;
   assert.equal(hk.length, 1);
   assert.equal(hk[0], "cases");
+});
+
+// ---------------- _renderFlatSystemLogRow (end-to-end row integration) ----------------
+
+test("flat row wires hideKeys + renderContent for a diff_recomputed entry", () => {
+  const block = T._renderFlatSystemLogRow({
+    ts: "2026-06-16T23:59:52Z",
+    event: "diff_recomputed",
+    level: "info",
+    source: "server",
+    cases: [{ label: "I-485", case_changes: 8, location_changes: 0 }],
+  });
+  const html = block.innerHTML;
+  // renderContent's per-case table is injected into the content band...
+  assert.match(html, /diffrc-table/);
+  assert.ok(html.includes('<span class="diffrc-num">8</span><span class="diffrc-unit">updates</span>'));
+  // ...the one-line summary is present...
+  assert.match(html, /1 case · 8 updates/);
+  // ...and the raw cases[] array is NOT dumped as a kv detail row.
+  assert.ok(!html.includes('syslog-detail-k">cases'), "cases[] must be hidden from the kv dump");
+  assert.ok(!html.includes("[{"), "no raw JSON array should appear");
+});
+
+test("flat row blanks the duplicate event id in the header", () => {
+  const block = T._renderFlatSystemLogRow({
+    ts: "2026-06-16T23:59:52Z",
+    event: "system_log_cleared",
+    level: "info",
+    source: "server",
+    prior_entry_count: 5,
+  });
+  const html = block.innerHTML;
+  assert.match(html, /kind-tag[^>]*>System log cleared</);          // pill label shown once
+  assert.ok(html.includes('<span class="syslog-event"></span>'),   // raw id blanked
+            "duplicate event id should render as an empty span");
+  assert.ok(!html.includes("system_log_cleared"), "raw event id must not appear in the header");
+});
+
+test("flat row keeps a non-duplicate event id (server_startup)", () => {
+  const block = T._renderFlatSystemLogRow({
+    ts: "2026-06-16T23:59:52Z",
+    event: "server_startup",
+    level: "info",
+    source: "server",
+  });
+  assert.ok(block.innerHTML.includes('<span class="syslog-event">server_startup</span>'),
+            "a curated-label event keeps its id");
 });
