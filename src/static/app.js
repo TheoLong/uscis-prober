@@ -923,8 +923,10 @@ function renderCases() {
   for (const c of state.cases) {
     const node = tmpl.content.cloneNode(true);
     const article = node.querySelector(".case-card");
+    // Key the card by its (non-PII) form label, not the receipt number, so
+    // the receipt never lands in a DOM attribute (redaction-safe). `label`
+    // is already the canonical per-case key (state.histories[label] etc.).
     article.dataset.label = c.label;
-    article.dataset.receipt = c.receiptNumber;
 
     article.querySelector(".case-label").textContent = c.label;
     const receiptEl = article.querySelector(".case-receipt");
@@ -981,7 +983,7 @@ function renderCases() {
 function switchTab(caseObj, tabId) {
   state.activeTab[caseObj.receiptNumber] = tabId;
   const article = document.querySelector(
-    `.case-card[data-receipt="${CSS.escape(caseObj.receiptNumber)}"]`
+    `.case-card[data-label="${CSS.escape(caseObj.label)}"]`
   );
   if (!article) return;
   article.querySelectorAll(".tab").forEach(btn => {
@@ -2615,7 +2617,9 @@ function renderUpdateRecord(u) {
 
   const block = document.createElement("article");
   block.className = `update-record${u.source === "location" ? " update-record-location" : ""}`;
-  block.dataset.id = u.id || "";
+  // The update id is "{receipt}:{source}:{date}" — scrub the receipt out of
+  // the DOM attribute when redaction is on (nothing reads it functionally).
+  block.dataset.id = redactMaybe(u.id || "");
   const sourceBadge = u.source === "location"
     ? `<span class="source-badge source-location" title="From the location API (/receipt_info)">Location API</span>`
     : "";
