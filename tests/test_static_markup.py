@@ -56,6 +56,38 @@ def test_recompute_popover_explains_the_action():
     assert "diff_recomputed" in popover, "popover should name the logged event"
 
 
+def test_redaction_pill_present_as_switch():
+    m = re.search(r'id="redaction-pill"[^>]*', INDEX_HTML)
+    assert m, "redaction-pill not found"
+    tag = m.group(0)
+    assert 'role="switch"' in tag, "redaction pill should be an ARIA switch"
+    assert "debug-pill" in tag, "redaction pill should reuse the toggle-pill styling"
+
+
+def test_redaction_info_badge_and_popover_present_and_wired():
+    assert 'id="redaction-info-btn"' in INDEX_HTML
+    assert 'id="redaction-info-popover"' in INDEX_HTML
+    assert 'aria-controls="redaction-info-popover"' in INDEX_HTML
+
+
+def test_redaction_popover_explains_what_is_masked():
+    pop = INDEX_HTML[INDEX_HTML.find('id="redaction-info-popover"'):]
+    pop = pop[: pop.find("</div>") + len("</div>")].lower()
+    for term in ("case", "name", "download", "snapshot"):
+        assert term in pop, f"redaction popover should mention {term!r}"
+    assert "screenshot" in pop or "shar" in pop, "popover should explain the share/screenshot purpose"
+    assert "server" in pop, "popover should state masking is server-side"
+
+
+def test_redaction_styles_ship():
+    assert ".redacted-text" in STYLE_CSS, "missing .redacted-text redaction-bar style"
+    # The disabled snapshot actions must have a grayed style.
+    assert re.search(r"\.raw-btn(:disabled|\.is-disabled)", STYLE_CSS), \
+        "missing disabled/is-disabled style for raw buttons"
+    # The locked (non-expandable) pull row style.
+    assert ".syslog-nested-locked" in STYLE_CSS, "missing locked pull-row style"
+
+
 def test_diff_recomputed_breakdown_styles_ship():
     # The per-case table classes the renderer emits must be defined.
     for selector in (

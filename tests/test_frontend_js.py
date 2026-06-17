@@ -20,14 +20,17 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-FRONTEND_TEST = ROOT / "tests" / "frontend" / "syslog_render.test.mjs"
+FRONTEND_DIR = ROOT / "tests" / "frontend"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
-def test_frontend_syslog_render_suite_passes():
-    assert FRONTEND_TEST.exists(), f"missing {FRONTEND_TEST}"
+def test_frontend_suite_passes():
+    # Runs every tests/frontend/*.test.mjs via Node's built-in runner. Globbed
+    # (not a directory arg) so new suites are picked up automatically.
+    test_files = sorted(str(p) for p in FRONTEND_DIR.glob("*.test.mjs"))
+    assert test_files, f"no frontend test files in {FRONTEND_DIR}"
     result = subprocess.run(
-        ["node", "--test", str(FRONTEND_TEST)],
+        ["node", "--test", *test_files],
         capture_output=True,
         text=True,
         cwd=str(ROOT),

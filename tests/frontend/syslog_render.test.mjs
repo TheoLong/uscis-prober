@@ -8,59 +8,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import vm from "node:vm";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { loadApp, makeStubEl } from "./_appsandbox.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_JS = path.resolve(__dirname, "../../src/static/app.js");
+const EXPOSE = [
+  "_syslogEventId", "escapeHtml", "SYSTEMLOG_EVENT_INFO",
+  "_renderFlatSystemLogRow", "renderSystemLogRow", "wireRecomputeButton", "state",
+];
 
-// Generic DOM-element stand-in. The renderers create a node, set
-// className/innerHTML, and (for nested rows) querySelector + wire listeners.
-// This stub captures className/innerHTML for assertions and tolerates the
-// rest as no-ops so _renderNestedSystemLogRow runs to completion.
-function makeStubEl() {
-  let _class = "";
-  let _html = "";
-  let _text = "";
-  const handlers = {};
-  return {
-    set className(v) { _class = v; },
-    get className() { return _class; },
-    set innerHTML(v) { _html = v; },
-    get innerHTML() { return _html; },
-    set textContent(v) { _text = v; },
-    get textContent() { return _text; },
-    hidden: false,
-    disabled: false,
-    querySelector: () => makeStubEl(),
-    querySelectorAll: () => [],
-    appendChild() {},
-    addEventListener(ev, fn) { handlers[ev] = fn; },
-    setAttribute() {},
-    // test helper: invoke a registered listener (returns its promise)
-    _click() { return handlers.click && handlers.click(); },
-  };
-}
-
-function loadAppHelpers() {
-  const src = fs.readFileSync(APP_JS, "utf8");
-  const sandbox = {
-    document: { addEventListener() {}, createElement: () => makeStubEl() },
-    window: {},
-    console: { ...console, error() {} },
-  };
-  vm.createContext(sandbox);
-  const exposed =
-    src +
-    "\n;globalThis.__T = { _syslogEventId, escapeHtml, SYSTEMLOG_EVENT_INFO," +
-    " _renderFlatSystemLogRow, renderSystemLogRow, wireRecomputeButton, state };";
-  vm.runInContext(exposed, sandbox, { filename: "app.js" });
-  return { T: sandbox.__T, sandbox };
-}
-
-const { T } = loadAppHelpers();
+const { T } = loadApp(EXPOSE);
 const diffRecomputed = () => T.SYSTEMLOG_EVENT_INFO.diff_recomputed;
 
 // ---------------- _syslogEventId (duplicate-id suppression) ----------------
@@ -217,7 +172,7 @@ test("nested pull row blanks its duplicate event id too", () => {
 // ---------------- wireRecomputeButton (click flow) ----------------
 
 function setupButtonHarness() {
-  const { T: t, sandbox } = loadAppHelpers();
+  const { T: t, sandbox } = loadApp(EXPOSE);
   const btn = makeStubEl();
   btn.disabled = false;
   btn.textContent = "Recompute diff";

@@ -19,3 +19,6 @@ venv/
 .venv/
 *.egg-info/
 .temp/
+
+# Node (frontend test tooling)
+node_modules/

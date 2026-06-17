@@ -287,6 +287,67 @@ def test_api_system_log_recompute_reports_failure(client, monkeypatch):
     assert len(failures) == 1
 
 
+# -------- redaction mode (server-side) --------------------------------
+
+def test_api_redaction_mode_get_default_false(client):
+    r = client.get("/api/redaction-mode")
+    assert r.status_code == 200
+    assert r.get_json() == {"enabled": False}
+
+
+def test_api_redaction_mode_post_persists_and_reflects(client, tmp_path):
+    r = client.post("/api/redaction-mode", json={"enabled": True})
+    assert r.status_code == 200
+    assert r.get_json()["enabled"] is True
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert saved["redaction_enabled"] is True
+    assert client.get("/api/redaction-mode").get_json() == {"enabled": True}
+
+
+def test_api_redaction_mode_rejects_non_bool(client):
+    assert client.post("/api/redaction-mode", json={"enabled": "yes"}).status_code == 400
+
+
+def test_redaction_masks_pii_in_json_responses(client, tmp_path):
+    """The after-request hook masks PII (receipt + name) in /api/cases when on.
+
+    Uses a realistic 10-digit receipt so both the keyed mask (receiptNumber,
+    applicantName) and the pattern scrub (the `id` field) are exercised.
+    """
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["cases"] = [{"id": "IOE0935749409", "label": "I-485"}]
+    cfg_path.write_text(json.dumps(cfg))
+    (tmp_path / "data" / "485_case.json").write_text(json.dumps([
+        {"capturedAt": "2026-03-09T00:00:00Z", "data": {
+            "receiptNumber": "IOE0935749409", "formType": "I-485",
+            "applicantName": "DOE, JANE", "events": [], "notices": [],
+            "documents": [], "evidenceRequests": [], "updatedAt": "2026-03-01"}},
+    ]))
+
+    before = client.get("/api/cases").get_data(as_text=True)
+    assert "IOE0935749409" in before and "JANE" in before
+
+    client.post("/api/redaction-mode", json={"enabled": True})
+    after = client.get("/api/cases").get_data(as_text=True)
+    assert "IOE0935749409" not in after, "receipt must be masked everywhere (key + id scrub)"
+    assert "JANE" not in after, "applicant name must be masked"
+    # response is still well-formed JSON with the case present
+    assert any(c["label"] == "I-485" for c in client.get("/api/cases").get_json()["cases"])
+
+
+def test_redaction_blocks_data_exports(client):
+    client.post("/api/redaction-mode", json={"enabled": True})
+    assert client.get("/api/export").status_code == 403
+    assert client.get("/api/system-log/export").status_code == 403
+
+
+def test_exports_work_again_when_redaction_off(client):
+    client.post("/api/redaction-mode", json={"enabled": True})
+    client.post("/api/redaction-mode", json={"enabled": False})
+    assert client.get("/api/export").status_code == 200
+
+
 # -------- notification dispatcher -------------------------------------
 
 def test_send_notifications_for_new_noop_when_empty(monkeypatch):

@@ -1881,6 +1881,39 @@ main[hidden] { display: none; }
   border-color: var(--ok);
   background: transparent;
 }
+/* Redaction mode grays out the snapshot download/copy actions so full
+   unmasked data can't be exported while sharing. */
+.raw-btn:disabled,
+.raw-btn.is-disabled,
+.raw-btn.is-disabled:hover {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--bg-elev-2);
+  color: var(--muted);
+  border-color: var(--border);
+}
+
+/* Redaction: a locked pull envelope can't be expanded (its steps hold the
+   most PII). Gray the chevron and drop the header's interactive affordance. */
+.syslog-nested-locked .syslog-head-expandable {
+  cursor: default;
+}
+.syslog-nested-locked .syslog-disclosure.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Redaction bar: hides the masked value behind a solid block so a value is
+   visibly struck out (and screenshot-safe) rather than just hidden text. */
+.redacted-text {
+  background: var(--muted);
+  color: transparent;
+  border-radius: 3px;
+  padding: 0 0.35em;
+  user-select: none;
+  letter-spacing: 0.05em;
+}
+
 pre.raw {
   margin: 0;
   padding: 14px 16px;

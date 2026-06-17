@@ -125,6 +125,34 @@
           </div>
         </div>
         <div class="action-with-info">
+          <!-- Redaction pill: client-side privacy toggle. Masks PII across
+               the dashboard + snapshot JSON and disables download/copy so
+               the site can be screenshotted or shared safely. -->
+          <button id="redaction-pill" class="action-btn debug-pill"
+                  type="button" role="switch" aria-checked="false"
+                  title="Off: data shown. On: mask case numbers + names and disable snapshot download/copy for safe sharing.">
+            <span class="debug-pill-dot"></span>
+            <span class="debug-pill-label">Redaction</span>
+          </button>
+          <button id="redaction-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the redaction toggle"
+                  aria-expanded="false"
+                  aria-controls="redaction-info-popover">i</button>
+          <div id="redaction-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Redaction mode</strong> masks sensitive details —
+            case/receipt numbers, applicant and representative names —
+            everywhere on the site: the Cases, Updates and System tabs,
+            including the raw snapshot JSON and system-log details. It also
+            disables <em>Download full history</em> + <em>Copy this
+            snapshot</em> and locks pull rows from expanding. Masking happens
+            <strong>on the server</strong>, so private data never reaches the
+            browser — it can't be recovered from the network tab or page
+            source. Turn it on before screenshotting or screen-sharing. This
+            is a global, server-side switch.
+          </div>
+        </div>
+        <div class="action-with-info">
           <!-- Export data: zip of every data/{form}_case.json + manifest. -->
           <a id="export-btn" class="action-btn pull-btn pull-btn-secondary"
              href="/api/export">Export data</a>
