@@ -7,7 +7,7 @@ Launches a Flask app on http://localhost:8080 that:
   - Reads case snapshots from `data/*_case.json`
   - Exposes REST endpoints the UI uses to render visualisations & diffs
   - Runs `session_fetch.py run` in a subprocess on demand (button) and on
-    a cron schedule (00:00, 06:00, 12:00, and 18:00 America/New_York daily)
+    a cron schedule defined by `pull_hours` in config.json (America/New_York)
   - Surfaces the next scheduled run + last run status for the UI countdown
 
 Playwright is kept strictly out of the Flask process by running the pull
@@ -68,13 +68,12 @@ STORAGE_SESSION_PATH = ROOT / ".uscis_session.json"
 
 SCHEDULER_TZ = "America/New_York"
 # Active cron hours for the automatic pull (24h, America/New_York).
-# REQUIRED config — there is NO baked-in default schedule. Resolved from
-# config.json's `pull_hours` array at startup in main() (see
-# load_pull_hours). Initialised empty so any read before main() resolves
-# it schedules nothing rather than a hidden default. Every read-site
-# (scheduler loop, /api status, startup log) uses this module global.
-# The starter pattern shipped in config.example.json is [0, 6, 12, 18]:
-# every 6 hours, evenly spaced, bounding observation latency to <=6h.
+# REQUIRED config with no baked-in default — the schedule and its
+# rationale live entirely in config.json's `pull_hours` array (see
+# load_pull_hours and config.example.json). Initialised empty so any
+# read before main() resolves it schedules nothing rather than a hidden
+# default. Every read-site (scheduler loop, /api status, startup log)
+# uses this module global.
 PULL_HOURS: tuple[int, ...] = ()
 
 PULL_CMD = [sys.executable, str(Path(__file__).resolve().parent / "session_fetch.py"), "run"]
@@ -119,7 +118,7 @@ def load_retry_policy(config: dict | None = None) -> RetryPolicy:
     Both `retry` and `retry_wait_seconds` are REQUIRED — missing keys
     raise `ConfigError` with a message that points the operator to
     config.example.json. This is deliberate: retry behaviour is
-    load-bearing (especially for the 18:00 ET pull that often hits
+    load-bearing (especially for scheduled pulls that hit
     anti-bot throttling), so silently falling back to implicit defaults
     would hide misconfiguration from the operator who set up the VM.
 
@@ -262,11 +261,14 @@ def load_pull_hours(config: dict | None = None) -> tuple[int, ...]:
     that forgot to set it should fail loudly at startup rather than
     silently fall back to some hardcoded cadence the operator never chose.
 
+    The canonical schedule, its starter value, and the rationale for it
+    live in config.json / config.example.json — not here. This function
+    only validates and normalises whatever the operator configured.
+
     Accepts a non-empty JSON array of integer hours in 24h
-    America/New_York, e.g. `[0, 6, 12, 18]` (the starter pattern shipped
-    in config.example.json). The list is normalised to a sorted,
-    de-duplicated tuple so `[20, 7, 7, 14]` becomes `(7, 14, 20)` —
-    duplicate slots would otherwise register colliding APScheduler job ids.
+    America/New_York. The list is normalised to a sorted, de-duplicated
+    tuple so `[20, 7, 7, 14]` becomes `(7, 14, 20)` — duplicate slots
+    would otherwise register colliding APScheduler job ids.
 
     Raises ConfigError on:
       - missing key                 -> required, see config.example.json
@@ -282,19 +284,19 @@ def load_pull_hours(config: dict | None = None) -> tuple[int, ...]:
         raise ConfigError(
             "config.json is missing required key `pull_hours` (non-empty "
             "array of integer hours 0-23, 24h America/New_York). See "
-            "config.example.json for the canonical template — the "
-            "recommended starter is [0, 6, 12, 18] (every 6 hours)."
+            "config.example.json for the canonical template and starter "
+            "schedule."
         )
     raw = config["pull_hours"]
     if not isinstance(raw, list):
         raise ConfigError(
             f"config.pull_hours={raw!r} must be a JSON array of "
-            f"integer hours (0-23), e.g. [0, 6, 12, 18]."
+            f"integer hours 0-23 (see config.example.json)."
         )
     if not raw:
         raise ConfigError(
             "config.pull_hours is an empty list — at least one hour is "
-            "required (e.g. [0, 6, 12, 18])."
+            "required (see config.example.json)."
         )
     hours: set[int] = set()
     for item in raw:

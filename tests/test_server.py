@@ -1240,9 +1240,39 @@ def test_spawn_pull_async_starts_thread():
 def test_setup_scheduler_registers_one_job_per_pull_hour(monkeypatch):
     sched = MagicMock()
     monkeypatch.setattr(server, "scheduler", sched)
+    # Pin a known non-empty schedule so the count assertion is meaningful.
+    # (PULL_HOURS initialises to () and is resolved from config at startup,
+    # so without this the assertion would be the vacuous 0 == 0.)
+    monkeypatch.setattr(server, "PULL_HOURS", (0, 6, 12, 18))
     server._setup_scheduler()
-    assert sched.add_job.call_count == len(server.PULL_HOURS)
+    assert sched.add_job.call_count == 4
     sched.start.assert_called_once()
+    # The job ids must be derived from PULL_HOURS, one per configured hour.
+    job_ids = {kw["id"] for _a, kw in sched.add_job.call_args_list}
+    assert job_ids == {"pull-00", "pull-06", "pull-12", "pull-18"}
+
+
+def test_setup_scheduler_uses_configured_hours(monkeypatch):
+    # A different, non-default schedule must flow straight through to the
+    # registered jobs — proves the loop reads PULL_HOURS, not a constant.
+    sched = MagicMock()
+    monkeypatch.setattr(server, "scheduler", sched)
+    monkeypatch.setattr(server, "PULL_HOURS", (3, 21))
+    server._setup_scheduler()
+    assert sched.add_job.call_count == 2
+    # Each registered job carries the configured hour in its id and the
+    # positional CronTrigger; assert on both so the trigger can't drift
+    # from the id.
+    by_id = {}
+    for args, kw in sched.add_job.call_args_list:
+        trigger = args[1]  # CronTrigger passed positionally
+        by_id[kw["id"]] = trigger
+    assert set(by_id) == {"pull-03", "pull-21"}
+    # Pull the hour field out of each CronTrigger and confirm it matches.
+    for job_id, trigger in by_id.items():
+        expected_hour = int(job_id.split("-")[1])
+        hour_field = next(f for f in trigger.fields if f.name == "hour")
+        assert str(hour_field) == str(expected_hour)
 
 
 def test_next_run_iso_returns_none_when_no_jobs(monkeypatch):
@@ -1755,6 +1785,54 @@ def test_main_handles_missing_config(monkeypatch, tmp_path):
         server.main()
     gate.assert_called_once()
     assert gate.call_args.args[1] == ""
+
+
+def test_main_resolves_pull_hours_from_config(monkeypatch, tmp_path):
+    """main() must resolve config.pull_hours into the PULL_HOURS module
+    global (sorted + deduped) *before* the scheduler reads it."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(
+        {"auth": {}, "cases": [], "pull_hours": [18, 6, 6, 0]}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    # Restore the module global after the test so we don't leak schedule
+    # state into other tests (main() mutates it via `global PULL_HOURS`).
+    monkeypatch.setattr(server, "PULL_HOURS", ())
+    captured = {}
+    def fake_setup():
+        # Snapshot PULL_HOURS at the moment the scheduler would read it.
+        captured["hours"] = server.PULL_HOURS
+    monkeypatch.setattr(server, "_setup_scheduler", fake_setup)
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate"):
+        server.main()
+    assert server.PULL_HOURS == (0, 6, 18)
+    # Resolution happened before the scheduler ran, not after.
+    assert captured["hours"] == (0, 6, 18)
+
+
+def test_main_invalid_pull_hours_is_non_fatal_and_schedules_nothing(monkeypatch, tmp_path):
+    """A missing/invalid pull_hours must NOT crash main() — it logs and
+    leaves PULL_HOURS empty so the scheduler registers no automatic pulls,
+    while the dashboard (manual pull button) still comes up."""
+    cfg_path = tmp_path / "config.json"
+    # pull_hours absent entirely → load_pull_hours raises ConfigError.
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    # Seed a stale non-empty value to prove the fallback actively clears it.
+    monkeypatch.setattr(server, "PULL_HOURS", (9, 9, 9))
+    real_setup_saw = {}
+    monkeypatch.setattr(server, "_setup_scheduler",
+                        lambda: real_setup_saw.setdefault("hours", server.PULL_HOURS))
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    logged = []
+    monkeypatch.setattr(server, "sys_log",
+                        lambda event, **kw: logged.append(event))
+    with patch.object(server, "configure_access_gate"):
+        # Must not raise.
+        server.main()
+    assert server.PULL_HOURS == ()
+    assert real_setup_saw["hours"] == ()
+    assert "config_pull_hours_invalid" in logged
 
 
 # -------- main() error branches ---------------------------------------
