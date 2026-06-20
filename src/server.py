@@ -7,7 +7,7 @@ Launches a Flask app on http://localhost:8080 that:
   - Reads case snapshots from `data/*_case.json`
   - Exposes REST endpoints the UI uses to render visualisations & diffs
   - Runs `session_fetch.py run` in a subprocess on demand (button) and on
-    a cron schedule (07:00, 14:00, and 20:00 America/New_York daily)
+    a cron schedule (00:00, 06:00, 12:00, and 18:00 America/New_York daily)
   - Surfaces the next scheduled run + last run status for the UI countdown
 
 Playwright is kept strictly out of the Flask process by running the pull
@@ -68,11 +68,13 @@ STORAGE_SESSION_PATH = ROOT / ".uscis_session.json"
 
 SCHEDULER_TZ = "America/New_York"
 # Cron hours for the automatic pull (24h, America/New_York).
-# Chosen after analysing observed updatedAtTimestamp values:
-#   - 07:00 catches overnight batches (e.g. 00:30 silent updates)
-#   - 14:00 catches the 10:00–13:14 Eastern Time daytime activity cluster
-#   - 20:00 insurance slot for any post-2pm updates
-PULL_HOURS: tuple[int, ...] = (7, 14, 20)
+# Every 6 hours, evenly spaced, to bound observation latency to <=6h
+# regardless of when USCIS emits an update:
+#   - 00:00 catches the deep-overnight batch window
+#   - 06:00 catches early-morning batches (e.g. 00:30 silent updates)
+#   - 12:00 catches the late-morning Eastern Time activity cluster
+#   - 18:00 catches afternoon/evening updates
+PULL_HOURS: tuple[int, ...] = (0, 6, 12, 18)
 
 PULL_CMD = [sys.executable, str(Path(__file__).resolve().parent / "session_fetch.py"), "run"]
 
@@ -116,7 +118,7 @@ def load_retry_policy(config: dict | None = None) -> RetryPolicy:
     Both `retry` and `retry_wait_seconds` are REQUIRED — missing keys
     raise `ConfigError` with a message that points the operator to
     config.example.json. This is deliberate: retry behaviour is
-    load-bearing (especially for the 20:00 ET pull that often hits
+    load-bearing (especially for the 18:00 ET pull that often hits
     anti-bot throttling), so silently falling back to implicit defaults
     would hide misconfiguration from the operator who set up the VM.
 

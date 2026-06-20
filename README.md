@@ -383,7 +383,7 @@ python src/server.py
 ```
 
 ```
-... INFO server: Scheduler started: daily pulls at 07:00, 14:00, 20:00 (America/New_York)
+... INFO server: Scheduler started: daily pulls at 00:00, 06:00, 12:00, 18:00 (America/New_York)
  * Running on http://127.0.0.1:8080
 ```
 
