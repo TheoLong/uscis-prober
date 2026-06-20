@@ -67,14 +67,15 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 STORAGE_SESSION_PATH = ROOT / ".uscis_session.json"
 
 SCHEDULER_TZ = "America/New_York"
-# Cron hours for the automatic pull (24h, America/New_York).
-# Every 6 hours, evenly spaced, to bound observation latency to <=6h
-# regardless of when USCIS emits an update:
-#   - 00:00 catches the deep-overnight batch window
-#   - 06:00 catches early-morning batches (e.g. 00:30 silent updates)
-#   - 12:00 catches the late-morning Eastern Time activity cluster
-#   - 18:00 catches afternoon/evening updates
-PULL_HOURS: tuple[int, ...] = (0, 6, 12, 18)
+# Active cron hours for the automatic pull (24h, America/New_York).
+# REQUIRED config — there is NO baked-in default schedule. Resolved from
+# config.json's `pull_hours` array at startup in main() (see
+# load_pull_hours). Initialised empty so any read before main() resolves
+# it schedules nothing rather than a hidden default. Every read-site
+# (scheduler loop, /api status, startup log) uses this module global.
+# The starter pattern shipped in config.example.json is [0, 6, 12, 18]:
+# every 6 hours, evenly spaced, bounding observation latency to <=6h.
+PULL_HOURS: tuple[int, ...] = ()
 
 PULL_CMD = [sys.executable, str(Path(__file__).resolve().parent / "session_fetch.py"), "run"]
 
@@ -250,6 +251,67 @@ def load_trace_successful_pulls(config: dict | None = None) -> bool:
             f"config.trace_successful_pulls={raw!r} must be a boolean."
         )
     return raw
+
+
+def load_pull_hours(config: dict | None = None) -> tuple[int, ...]:
+    """Read the automatic-pull schedule from config.json `pull_hours`.
+
+    REQUIRED field — there is no implicit default. Missing key raises
+    ConfigError pointing at the template, exactly like `retry` /
+    `retry_wait_seconds`. The schedule is load-bearing, so a deployment
+    that forgot to set it should fail loudly at startup rather than
+    silently fall back to some hardcoded cadence the operator never chose.
+
+    Accepts a non-empty JSON array of integer hours in 24h
+    America/New_York, e.g. `[0, 6, 12, 18]` (the starter pattern shipped
+    in config.example.json). The list is normalised to a sorted,
+    de-duplicated tuple so `[20, 7, 7, 14]` becomes `(7, 14, 20)` —
+    duplicate slots would otherwise register colliding APScheduler job ids.
+
+    Raises ConfigError on:
+      - missing key                 -> required, see config.example.json
+      - not a list                  -> must be a JSON array
+      - empty list                  -> at least one hour is required
+      - non-integer / bool item     -> every entry must be an int 0-23
+      - hour outside 0..23          -> 24 is NOT midnight; CronTrigger
+                                        only accepts 0..23, use 0
+    """
+    if config is None:
+        config = load_config()
+    if "pull_hours" not in config:
+        raise ConfigError(
+            "config.json is missing required key `pull_hours` (non-empty "
+            "array of integer hours 0-23, 24h America/New_York). See "
+            "config.example.json for the canonical template — the "
+            "recommended starter is [0, 6, 12, 18] (every 6 hours)."
+        )
+    raw = config["pull_hours"]
+    if not isinstance(raw, list):
+        raise ConfigError(
+            f"config.pull_hours={raw!r} must be a JSON array of "
+            f"integer hours (0-23), e.g. [0, 6, 12, 18]."
+        )
+    if not raw:
+        raise ConfigError(
+            "config.pull_hours is an empty list — at least one hour is "
+            "required (e.g. [0, 6, 12, 18])."
+        )
+    hours: set[int] = set()
+    for item in raw:
+        # bool is an int subclass; reject it explicitly so `true` isn't
+        # silently read as hour 1.
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ConfigError(
+                f"config.pull_hours contains a non-integer entry {item!r}; "
+                f"every entry must be an integer hour 0-23."
+            )
+        if item < 0 or item > 23:
+            raise ConfigError(
+                f"config.pull_hours entry {item} is out of range — hours "
+                f"must be 0-23 (24h clock; 24 is not midnight, use 0)."
+            )
+        hours.add(item)
+    return tuple(sorted(hours))
 
 
 def load_redaction_enabled(config: dict | None = None) -> bool:
@@ -2423,6 +2485,25 @@ def main() -> None:
         )
         logger.exception("Failed to load config at startup; access gate disabled.")
         optional_access_code = ""
+
+    # Resolve the REQUIRED pull schedule from config.json into the
+    # module-global PULL_HOURS *before* the scheduler reads it. There is
+    # no default cadence — a missing/invalid `pull_hours` leaves PULL_HOURS
+    # empty, which the scheduler block below treats as "no automatic pulls"
+    # and logs loudly. The dashboard still serves (manual pull button works)
+    # so the operator can see the error and fix config.json without the
+    # whole process crash-looping under systemd Restart=always.
+    global PULL_HOURS
+    try:
+        PULL_HOURS = load_pull_hours(config)
+    except ConfigError as e:
+        sys_log(
+            "config_pull_hours_invalid", level="error", source="server",
+            error=str(e)[:200],
+        )
+        logger.error("Invalid/missing config.pull_hours (%s); no automatic "
+                     "pulls will be scheduled until config.json is fixed.", e)
+        PULL_HOURS = ()
 
     try:
         configure_access_gate(app, optional_access_code, root=ROOT)

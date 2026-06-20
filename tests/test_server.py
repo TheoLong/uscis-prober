@@ -567,6 +567,66 @@ def test_load_retry_policy_template_values_are_valid():
     assert p.total_attempts == 3
 
 
+# -------- pull_hours schedule -------------------------------------------
+
+def test_load_pull_hours_raises_when_missing():
+    # Required key, no implicit default — a config without it must fail loud.
+    with pytest.raises(server.ConfigError, match="pull_hours"):
+        server.load_pull_hours({"retry": 2, "retry_wait_seconds": 180})
+
+
+def test_load_pull_hours_raises_on_empty_list():
+    with pytest.raises(server.ConfigError, match="empty"):
+        server.load_pull_hours({"pull_hours": []})
+
+
+def test_load_pull_hours_raises_when_not_a_list():
+    with pytest.raises(server.ConfigError, match="array"):
+        server.load_pull_hours({"pull_hours": 7})
+
+
+def test_load_pull_hours_raises_on_non_integer_entry():
+    with pytest.raises(server.ConfigError, match="non-integer"):
+        server.load_pull_hours({"pull_hours": [0, "6", 12]})
+
+
+def test_load_pull_hours_rejects_bool_entry():
+    # bool is an int subclass; True must not be silently read as hour 1.
+    with pytest.raises(server.ConfigError, match="non-integer"):
+        server.load_pull_hours({"pull_hours": [0, True]})
+
+
+def test_load_pull_hours_rejects_out_of_range():
+    with pytest.raises(server.ConfigError, match="range"):
+        server.load_pull_hours({"pull_hours": [0, 24]})
+    with pytest.raises(server.ConfigError, match="range"):
+        server.load_pull_hours({"pull_hours": [-1, 6]})
+
+
+def test_load_pull_hours_normalises_sorted_and_deduped():
+    # Duplicate/unsorted input collapses to a sorted unique tuple so the
+    # scheduler never registers colliding job ids.
+    assert server.load_pull_hours({"pull_hours": [20, 7, 7, 14]}) == (7, 14, 20)
+
+
+def test_load_pull_hours_single_hour_is_valid():
+    assert server.load_pull_hours({"pull_hours": [3]}) == (3,)
+
+
+def test_load_pull_hours_template_value_is_valid():
+    # The starter pattern shipped in config.example.json must parse
+    # cleanly through the same validator live configs use, and stay in
+    # sync with the file on disk.
+    import json
+    from pathlib import Path
+    example = json.loads(
+        (Path(server.__file__).resolve().parent.parent
+         / "config.example.json").read_text()
+    )
+    assert "pull_hours" in example, "config.example.json must ship pull_hours"
+    assert server.load_pull_hours(example) == (0, 6, 12, 18)
+
+
 # -------- storage_limit_mb + trace_successful_pulls config --------------
 
 def test_load_storage_limit_defaults_when_missing():

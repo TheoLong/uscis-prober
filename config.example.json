@@ -12,6 +12,7 @@
     "optional_access_code": "Optional: dashboard access code if enabled. Leave empty/null to disable.",
     "notification_email": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email."
   },
+  "pull_hours": [0, 6, 12, 18],
   "retry": 2,
   "retry_wait_seconds": 180,
   "storage_limit_mb": 256

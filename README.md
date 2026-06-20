@@ -293,6 +293,7 @@ Fill in `config.json`:
     "optional_access_code":   "",
     "notification_email":     ""
   },
+  "pull_hours": [0, 6, 12, 18],
   "retry": 2,
   "retry_wait_seconds": 180,
   "storage_limit_mb": 256
@@ -306,6 +307,7 @@ Fill in `config.json`:
 | `auth.uscis_email` / `uscis_password` | yes | `my.uscis.gov` login. |
 | `auth.uscis_mfa_email` | yes | Inbox where USCIS MFA emails land. Any major provider. |
 | `auth.uscis_mfa_app_password` | yes | App password for that inbox (see Step 3). |
+| `pull_hours` | yes | Automatic-pull schedule: non-empty array of integer hours (0–23, 24h America/New_York). Normalised to sorted unique values. Starter `[0, 6, 12, 18]` pulls every 6 hours. No default — must be set. |
 | `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). Start with `2`. Only auth failures retry; timeouts and config errors do not. |
 | `retry_wait_seconds` | yes | Wait between retry attempts, in seconds (int, ≥0). `180` is a good default — long enough for a transient anti-bot block to clear. |
 | `storage_limit_mb` | yes | Disk budget across `data/` + session/config files. Storage bar in the System tab tracks it; one alert email fires when crossed. Legal range 10–102400 (MB). |
@@ -643,6 +645,7 @@ One file. Gitignored. Minimum viable shape:
     "uscis_mfa_email":        "…",
     "uscis_mfa_app_password": "…"
   },
+  "pull_hours": [0, 6, 12, 18],
   "retry": 2,
   "retry_wait_seconds": 180,
   "storage_limit_mb": 256
