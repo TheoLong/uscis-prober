@@ -961,6 +961,69 @@ main[hidden] { display: none; }
   font-weight: 500;
 }
 
+/* Event-link overlay: an analytical layer that draws a bracket from a
+ * re-emitted event back to its origin (same eventTimestamp, new eventId).
+ * Brackets sit in the RIGHT gutter; each link gets its own color + lane. */
+/* Positioned wrapper: the SVG overlay is absolutely placed over the grid,
+ * and the right padding opens a gutter for the staggered brackets. */
+.events-list-wrap {
+  position: relative;
+  padding-right: 40px;
+}
+.events-link-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+.events-link-path {
+  fill: none;
+  stroke-width: 1.5;
+  opacity: 0.85;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+/* Casing drawn under each colored line: a thicker stroke in the card's own
+ * background, so where two lines pass within a pixel the upper one cleanly
+ * breaks the lower instead of the colors smearing together. */
+.events-link-casing {
+  fill: none;
+  stroke: var(--card, #fff);
+  stroke-width: 4;
+  opacity: 1;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+/* Invisible wide hit-area: carries the group's pointer events so hovering
+ * anywhere near a line (not pixel-perfect on the 1.5px stroke) selects it. */
+.events-link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  vector-effect: non-scaling-stroke;
+}
+/* Inspect-on-hover: hovering any one link fades all the OTHERS so the user can
+ * trace a single relationship through the tangle. The hovered link stays full
+ * opacity and thickens slightly; everything else drops to a faint ghost. */
+.events-link-group {
+  pointer-events: auto;
+  transition: opacity 0.12s ease;
+}
+.events-link-overlay:has(.events-link-group:hover) .events-link-group:not(:hover) {
+  opacity: 0.12;
+}
+.events-link-overlay .events-link-group:hover {
+  opacity: 1;
+}
+.events-link-overlay .events-link-group:hover .events-link-path {
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
 /* ---------- system log view ----------
  * Event rows shown on the System log tab. Each row is a pill-headed
  * block with a timestamp, event name, source, and any detail fields
