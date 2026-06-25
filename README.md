@@ -389,7 +389,7 @@ python src/server.py
  * Running on http://127.0.0.1:8080
 ```
 
-Open <http://127.0.0.1:8080>. Cases render with Overview / Changes /
+Open <http://127.0.0.1:8080>. Cases render with Overview / Updates /
 Raw JSON tabs, plus a global Updates feed and a System tab (storage
 breakdown + paginated event log). Pulls run on the schedule; click
 **Pull update** for an ad-hoc probe; **Export data** downloads the
@@ -603,7 +603,7 @@ config.example.json    Template.
 Beyond the snapshot/diff core:
 
 - **Dashboard views.** Per-case Overview (with the Current Location
-  row), Changes (merged case + location diffs), Raw JSON (Case API /
+  row), Updates (merged case + location diffs, with a count badge), Raw JSON (Case API /
   Location API sub-tabs); a global Updates feed; a System tab with a
   stacked storage bar (per case + system log) and a paginated system
   log; live countdown to the next scheduled pull; build-version chip
