@@ -256,7 +256,7 @@ def compute_change(prev: dict, curr: dict) -> dict:
 
 
 # Fields inside a location receipt_details payload that we surface as
-# scalar diffs on the Changes tab. We deliberately keep this short so the
+# scalar diffs on the Updates tab. We deliberately keep this short so the
 # diff block stays readable — internal flags like `milnatz`/`onpt`/
 # `premproc` show up in the raw JSON but aren't usually the interesting
 # signal when a service center gets assigned.
@@ -587,16 +587,15 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
     evidence_count = len(latest_data.get("evidenceRequests") or [])
     document_count = len(latest_data.get("documents") or [])
 
-    # "All updates" = what the UI's combined Timeline actually shows:
-    # every event row on the latest snapshot, plus every silent-update
-    # diff we've observed across the capture history.
-    all_updates = len(events) + silent_update_count
+    # "All events" = the timeline pill count: every event row on the latest
+    # snapshot plus every silent event detected across the capture history.
+    all_events = len(events) + silent_update_count
 
     return {
         "daysPending": _days_between(latest_data.get("submissionDate"), today_iso),
         "daysSinceUpdate": _days_between(latest_data.get("updatedAt"), today_iso),
         "uscisUpdates": len(distinct_updated_at),
-        "allUpdates": all_updates,
+        "allEvents": all_events,
         "silentUpdates": silent_update_count,
         "fta0Count": fta0_count,
         "eventCodes": event_codes,
