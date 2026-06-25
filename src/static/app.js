@@ -2838,7 +2838,7 @@ function renderObservedEventCodes(c) {
 // than at the tail. The blue (#337EA9, a steel blue) is intentionally a
 // DIFFERENT tone from the event pills' indigo blue (--accent #3a5cd8), so it
 // reads as its own color. Keyed by a STABLE sequence index (the link's position
-// in the engine's eventTimestamp-ordered output) — NOT render order or link
+// in the engine's appearance-ordered output) — NOT render order or link
 // count — so an existing link keeps its color when a newer link is added.
 // Cycles if links exceed the palette length.
 const EVENT_LINK_PALETTE = [
@@ -2874,7 +2874,7 @@ function drawEventLinks(wrap, list, links) {
   };
 
   const drawable = links
-    // seq = stable index in the engine's (eventTimestamp-ordered) output, so a
+    // seq = stable index in the engine's (appearance-ordered) output, so a
     // link's color is fixed by its position in that sequence and never shifts
     // when a newer link is appended or an unmappable one is filtered out.
     .map((l, seq) => ({ link: l, seq, o: rowFor(l.originId), r: rowFor(l.reemitId) }))
@@ -3002,8 +3002,8 @@ function drawEventLinks(wrap, list, links) {
     return id;
   };
 
-  // Render in original (newest-first) order. Color comes from each link's
-  // stable seq, not this render index, so it's identity-stable across additions.
+  // Color comes from each link's stable seq, not this render index, so it's
+  // identity-stable across additions.
   drawable.forEach((d) => {
     const laneX = railX + d.lane * laneGap;
     const color = eventLinkColor(d.seq);

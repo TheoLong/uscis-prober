@@ -80,14 +80,18 @@ def event_links(events: list[dict] | None) -> list[dict]:
             continue
         groups.setdefault(k, []).append(e)
 
-    links: list[dict] = []
+    links: list[tuple[str, dict]] = []
     for (code, ts), members in groups.items():
         if len(members) < 2:
             continue
         members = sorted(members, key=lambda m: m.get("createdAtTimestamp") or "")
         origin = members[0]
         for reemit in members[1:]:
-            links.append({
+            # The re-emit's write time is when this link became detectable —
+            # the appearance-time sort key (kept out of the link record so the
+            # API response carries only the link's own fields).
+            appeared_at = reemit.get("createdAtTimestamp") or ""
+            links.append((appeared_at, {
                 "kind": "reemit",
                 "eventCode": code,
                 "eventTimestamp": ts,
@@ -97,14 +101,11 @@ def event_links(events: list[dict] | None) -> list[dict]:
                     origin.get("createdAtTimestamp"),
                     reemit.get("createdAtTimestamp"),
                 ),
-                # When USCIS wrote the re-emit row = when this link became
-                # detectable. This is the appearance-time ordering key below.
-                "appearedAt": reemit.get("createdAtTimestamp") or "",
-            })
+            }))
     # Order by appearance time so the first-observed link is always index 0 and
     # later links append without renumbering the earlier ones.
-    links.sort(key=lambda link: link["appearedAt"])
-    return links
+    links.sort(key=lambda pair: pair[0])
+    return [link for _appeared_at, link in links]
 
 
 def _days_apart(origin_iso: str | None, reemit_iso: str | None) -> int | None:
