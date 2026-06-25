@@ -104,6 +104,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   _wireTopbarFlat();
   _wireSysCardCollapse();
   _wireEventsTooltipTap();
+  wireEventLinkResize();
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.addEventListener("click", () => setView(btn.dataset.view))
   );
@@ -2747,6 +2748,7 @@ function renderObservedEventCodes(c) {
 
   const hist = state.histories[c.label];
   const changes = (hist && hist.changes) || [];
+  const links = (hist && hist.links) || [];
 
   // 1. Raw events from the latest snapshot, deduped by eventId.
   // eventId is USCIS's own natural key — collisions across the same
@@ -2771,6 +2773,7 @@ function renderObservedEventCodes(c) {
       date: (e.createdAt || e.createdAtTimestamp || "").slice(0, 10) || "—",
       code: e.eventCode || "?",
       event: e,
+      eventId: eid || null,
     });
   }
 
@@ -2793,11 +2796,17 @@ function renderObservedEventCodes(c) {
   // Newest first.
   rows.sort((a, b) => b.date.localeCompare(a.date));
 
+  // The list lives in a positioned wrapper so the SVG link overlay can be
+  // absolutely positioned over the rows after layout.
+  const wrap = document.createElement("div");
+  wrap.className = "events-list-wrap";
+
   const list = document.createElement("ul");
   list.className = "events-list";
   for (const r of rows) {
     const item = document.createElement("li");
     item.className = "events-item";
+    if (r.eventId) item.dataset.eventId = r.eventId;
     const tooltip = r.silent
       ? buildSilentUpdateTooltip(r.change)
       : buildEventTooltip(r.event);
@@ -2810,8 +2819,272 @@ function renderObservedEventCodes(c) {
       `<span class="${codeClasses}"${tooltipAttr}>${escapeHtml(r.code)}</span>`;
     list.appendChild(item);
   }
-  section.appendChild(list);
+  wrap.appendChild(list);
+  section.appendChild(wrap);
+
+  // Re-emit links always render (right gutter). Stash the links on the wrap
+  // so the shared resize handler can redraw without re-rendering the card.
+  if (links.length) {
+    wrap._eventLinks = links;
+    requestAnimationFrame(() => drawEventLinks(wrap, list, links));
+  }
   return section;
+}
+
+// Dynamic, count-aware link colors: evenly spaced hues so N links stay
+// maximally distinguishable no matter how many there are. For small N a
+// hand-tuned palette reads best; beyond it, spread hues by the golden angle
+// (137.5°) which avoids adjacent-hue collisions far better than even spacing.
+const EVENT_LINK_PALETTE = [
+  "#e0566f", "#4353ff", "#1f9d55", "#d97706", "#7c3aed", "#0891b2",
+  "#db2777", "#65a30d", "#2563eb", "#ea580c",
+];
+function eventLinkColor(i, total) {
+  if (total <= EVENT_LINK_PALETTE.length) return EVENT_LINK_PALETTE[i];
+  // Golden-angle hue walk; fixed sat/light for consistent contrast on the card.
+  const hue = (i * 137.508) % 360;
+  return `hsl(${hue.toFixed(1)}, 70%, 48%)`;
+}
+
+// Draw a bracket connector from each re-emit row back to its origin row, in
+// the RIGHT gutter just past the event content. Pure DOM measurement →
+// absolutely-positioned SVG; the only layout assumption is "each linked row
+// carries data-event-id". Brackets share a lane unless their vertical spans
+// overlap (greedy interval coloring), so non-crossing links sit flush at the
+// same level and only genuinely-conflicting ones step out. Each link has its
+// own color; the leg pointing at the origin carries an arrowhead.
+function drawEventLinks(wrap, list, links) {
+  wrap.querySelectorAll(".events-link-overlay").forEach((el) => el.remove());
+  const wrapBox = wrap.getBoundingClientRect();
+  if (!wrapBox.width) return;
+
+  const rowFor = (eid) =>
+    list.querySelector(`.events-item[data-event-id="${CSS.escape(eid)}"]`);
+  // .events-item uses `display: contents`, so the <li> has no box of its own
+  // and getBoundingClientRect() returns zeros. Measure the code cell (2nd
+  // child) — its right edge is where a right-gutter bracket should anchor.
+  const codeCell = (el) => el.children[1] || el.firstElementChild || el;
+  const rightOf = (el) => codeCell(el).getBoundingClientRect().right - wrapBox.left;
+  const midY = (el) => {
+    const b = codeCell(el).getBoundingClientRect();
+    return b.top - wrapBox.top + b.height / 2;
+  };
+
+  const drawable = links
+    .map((l) => ({ link: l, o: rowFor(l.originId), r: rowFor(l.reemitId) }))
+    .filter((d) => d.o && d.r)
+    .map((d) => {
+      const yReemit = midY(d.r);
+      const yOrigin = midY(d.o);
+      return {
+        ...d,
+        yReemit,
+        yOrigin,
+        top: Math.min(yReemit, yOrigin),
+        bottom: Math.max(yReemit, yOrigin),
+      };
+    });
+  if (!drawable.length) return;
+
+  // Anchor the rail past the widest pill of ANY row in the list, not just the
+  // linked rows. A bracket's spine spans OVER the rows between origin and
+  // re-emit (often wider "silent update" pills), so anchoring only past the
+  // narrow FTA pills would cut through that text. Clear everything.
+  const allRowsRight = [...list.querySelectorAll(".events-item")]
+    .map((li) => codeCell(li).getBoundingClientRect().right - wrapBox.left);
+  const widest = allRowsRight.length ? Math.max(...allRowsRight) : 0;
+  const railX = widest + 14;
+  const laneGap = 20;  // horizontal spacing between staggered lanes
+
+  // Lane assignment — nesting-aware so the layout is crossing-free BY
+  // CONSTRUCTION (no detect-then-fix pass). Three crossing types are possible
+  // in this gutter model, each eliminated here or in endpoint ordering below:
+  //   • riser×riser — impossible: every overlapping link gets its own lane.
+  //   • leg×riser   — a link attaching at a row must sit SHALLOWER (lower lane,
+  //     nearer the pills) than any link whose riser merely spans over that row,
+  //     so its short leg stops before reaching the deeper riser. Guaranteed by
+  //     assigning lanes SHORTEST-SPAN-FIRST: a link nested inside another's
+  //     span is processed first and takes the shallower lane.
+  //   • leg×leg at a shared row — handled by endpoint ordering (next block).
+  // Greedy interval coloring over span-sorted links: each link takes the
+  // lowest lane whose current occupant doesn't vertically overlap it, so
+  // non-overlapping links still share lane 0 (sit flush at the same level).
+  const EPS = 2;
+  const laneRanges = [];  // laneRanges[k] = {top, bottom} occupying lane k
+  const ordered = [...drawable].sort((a, b) =>
+    (a.bottom - a.top) - (b.bottom - b.top) || a.top - b.top);
+  ordered.forEach((d) => {
+    let lane = 0;
+    while (lane < laneRanges.length) {
+      const r = laneRanges[lane];
+      const overlaps = d.top < r.bottom - EPS && d.bottom > r.top + EPS;
+      if (!overlaps) break;
+      lane++;
+    }
+    laneRanges[lane] = { top: d.top, bottom: d.bottom };
+    d.lane = lane;
+  });
+
+  // Endpoint ordering: when several links attach to the SAME row, assign each
+  // a distinct Y slot. Naive ordering (by lane) still lets a link's short
+  // horizontal leg cross another link's vertical riser right at the corner.
+  // The crossing-free order is provable from the geometry: a leg runs from the
+  // pill out to its lane, where the riser then climbs UP (other endpoint is
+  // above this row) or DOWN (below). Order the slots top→bottom as:
+  //   1. up-risers first, then down-risers  — the two groups can't cross.
+  //   2. within up-risers: shallow lane → deep   (nearer pill sits higher)
+  //   3. within down-risers: deep lane → shallow  (nearer pill sits lower)
+  // This makes every leg "peel off" toward its riser without cutting another.
+  drawable.forEach((d) => { d.originY = d.yOrigin; d.reemitY = d.yReemit; });
+  const endpointsByRow = new Map();
+  const addEndpoint = (rowEl, d, end) => {
+    if (!endpointsByRow.has(rowEl)) endpointsByRow.set(rowEl, []);
+    endpointsByRow.get(rowEl).push({ d, end });
+  };
+  drawable.forEach((d) => { addEndpoint(d.o, d, "origin"); addEndpoint(d.r, d, "reemit"); });
+  const SLOT_GAP = 5;
+  endpointsByRow.forEach((eps, rowEl) => {
+    if (eps.length < 2) return;  // single endpoint stays on the row mid
+    const baseY = midY(rowEl);
+    const h = codeCell(rowEl).getBoundingClientRect().height || 18;
+    // Direction this endpoint's riser travels: sign of (other end Y − this Y).
+    // < 0 → other end is above → riser goes UP; > 0 → DOWN.
+    const dirOf = (ep) => {
+      const otherY = ep.end === "origin" ? ep.d.yReemit : ep.d.yOrigin;
+      return Math.sign(otherY - baseY) || 1;
+    };
+    eps.sort((a, b) => {
+      const da = dirOf(a), db = dirOf(b);
+      if (da !== db) return da - db;               // up-risers (−1) before down (+1)
+      // same direction: up → shallow-first (lane asc); down → deep-first (lane desc)
+      return da < 0 ? a.d.lane - b.d.lane : b.d.lane - a.d.lane;
+    });
+    const gap = Math.min(SLOT_GAP, (h * 0.72) / (eps.length - 1));
+    eps.forEach((ep, k) => {
+      const y = baseY + (k - (eps.length - 1) / 2) * gap;
+      if (ep.end === "origin") ep.d.originY = y; else ep.d.reemitY = y;
+    });
+  });
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.classList.add("events-link-overlay");
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", String(Math.ceil(wrapBox.height)));
+
+  // One <defs> with a per-color arrowhead marker (markers can't inherit the
+  // path's stroke via currentColor on all engines, so mint one per hue used).
+  const defs = document.createElementNS(svgNS, "defs");
+  const markerIds = new Map();
+  const ensureMarker = (color) => {
+    if (markerIds.has(color)) return markerIds.get(color);
+    const id = `evlink-arrow-${markerIds.size}`;
+    const m = document.createElementNS(svgNS, "marker");
+    m.setAttribute("id", id);
+    m.setAttribute("markerWidth", "7");
+    m.setAttribute("markerHeight", "7");
+    m.setAttribute("refX", "5.5");
+    m.setAttribute("refY", "3");
+    m.setAttribute("orient", "auto");
+    m.setAttribute("markerUnits", "userSpaceOnUse");
+    const tip = document.createElementNS(svgNS, "path");
+    tip.setAttribute("d", "M0,0 L6,3 L0,6 Z");
+    tip.setAttribute("fill", color);
+    m.appendChild(tip);
+    defs.appendChild(m);
+    markerIds.set(color, id);
+    return id;
+  };
+
+  // Render in original (newest-first) order so colors stay stable per link.
+  drawable.forEach((d, i) => {
+    const laneX = railX + d.lane * laneGap;
+    const color = eventLinkColor(i, drawable.length);
+    const arrowId = ensureMarker(color);
+    // Prong roots sit just past each row's own pill so the bracket touches its
+    // events; the riser rides the assigned lane, clearing all spanned text.
+    const prongReemit = rightOf(d.r) + 4;
+    const prongOrigin = rightOf(d.o) + 4;
+    const yR = d.reemitY;   // fanned attach Y at the re-emit row
+    const yO = d.originY;   // fanned attach Y at the origin row
+
+    // Group the spine + origin leg so hovering either dims every OTHER link —
+    // the readability fix for dense/crossing cases: highlight one path at a
+    // time instead of asking the eye to trace through a multicolor band.
+    const g = document.createElementNS(svgNS, "g");
+    g.setAttribute("class", "events-link-group");
+
+    // One continuous rounded-orthogonal path: re-emit prong → corner → riser
+    // down/up the lane → corner → origin leg, arrowhead at the origin tip.
+    // Rounded corners (quadratic) make near-corners read as distinct curves
+    // instead of mashed right angles. Direction-aware so the arc bends the
+    // correct way whether the origin is below (newer→older, the usual case).
+    const dir = yO >= yR ? 1 : -1;        // +1 = origin below re-emit
+    // Corner radius stays small (<= 5px) and well under half the lane gap so a
+    // rounded corner never bulges into the neighbouring lane.
+    const rr = Math.min(5, Math.abs(yO - yR) / 2, laneGap / 3);
+    const dStr =
+      `M ${prongReemit} ${yR}` +
+      ` H ${laneX - rr}` +
+      ` Q ${laneX} ${yR} ${laneX} ${yR + dir * rr}` +
+      ` V ${yO - dir * rr}` +
+      ` Q ${laneX} ${yO} ${laneX - rr} ${yO}` +
+      ` H ${prongOrigin}`;
+
+    // Casing: a thick background-colored stroke drawn UNDER the colored line so
+    // wherever two lines pass within a pixel or two, the one on top cleanly
+    // breaks the one beneath instead of merging into it. Standard graph-edge
+    // technique; keeps near-parallel lanes legible without forcing huge gaps.
+    const casing = document.createElementNS(svgNS, "path");
+    casing.setAttribute("d", dStr);
+    casing.setAttribute("class", "events-link-casing");
+
+    // Invisible fat hit-area so hovering NEAR a line (not pixel-perfect on the
+    // 1.5px stroke) still selects it. It carries the pointer events for the
+    // group; the visible strokes stay thin. Drawn first so it sits beneath.
+    const hit = document.createElementNS(svgNS, "path");
+    hit.setAttribute("d", dStr);
+    hit.setAttribute("class", "events-link-hit");
+
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", dStr);
+    path.setAttribute("class", "events-link-path");
+    path.style.stroke = color;
+    path.setAttribute("marker-end", `url(#${arrowId})`);
+
+    const title = document.createElementNS(svgNS, "title");
+    const d_ = d.link.daysApart;
+    title.textContent =
+      `${d.link.eventCode} re-emitted` +
+      (d_ != null ? ` ${d_} day${d_ === 1 ? "" : "s"} later` : "") +
+      ` (same eventTimestamp ${d.link.eventTimestamp})`;
+    g.appendChild(title);
+    g.appendChild(hit);
+    g.appendChild(casing);
+    g.appendChild(path);
+    svg.appendChild(g);
+  });
+
+  svg.insertBefore(defs, svg.firstChild);
+  wrap.appendChild(svg);
+}
+
+// Redraw every visible event-link overlay on resize so brackets track the
+// rows as the layout reflows. Wired once.
+let _eventLinkResizeWired = false;
+function wireEventLinkResize() {
+  if (_eventLinkResizeWired) return;
+  _eventLinkResizeWired = true;
+  let raf = null;
+  window.addEventListener("resize", () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      document.querySelectorAll(".events-list-wrap").forEach((wrap) => {
+        const list = wrap.querySelector(".events-list");
+        if (wrap._eventLinks && list) drawEventLinks(wrap, list, wrap._eventLinks);
+      });
+    });
+  });
 }
 
 // Format an ISO timestamp for an event/silent-update hover tooltip in the

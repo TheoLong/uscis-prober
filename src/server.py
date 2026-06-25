@@ -45,6 +45,7 @@ from diff_utils import (
     snapshot_changes,
     summarize_case,
 )
+from event_links import event_links
 from mailer import notify_update
 from redaction import redact_obj as _redact_obj
 from system_log import (
@@ -1331,15 +1332,48 @@ def api_case_history(label: str):
     changes = _merge_changes(
         snapshot_changes(entries), location_snapshot_changes(location_entries)
     )
+    latest_events = (days[-1].get("data") or {}).get("events") if days else None
+    links = _FAKE_LINKS_OVERRIDE.get(label)
+    if links is None:
+        links = event_links(latest_events)
     return jsonify(
         {
             "label": label,
             "entries": entries,         # all raw case-API captures
             "days": days,               # one entry per UTC day (latest of day)
             "changes": changes,         # merged case + location diffs, chronological
+            "links": links,             # re-emit links (or an inspection override)
             "locationEntries": location_entries,  # raw location-API captures
         }
     )
+
+
+# Ephemeral per-label override for the event-link result, for visually
+# inspecting link-rendering scenarios on the live site without real re-emits.
+# Set via POST /api/cases/<label>/fake-links; cleared by ANY diff recompute
+# (startup, post-pull, or the manual recompute button) so it can never
+# silently outlive an inspection session.
+_FAKE_LINKS_OVERRIDE: dict[str, list] = {}
+
+
+@app.route("/api/cases/<label>/fake-links", methods=["POST"])
+def api_case_fake_links(label: str):
+    """Install or clear a fake event-link result for one case (inspection aid).
+
+    Body: a JSON array of link objects (same shape `event_links` returns:
+    `{kind, eventCode, eventTimestamp, originId, reemitId, daysApart}`) to
+    install, or an empty array / `null` to clear. The override is in-memory
+    only and is wiped by the next diff recompute — it is NOT persisted and
+    never affects notifications or stored data.
+    """
+    payload = request.get_json(silent=True)
+    if payload:
+        _FAKE_LINKS_OVERRIDE[label] = payload
+        active = len(payload)
+    else:
+        _FAKE_LINKS_OVERRIDE.pop(label, None)
+        active = 0
+    return jsonify({"ok": True, "label": label, "active_links": active})
 
 
 @app.route("/api/updates")
@@ -2160,6 +2194,9 @@ def _recompute_diffs_at_startup(config: dict) -> dict:
     tests can assert on the per-case summary without scraping the log.
     """
     try:
+        # A recompute always clears any inspection-only fake-link overrides,
+        # so they can never silently outlive the data they were faking.
+        _FAKE_LINKS_OVERRIDE.clear()
         cases_summary = []
         for c in (config.get("cases") or []):
             label = c.get("label")
