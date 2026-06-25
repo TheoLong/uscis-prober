@@ -376,11 +376,36 @@ def test_summarize_case_counts_silent_updates():
     assert s["silentUpdates"] == 2
     assert "sameDayRefreshes" not in s
     assert s["uscisUpdates"] == 3  # three distinct updatedAt dates
-    # allUpdates = events on the latest snapshot + silent-update diffs.
-    # Latest snapshot has 1 IAF event; 2 silent_update diffs detected.
-    assert s["allUpdates"] == 3
+    # allEvents = timeline pill count: 1 IAF event on the latest snapshot +
+    # 2 silent events detected across the captures.
+    assert s["allEvents"] == 3
     assert s["daysPending"] == 57  # from 2026-02-20 → 2026-04-18
     assert s["stage"] == "Received"
+
+
+def test_all_events_counts_events_plus_silent():
+    # "All events" is the timeline pill count: every event row on the latest
+    # snapshot plus every silent event. Three events on the latest snapshot
+    # (even when two arrived in one capture) all show as pills → 3 + silent.
+    entries = [
+        _entry("2026-03-05T12:00:00Z", events=[{"eventCode": "IAF", "eventId": "a"}]),
+        # one capture, two new events: both are distinct timeline pills
+        _entry(
+            "2026-04-01T12:00:00Z",
+            updatedAt="2026-04-01",
+            updatedAtTimestamp="2026-04-01T12:00:00Z",
+            events=[
+                {"eventCode": "IAF", "eventId": "a"},
+                {"eventCode": "FTA0", "eventId": "b"},
+                {"eventCode": "FTA0", "eventId": "c"},
+            ],
+        ),
+    ]
+    s = summarize_case(entries, today_iso="2026-04-18")
+    silent = s["silentUpdates"]
+    latest_events = len(entries[-1]["data"]["events"])
+    assert s["allEvents"] == latest_events + silent
+    assert s["allEvents"] == 3  # 3 events on the latest snapshot, 0 silent
 
 
 def test_summarize_case_surfaces_upcoming_appointment_with_days_until():
@@ -476,7 +501,7 @@ def test_summarize_case_empty_entries_has_none_fields():
     assert s["daysPending"] is None
     assert s["daysSinceUpdate"] is None
     assert s["uscisUpdates"] == 0
-    assert s["allUpdates"] == 0
+    assert s["allEvents"] == 0
     assert s["lastActivity"] is None
     assert s["upcomingAppointment"] is None
     assert s["stage"] == "Pending receipt"

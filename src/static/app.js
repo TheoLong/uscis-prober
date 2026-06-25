@@ -1000,6 +1000,8 @@ function renderCases() {
     });
     panels.forEach(p => (p.hidden = p.dataset.tab !== active));
 
+    updateTabCounts(article, c);
+
     // Initial panel content
     renderPanel(article, c, active);
 
@@ -1056,15 +1058,15 @@ function renderOverview(panel, c) {
         : "warn",
     },
     {
-      label: "All updates",
-      value: s.allUpdates ?? 0,
-      sub: "",
+      label: "All events",
+      value: s.allEvents ?? 0,
+      sub: "events + silent",
       tone: "",
     },
     {
-      label: "Silent updates",
+      label: "Silent events",
       value: s.silentUpdates ?? 0,
-      sub: "updates without event",
+      sub: "no event code",
       tone: (s.silentUpdates ?? 0) > 0 ? "ok" : "",
     },
   ];
@@ -1280,6 +1282,17 @@ function _renderSubFacts(c, latest) {
 }
 
 // ---------- changes ----------
+
+function updateTabCounts(article, c) {
+  // The Updates tab badge counts exactly the rows renderChanges paints —
+  // the merged case+location diff feed — so badge and tab content can't drift.
+  const hist = state.histories[c.label];
+  const n = ((hist && hist.changes) || []).length;
+  const badge = article.querySelector('.tab-count[data-count="changes"]');
+  if (!badge) return;
+  badge.textContent = String(n);
+  badge.hidden = n === 0;
+}
 
 function renderChanges(panel, c) {
   panel.innerHTML = "";
