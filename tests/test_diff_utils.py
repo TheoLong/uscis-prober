@@ -7,8 +7,9 @@ from diff_utils import (
     bin_by_day,
     classify_change,
     compute_change,
-    day_changes,
     infer_stage,
+    location_snapshot_changes,
+    snapshot_changes,
     stage_progression,
     summarize_case,
 )
@@ -109,7 +110,11 @@ def test_classify_change_silent_update_when_updatedAt_date_advances():
     assert classify_change(change) == "silent_update"
 
 
-def test_classify_change_silent_ping_when_only_timestamp_moves():
+def test_classify_change_silent_update_when_only_timestamp_moves():
+    # A bare updatedAtTimestamp move with no event context is a silent update.
+    # (Whether it is actually an event's footprint is decided in
+    # snapshot_changes, which has the surrounding events; classify_change on a
+    # standalone change with no events is a genuine silent update.)
     change = {
         "scalars": {
             "updatedAtTimestamp": {"from": "2026-03-10T14:59:52Z",
@@ -118,10 +123,10 @@ def test_classify_change_silent_ping_when_only_timestamp_moves():
         "events": {"added": [], "removed": []},
         "notices": {"added": [], "removed": []},
     }
-    assert classify_change(change) == "same_day_refresh"
+    assert classify_change(change) == "silent_update"
 
 
-# -------- compute_change + day_changes ------------------------------------
+# -------- compute_change + snapshot_changes -------------------------------
 
 def test_compute_change_detects_new_event():
     prev = _entry("2026-03-09T12:00:00Z", events=[{"eventCode": "IAF", "eventId": "a"}])
@@ -138,15 +143,181 @@ def test_compute_change_detects_new_event():
     assert added[0]["eventCode"] == "FTA0"
 
 
-def test_day_changes_filters_out_unchanged_day_pairs():
+def test_snapshot_changes_filters_out_unchanged_day_pairs():
     entries = [
         _entry("2026-03-09T00:00:00Z"),
         _entry("2026-03-10T00:00:00Z"),  # identical -> no diff
         _entry("2026-03-11T00:00:00Z", closed=True),  # decision flip
     ]
-    changes = day_changes(entries)
+    changes = snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "decision"
+
+
+def test_snapshot_changes_does_not_collapse_same_day_transitions():
+    """A silent update and a new event on the same UTC day surface as two
+    separate change records, not one."""
+    entries = [
+        # Yesterday's settled state.
+        _entry(
+            "2026-06-24T18:00:00Z",
+            updatedAt="2026-06-24",
+            updatedAtTimestamp="2026-06-24T18:00:00Z",
+            events=[{"eventCode": "FTA0", "eventId": "a"}],
+        ),
+        # Morning: updatedAt advanced, no new event yet -> silent_update.
+        _entry(
+            "2026-06-25T14:00:00Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T14:00:00Z",
+            events=[{"eventCode": "FTA0", "eventId": "a"}],
+        ),
+        # Afternoon, same UTC day: a new FTA1 event appears -> event.
+        _entry(
+            "2026-06-25T17:00:00Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T17:00:00Z",
+            events=[
+                {"eventCode": "FTA0", "eventId": "a"},
+                {"eventCode": "FTA1", "eventId": "b"},
+            ],
+        ),
+    ]
+    changes = snapshot_changes(entries)
+    kinds = [c["kind"] for c in changes]
+    assert kinds == ["silent_update", "event"]
+    # Both anchored on the same calendar day but distinct capture timestamps.
+    assert changes[0]["to"] == "2026-06-25T14:00:00Z"
+    assert changes[1]["to"] == "2026-06-25T17:00:00Z"
+    # The event record carries the newly-added FTA1.
+    assert [e["eventCode"] for e in changes[1]["events"]["added"]] == ["FTA1"]
+
+
+def test_snapshot_changes_folds_event_footprint_bump():
+    """A timestamp-only bump that lands on an event's own time is that event's
+    case-level footprint and is not surfaced as a separate row — only the
+    event row remains."""
+    entries = [
+        # Settled prior state.
+        _entry(
+            "2026-06-25T14:00:00Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T13:00:00.000Z",
+            events=[{"eventCode": "FTA0", "eventId": "a",
+                     "eventTimestamp": "2026-03-10T17:00:00.000Z",
+                     "createdAtTimestamp": "2026-03-10T17:00:00.000Z"}],
+        ),
+        # Pull that first sees the new FTA1 (event row arrives).
+        _entry(
+            "2026-06-25T14:33:46Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T13:00:00.000Z",
+            events=[{"eventCode": "FTA0", "eventId": "a",
+                     "eventTimestamp": "2026-03-10T17:00:00.000Z",
+                     "createdAtTimestamp": "2026-03-10T17:00:00.000Z"},
+                    {"eventCode": "FTA1", "eventId": "b",
+                     "eventTimestamp": "2026-06-25T15:00:00.000Z",
+                     "createdAtTimestamp": "2026-06-25T15:00:01.000Z"}],
+        ),
+        # Later pull: case updatedAtTimestamp catches up to the FTA1's time
+        # (within seconds). This bump is the FTA1's footprint -> folded away.
+        _entry(
+            "2026-06-25T15:42:40Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T15:00:00.500Z",
+            events=[{"eventCode": "FTA0", "eventId": "a",
+                     "eventTimestamp": "2026-03-10T17:00:00.000Z",
+                     "createdAtTimestamp": "2026-03-10T17:00:00.000Z"},
+                    {"eventCode": "FTA1", "eventId": "b",
+                     "eventTimestamp": "2026-06-25T15:00:00.000Z",
+                     "createdAtTimestamp": "2026-06-25T15:00:01.000Z"}],
+        ),
+    ]
+    changes = snapshot_changes(entries)
+    # Only the FTA1 event row — the trailing footprint bump is folded out.
+    assert [c["kind"] for c in changes] == ["event"]
+    assert [e["eventCode"] for e in changes[0]["events"]["added"]] == ["FTA1"]
+
+
+def test_snapshot_changes_folds_backdated_event_footprint_via_created_at():
+    """A backdated re-emit carries an old eventTimestamp but a recent
+    createdAtTimestamp, and USCIS stamps the case from the WRITE time. The
+    fold must match on createdAtTimestamp, not just eventTimestamp."""
+    entries = [
+        _entry(
+            "2026-06-05T11:00:00Z",
+            updatedAt="2026-04-29",
+            updatedAtTimestamp="2026-04-29T05:00:00.000Z",
+            events=[{"eventCode": "IAF", "eventId": "a",
+                     "eventTimestamp": "2026-02-20T00:00:00.000Z",
+                     "createdAtTimestamp": "2026-03-05T03:00:00.000Z"}],
+        ),
+        # Backdated FTA0 re-emit: eventTimestamp is months old (03-10), but it
+        # was written now (06-05). The case timestamp moves to the write time.
+        _entry(
+            "2026-06-05T13:47:55Z",
+            updatedAt="2026-06-05",
+            updatedAtTimestamp="2026-06-05T13:30:00.000Z",
+            events=[{"eventCode": "IAF", "eventId": "a",
+                     "eventTimestamp": "2026-02-20T00:00:00.000Z",
+                     "createdAtTimestamp": "2026-03-05T03:00:00.000Z"},
+                    {"eventCode": "FTA0", "eventId": "b",
+                     "eventTimestamp": "2026-03-10T17:00:00.000Z",
+                     "createdAtTimestamp": "2026-06-05T13:30:00.000Z"}],
+        ),
+        # Trailing bump matching the backdated event's createdAtTimestamp
+        # (write time) — folds even though eventTimestamp is ~87 days away.
+        _entry(
+            "2026-06-05T18:00:00Z",
+            updatedAt="2026-06-05",
+            updatedAtTimestamp="2026-06-05T13:30:01.000Z",
+            events=[{"eventCode": "IAF", "eventId": "a",
+                     "eventTimestamp": "2026-02-20T00:00:00.000Z",
+                     "createdAtTimestamp": "2026-03-05T03:00:00.000Z"},
+                    {"eventCode": "FTA0", "eventId": "b",
+                     "eventTimestamp": "2026-03-10T17:00:00.000Z",
+                     "createdAtTimestamp": "2026-06-05T13:30:00.000Z"}],
+        ),
+    ]
+    changes = snapshot_changes(entries)
+    assert [c["kind"] for c in changes] == ["event"]
+
+
+def test_snapshot_changes_keeps_silent_update_far_from_any_event():
+    """A timestamp-only bump that is NOT near any event's time is a genuine
+    silent update and stays its own row."""
+    entries = [
+        _entry(
+            "2026-06-12T11:00:00Z",
+            updatedAt="2026-06-05",
+            updatedAtTimestamp="2026-06-05T14:00:00.000Z",
+            events=[{"eventCode": "FTA1", "eventId": "b",
+                     "eventTimestamp": "2026-06-05T13:00:00.000Z",
+                     "createdAtTimestamp": "2026-06-05T13:00:00.000Z"}],
+        ),
+        # updatedAt date advances a week later, far from the FTA1's time.
+        _entry(
+            "2026-06-12T18:00:00Z",
+            updatedAt="2026-06-12",
+            updatedAtTimestamp="2026-06-12T14:00:00.000Z",
+            events=[{"eventCode": "FTA1", "eventId": "b",
+                     "eventTimestamp": "2026-06-05T13:00:00.000Z",
+                     "createdAtTimestamp": "2026-06-05T13:00:00.000Z"}],
+        ),
+    ]
+    changes = snapshot_changes(entries)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "silent_update"
+
+
+def test_snapshot_changes_orders_unsorted_captures():
+    """Captures arriving out of order are diffed in capturedAt order, so a
+    shuffled input still produces the correct chronological feed."""
+    a = _entry("2026-03-09T00:00:00Z")
+    b = _entry("2026-03-10T00:00:00Z", closed=True)
+    c = _entry("2026-03-11T00:00:00Z", actionRequired=True)
+    changes = snapshot_changes([c, a, b])  # shuffled
+    assert [ch["to"][:10] for ch in changes] == ["2026-03-10", "2026-03-11"]
 
 
 # -------- infer_stage / stage_progression ---------------------------------
@@ -177,7 +348,7 @@ def test_stage_progression_marks_passed_current_upcoming():
 
 # -------- summarize_case ---------------------------------------------------
 
-def test_summarize_case_counts_silent_updates_and_same_day_refreshes_separately():
+def test_summarize_case_counts_silent_updates():
     entries = [
         # day 1: received
         _entry(
@@ -186,14 +357,14 @@ def test_summarize_case_counts_silent_updates_and_same_day_refreshes_separately(
             updatedAtTimestamp="2026-03-05T10:00:00Z",
             events=[{"eventCode": "IAF", "eventId": "a"}],
         ),
-        # day 2: same-day re-stamp (ping)
+        # day 2: updatedAt date advances, no new events (silent update)
         _entry(
             "2026-03-06T12:00:00Z",
-            updatedAt="2026-03-05",
-            updatedAtTimestamp="2026-03-05T12:00:00Z",
+            updatedAt="2026-03-06",
+            updatedAtTimestamp="2026-03-06T12:00:00Z",
             events=[{"eventCode": "IAF", "eventId": "a"}],
         ),
-        # day 3: date advanced, no new events (silent update)
+        # day 3: date advances again, no new events (silent update)
         _entry(
             "2026-03-08T12:00:00Z",
             updatedAt="2026-03-07",
@@ -202,12 +373,12 @@ def test_summarize_case_counts_silent_updates_and_same_day_refreshes_separately(
         ),
     ]
     s = summarize_case(entries, today_iso="2026-04-18")
-    assert s["silentUpdates"] == 1
-    assert s["sameDayRefreshes"] == 1
-    assert s["uscisUpdates"] == 2  # two distinct updatedAt dates
+    assert s["silentUpdates"] == 2
+    assert "sameDayRefreshes" not in s
+    assert s["uscisUpdates"] == 3  # three distinct updatedAt dates
     # allUpdates = events on the latest snapshot + silent-update diffs.
-    # Latest snapshot has 1 IAF event; 1 silent_update diff detected.
-    assert s["allUpdates"] == 2
+    # Latest snapshot has 1 IAF event; 2 silent_update diffs detected.
+    assert s["allUpdates"] == 3
     assert s["daysPending"] == 57  # from 2026-02-20 → 2026-04-18
     assert s["stage"] == "Received"
 
@@ -268,24 +439,14 @@ def test_classify_change_appointment_wins_over_notice_when_removed():
     assert classify_change(change) == "appointment"
 
 
-def test_classify_change_silent_ping_only_timestamp_changes():
-    change = {
-        "scalars": {"updatedAtTimestamp": {"from": "a", "to": "b"}},
-        "events": {"added": [], "removed": []},
-        "notices": {"added": [], "removed": []},
-        "documents": {"added": [], "removed": []},
-    }
-    assert classify_change(change) == "same_day_refresh"
+# -------- snapshot_changes: collection-only diff path ---------------------
 
-
-# -------- day_changes: collection-only diff path --------------------------
-
-def test_day_changes_detects_collection_only_diff():
+def test_snapshot_changes_detects_collection_only_diff():
     # No scalar change, but a document was added. Should count as a diff.
-    from diff_utils import day_changes
+    from diff_utils import snapshot_changes
     e0 = _entry("2026-03-09T00:00:00Z", documents=[])
     e1 = _entry("2026-03-10T00:00:00Z", documents=[{"id": "doc1"}])
-    changes = day_changes([e0, e1])
+    changes = snapshot_changes([e0, e1])
     assert len(changes) == 1
 
 
@@ -396,8 +557,8 @@ def test_key_notice_falls_back_to_actiontype_when_no_letter_id():
     n = {"actionType": "X", "generationDate": "2026-04-18"}
     e0 = _entry("2026-03-09T00:00:00Z", notices=[n])
     e1 = _entry("2026-03-10T00:00:00Z", notices=[dict(n)])
-    from diff_utils import day_changes
-    assert day_changes([e0, e1]) == []
+    from diff_utils import snapshot_changes
+    assert snapshot_changes([e0, e1]) == []
 
 
 # ======================================================================
@@ -410,23 +571,23 @@ def _loc_entry(captured_at: str, payload):
     return {"capturedAt": captured_at, "data": {"data": payload}}
 
 
-def test_location_day_changes_empty_history_produces_no_diffs():
-    from diff_utils import location_day_changes
-    assert location_day_changes([]) == []
-    assert location_day_changes([_loc_entry("2026-04-22T00:00:00Z", None)]) == []
+def test_location_snapshot_changes_empty_history_produces_no_diffs():
+    from diff_utils import location_snapshot_changes
+    assert location_snapshot_changes([]) == []
+    assert location_snapshot_changes([_loc_entry("2026-04-22T00:00:00Z", None)]) == []
 
 
-def test_location_day_changes_null_to_null_is_silent():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_null_to_null_is_silent():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", None),
         _loc_entry("2026-04-21T00:00:00Z", None),
     ]
-    assert location_day_changes(entries) == []
+    assert location_snapshot_changes(entries) == []
 
 
-def test_location_day_changes_null_to_populated_emits_assigned():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_null_to_populated_emits_assigned():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", None),
         _loc_entry("2026-04-21T00:00:00Z", {
@@ -435,7 +596,7 @@ def test_location_day_changes_null_to_populated_emits_assigned():
             },
         }),
     ]
-    changes = location_day_changes(entries)
+    changes = location_snapshot_changes(entries)
     assert len(changes) == 1
     c = changes[0]
     assert c["kind"] == "location_assigned"
@@ -444,8 +605,8 @@ def test_location_day_changes_null_to_populated_emits_assigned():
     assert c["scalars"]["subtype"] == {"from": None, "to": "147-C9"}
 
 
-def test_location_day_changes_populated_to_different_populated_emits_changed():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_populated_to_different_populated_emits_changed():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", {
             "receipt_details": {"form": "I-765", "location": "SCD", "subtype": "147-C9"},
@@ -454,28 +615,28 @@ def test_location_day_changes_populated_to_different_populated_emits_changed():
             "receipt_details": {"form": "I-765", "location": "NSC", "subtype": "147-C9"},
         }),
     ]
-    changes = location_day_changes(entries)
+    changes = location_snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "location_changed"
     assert changes[0]["scalars"] == {"location": {"from": "SCD", "to": "NSC"}}
 
 
-def test_location_day_changes_populated_to_null_emits_cleared():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_populated_to_null_emits_cleared():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", {
             "receipt_details": {"form": "I-765", "location": "SCD"},
         }),
         _loc_entry("2026-04-21T00:00:00Z", None),
     ]
-    changes = location_day_changes(entries)
+    changes = location_snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "location_cleared"
     assert changes[0]["source"] == "location"
 
 
-def test_location_day_changes_skips_same_payload_days():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_skips_same_payload_days():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", {
             "receipt_details": {"form": "I-765", "location": "SCD"},
@@ -484,12 +645,12 @@ def test_location_day_changes_skips_same_payload_days():
             "receipt_details": {"form": "I-765", "location": "SCD"},
         }),
     ]
-    assert location_day_changes(entries) == []
+    assert location_snapshot_changes(entries) == []
 
 
-def test_day_changes_case_source_tagged():
-    from diff_utils import day_changes
+def test_snapshot_changes_case_source_tagged():
+    from diff_utils import snapshot_changes
     e0 = _entry("2026-03-09T00:00:00Z")
     e1 = _entry("2026-03-10T00:00:00Z", closed=True)
-    out = day_changes([e0, e1])
+    out = snapshot_changes([e0, e1])
     assert out and out[0]["source"] == "case"
