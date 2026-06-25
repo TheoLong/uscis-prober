@@ -3336,26 +3336,32 @@ function renderStorageBar(data) {
 
   for (const cat of ordered) {
     const pct = shown > 0 ? (cat.bytes / shown) * 100 : 0;
+    const pctLabel = `${Math.round(pct)}%`;
+    const sizeLabel = formatBytes(cat.bytes);
     // Segment width is the category's share of the displayed total.
     // `flex: 0 0 X%` pins the basis so segments stack proportionally
     // and together fill the whole track.
     const seg = document.createElement("div");
-    seg.className = "storage-bar-seg";
+    seg.className = "storage-bar-seg events-tooltip";
     seg.dataset.key = cat.key;
     seg.style.flex = `0 0 ${pct}%`;
-    seg.title =
-      `${cat.label} — ${pct.toFixed(2)}% · ` +
-      `${formatBytes(cat.bytes)} (${cat.file_count} file${cat.file_count === 1 ? "" : "s"})`;
+    // Hover/tap shows the category's size via the shared body-level
+    // popup (instant + viewport-bounded, unlike a native title delay).
+    const tip =
+      `${cat.label} — ${sizeLabel} · ${pctLabel} ` +
+      `(${cat.file_count} file${cat.file_count === 1 ? "" : "s"})`;
+    seg.setAttribute("data-tooltip", tip);
+    seg.title = tip;
     track.appendChild(seg);
     if (labelsEl) {
       const lbl = document.createElement("div");
       lbl.className = "storage-bar-label";
       lbl.dataset.key = cat.key;
-      lbl.title = seg.title;
+      lbl.title = tip;
       lbl.innerHTML =
         `<span class="storage-bar-label-swatch" data-key="${cat.key}"></span>` +
         `<span class="storage-bar-label-name">${escapeHtml(cat.label)}</span> ` +
-        `<span class="storage-bar-label-pct">${pct.toFixed(2)}%</span>`;
+        `<span class="storage-bar-label-pct">${pctLabel}</span>`;
       labelsEl.appendChild(lbl);
     }
   }
