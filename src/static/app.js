@@ -2831,19 +2831,22 @@ function renderObservedEventCodes(c) {
   return section;
 }
 
-// Dynamic, count-aware link colors: evenly spaced hues so N links stay
-// maximally distinguishable no matter how many there are. For small N a
-// hand-tuned palette reads best; beyond it, spread hues by the golden angle
-// (137.5°) which avoids adjacent-hue collisions far better than even spacing.
+// Per-link colors: the Notion light-mode "Text" palette, in a deliberately
+// staggered order (red, blue, orange, green, purple, black, gray, …) so the
+// first few links — the common case — are maximally contrasting. Black and gray
+// are the highest-contrast neutrals on the light card, so they sit early rather
+// than at the tail. The blue (#337EA9, a steel blue) is intentionally a
+// DIFFERENT tone from the event pills' indigo blue (--accent #3a5cd8), so it
+// reads as its own color. Keyed by a STABLE sequence index (the link's position
+// in the engine's appearance-ordered output) — NOT render order or link
+// count — so an existing link keeps its color when a newer link is added.
+// Cycles if links exceed the palette length.
 const EVENT_LINK_PALETTE = [
-  "#e0566f", "#4353ff", "#1f9d55", "#d97706", "#7c3aed", "#0891b2",
-  "#db2777", "#65a30d", "#2563eb", "#ea580c",
+  "#D44C47", "#337EA9", "#D9730D", "#448361", "#9065B0",
+  "#37352F", "#787774", "#C14C8A", "#CB912F", "#9F6B53",
 ];
-function eventLinkColor(i, total) {
-  if (total <= EVENT_LINK_PALETTE.length) return EVENT_LINK_PALETTE[i];
-  // Golden-angle hue walk; fixed sat/light for consistent contrast on the card.
-  const hue = (i * 137.508) % 360;
-  return `hsl(${hue.toFixed(1)}, 70%, 48%)`;
+function eventLinkColor(seq) {
+  return EVENT_LINK_PALETTE[seq % EVENT_LINK_PALETTE.length];
 }
 
 // Draw a bracket connector from each re-emit row back to its origin row, in
@@ -2871,7 +2874,10 @@ function drawEventLinks(wrap, list, links) {
   };
 
   const drawable = links
-    .map((l) => ({ link: l, o: rowFor(l.originId), r: rowFor(l.reemitId) }))
+    // seq = stable index in the engine's (appearance-ordered) output, so a
+    // link's color is fixed by its position in that sequence and never shifts
+    // when a newer link is appended or an unmappable one is filtered out.
+    .map((l, seq) => ({ link: l, seq, o: rowFor(l.originId), r: rowFor(l.reemitId) }))
     .filter((d) => d.o && d.r)
     .map((d) => {
       const yReemit = midY(d.r);
@@ -2996,10 +3002,11 @@ function drawEventLinks(wrap, list, links) {
     return id;
   };
 
-  // Render in original (newest-first) order so colors stay stable per link.
-  drawable.forEach((d, i) => {
+  // Color comes from each link's stable seq, not this render index, so it's
+  // identity-stable across additions.
+  drawable.forEach((d) => {
     const laneX = railX + d.lane * laneGap;
-    const color = eventLinkColor(i, drawable.length);
+    const color = eventLinkColor(d.seq);
     const arrowId = ensureMarker(color);
     // Prong roots sit just past each row's own pill so the bracket touches its
     // events; the riser rides the assigned lane, clearing all spanned text.

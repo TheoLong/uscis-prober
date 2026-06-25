@@ -57,6 +57,19 @@ SCENARIOS = {
         mk("fta0a", "fta0c", "L7", 86), mk("fta1a", "fta1b", "L8", 19),
         mk("fta0b", "fta1c", "L9", 100),
     ],
+    # Color stress test: 14 links to show the 7-hue rainbow then its dissected
+    # second round (seq 0-6 = signature spaced colors, 7-13 = gap-filling).
+    # Pairs are arbitrary (every distinct origin/reemit combo) — this exercises
+    # the color sequence, not a realistic relationship shape.
+    "rainbow": [
+        mk("iaf", "fta0a", "C0", 5), mk("iaf", "fta0b", "C1", 5),
+        mk("iaf", "fta0c", "C2", 80), mk("iaf", "fta1a", "C3", 90),
+        mk("iaf", "fta1b", "C4", 100), mk("iaf", "fta1c", "C5", 110),
+        mk("fta0a", "fta0b", "C6", 0), mk("fta0a", "fta0c", "C7", 86),
+        mk("fta0a", "fta1a", "C8", 87), mk("fta0a", "fta1b", "C9", 95),
+        mk("fta0a", "fta1c", "C10", 100), mk("fta0b", "fta0c", "C11", 86),
+        mk("fta0b", "fta1a", "C12", 87), mk("fta0b", "fta1c", "C13", 100),
+    ],
     "clear": [],
 }
 
