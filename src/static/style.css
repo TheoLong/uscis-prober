@@ -982,7 +982,7 @@ main[hidden] { display: none; }
 .events-link-path {
   fill: none;
   stroke-width: 1.5;
-  opacity: 0.85;
+  opacity: 1;
   pointer-events: none;
   vector-effect: non-scaling-stroke;
 }
@@ -1021,7 +1021,6 @@ main[hidden] { display: none; }
 }
 .events-link-overlay .events-link-group:hover .events-link-path {
   stroke-width: 2.5;
-  opacity: 1;
 }
 
 /* ---------- system log view ----------

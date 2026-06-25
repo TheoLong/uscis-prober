@@ -59,8 +59,14 @@ def event_links(events: list[dict] | None) -> list[dict]:
 
     One link record per re-emit (a group of N members yields N-1 links, all
     pointing at the single origin). Groups with a single member produce no
-    link. Order is by the origin's eventTimestamp, then re-emit createdAt, so
-    output is deterministic.
+    link. Links are ordered by APPEARANCE TIME — the re-emit's
+    `createdAtTimestamp`, i.e. when USCIS wrote the row that made the link
+    detectable. This is the stable, monotonic order: the first link ever
+    observed stays first, and a newly-detected link always appends to the end,
+    so a consumer keying a color (or any per-link assignment) off the index
+    keeps that assignment consistent as new links appear. `eventTimestamp`
+    is NOT used for ordering — USCIS backdates it, which would let a new link
+    insert in the middle and reshuffle every later index.
     """
     groups: "OrderedDict[tuple, list[dict]]" = OrderedDict()
     for e in events or []:
@@ -91,7 +97,13 @@ def event_links(events: list[dict] | None) -> list[dict]:
                     origin.get("createdAtTimestamp"),
                     reemit.get("createdAtTimestamp"),
                 ),
+                # When USCIS wrote the re-emit row = when this link became
+                # detectable. This is the appearance-time ordering key below.
+                "appearedAt": reemit.get("createdAtTimestamp") or "",
             })
+    # Order by appearance time so the first-observed link is always index 0 and
+    # later links append without renumbering the earlier ones.
+    links.sort(key=lambda link: link["appearedAt"])
     return links
 
 

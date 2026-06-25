@@ -51,6 +51,45 @@ def test_origin_is_earliest_created_regardless_of_input_order():
     assert links[0]["reemitId"] == "reemit"
 
 
+def test_links_ordered_by_appearance_time():
+    # Color/index is assigned by order, so order MUST be appearance time (the
+    # re-emit's createdAtTimestamp), not the origin's eventTimestamp. Here the
+    # FTA0 link's origin is OLDER (eventTimestamp 03/10) but the link was
+    # detected LATER (re-emit written 06/24) than the FTA1 link (06/05). By
+    # appearance, FTA1 is index 0 and FTA0 is index 1.
+    events = [
+        # FTA1 pair — re-emit appeared 06/05 (earlier)
+        _ev("FTA1", "fta1_o", "2026-06-05T10:00:00.000Z", "2026-06-01T00:00:00.000Z"),
+        _ev("FTA1", "fta1_r", "2026-06-05T10:00:00.000Z", "2026-06-05T00:00:00.000Z"),
+        # FTA0 pair — older origin, but re-emit appeared 06/24 (later)
+        _ev("FTA0", "fta0_o", "2026-03-10T16:59:51.837Z", "2026-03-10T00:00:00.000Z"),
+        _ev("FTA0", "fta0_r", "2026-03-10T16:59:51.837Z", "2026-06-24T00:00:00.000Z"),
+    ]
+    links = event_links(events)
+    assert [l["reemitId"] for l in links] == ["fta1_r", "fta0_r"]
+
+
+def test_new_backdated_link_appends_not_inserts():
+    # A newly-detected link whose origin eventTimestamp is OLD (USCIS backdated)
+    # must still take the LAST index, not insert in the middle and renumber the
+    # existing links — otherwise an established link's color would change.
+    base = [
+        _ev("FTA1", "a_o", "2026-05-01T10:00:00.000Z", "2026-05-01T00:00:00.000Z"),
+        _ev("FTA1", "a_r", "2026-05-01T10:00:00.000Z", "2026-05-10T00:00:00.000Z"),
+    ]
+    first = event_links(base)
+    assert [l["reemitId"] for l in first] == ["a_r"]
+    # Now a second link surfaces with a backdated origin (eventTimestamp in
+    # March) but a re-emit written most recently.
+    later = base + [
+        _ev("FTA0", "b_o", "2026-03-01T10:00:00.000Z", "2026-03-01T00:00:00.000Z"),
+        _ev("FTA0", "b_r", "2026-03-01T10:00:00.000Z", "2026-06-01T00:00:00.000Z"),
+    ]
+    links = event_links(later)
+    # The original link keeps index 0; the new one appends at index 1.
+    assert [l["reemitId"] for l in links] == ["a_r", "b_r"]
+
+
 def test_millisecond_distinct_events_do_not_merge():
     # The 485 trap: three FTA0 rows, all eventDateTime 03/10. Two share the
     # exact eventTimestamp (.837 -> a real re-emit pair); the third sits 6ms
