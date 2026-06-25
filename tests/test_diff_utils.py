@@ -9,6 +9,8 @@ from diff_utils import (
     compute_change,
     day_changes,
     infer_stage,
+    location_snapshot_changes,
+    snapshot_changes,
     stage_progression,
     summarize_case,
 )
@@ -147,6 +149,83 @@ def test_day_changes_filters_out_unchanged_day_pairs():
     changes = day_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "decision"
+
+
+def test_snapshot_changes_does_not_collapse_same_day_transitions():
+    """The today's-bug regression: a silent update and a new event on the
+    SAME UTC day must surface as TWO separate change records, not collapse
+    into one. The old day-binning kept only the last capture of the day, so
+    the morning silent update vanished when an afternoon event landed."""
+    entries = [
+        # Yesterday's settled state.
+        _entry(
+            "2026-06-24T18:00:00Z",
+            updatedAt="2026-06-24",
+            updatedAtTimestamp="2026-06-24T18:00:00Z",
+            events=[{"eventCode": "FTA0", "eventId": "a"}],
+        ),
+        # Morning: updatedAt advanced, no new event yet -> silent_update.
+        _entry(
+            "2026-06-25T14:00:00Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T14:00:00Z",
+            events=[{"eventCode": "FTA0", "eventId": "a"}],
+        ),
+        # Afternoon, same UTC day: a new FTA1 event appears -> event.
+        _entry(
+            "2026-06-25T17:00:00Z",
+            updatedAt="2026-06-25",
+            updatedAtTimestamp="2026-06-25T17:00:00Z",
+            events=[
+                {"eventCode": "FTA0", "eventId": "a"},
+                {"eventCode": "FTA1", "eventId": "b"},
+            ],
+        ),
+    ]
+    changes = snapshot_changes(entries)
+    kinds = [c["kind"] for c in changes]
+    assert kinds == ["silent_update", "event"]
+    # Both anchored on the same calendar day but distinct capture timestamps.
+    assert changes[0]["to"] == "2026-06-25T14:00:00Z"
+    assert changes[1]["to"] == "2026-06-25T17:00:00Z"
+    # The event record carries the newly-added FTA1.
+    assert [e["eventCode"] for e in changes[1]["events"]["added"]] == ["FTA1"]
+
+
+def test_snapshot_changes_keeps_same_day_restamp_as_its_own_row():
+    """Same-day re-stamps are updates too — we do NOT collapse them. A bare
+    updatedAtTimestamp move within one day surfaces as its own record."""
+    entries = [
+        _entry(
+            "2026-03-10T15:00:00Z",
+            updatedAt="2026-03-10",
+            updatedAtTimestamp="2026-03-10T14:59:52Z",
+        ),
+        _entry(
+            "2026-03-10T17:00:00Z",
+            updatedAt="2026-03-10",
+            updatedAtTimestamp="2026-03-10T16:59:58Z",
+        ),
+    ]
+    changes = snapshot_changes(entries)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "same_day_refresh"
+
+
+def test_day_changes_is_snapshot_changes_alias():
+    """`day_changes` is retained as a backwards-compatible alias for
+    `snapshot_changes` — same object, no day-binning behaviour left."""
+    assert day_changes is snapshot_changes
+
+
+def test_snapshot_changes_orders_unsorted_captures():
+    """Captures arriving out of order are diffed in capturedAt order, so a
+    shuffled input still produces the correct chronological feed."""
+    a = _entry("2026-03-09T00:00:00Z")
+    b = _entry("2026-03-10T00:00:00Z", closed=True)
+    c = _entry("2026-03-11T00:00:00Z", actionRequired=True)
+    changes = snapshot_changes([c, a, b])  # shuffled
+    assert [ch["to"][:10] for ch in changes] == ["2026-03-10", "2026-03-11"]
 
 
 # -------- infer_stage / stage_progression ---------------------------------

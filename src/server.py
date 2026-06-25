@@ -41,8 +41,8 @@ from access_gate import configure as configure_access_gate
 from diff_utils import (
     EVENT_CODE_LABELS,
     bin_by_day,
-    day_changes,
-    location_day_changes,
+    location_snapshot_changes,
+    snapshot_changes,
     summarize_case,
 )
 from mailer import notify_update
@@ -532,8 +532,8 @@ def _all_update_records(config: dict | None = None) -> list[dict]:
         label = c["label"]
         receipt = c["id"]
         merged = _merge_changes(
-            day_changes(load_case_entries(label)),
-            location_day_changes(load_location_entries(label)),
+            snapshot_changes(load_case_entries(label)),
+            location_snapshot_changes(load_location_entries(label)),
         )
         for change in merged:
             detected_on = (change.get("to") or "")[:10]
@@ -541,7 +541,7 @@ def _all_update_records(config: dict | None = None) -> list[dict]:
             real_update_date = (change.get("scalars") or {}).get("updatedAt", {}).get("to")
             rec = dict(change)
             rec.update({
-                "id": f"{receipt}:{source}:{detected_on}",
+                "id": f"{receipt}:{source}:{change.get('to')}",
                 "caseLabel": label,
                 "receiptNumber": receipt,
                 "detectedOn": detected_on,
@@ -977,6 +977,18 @@ def _run_pull_subprocess_inner(
         else:
             logger.info("No new diffs — no email sent.")
 
+        # Run the diff engine against the just-appended snapshots and emit a
+        # `diff_recomputed` step. The diff feed is derived live on every API
+        # call, so this isn't required for correctness — it gives the
+        # operator a per-pull confirmation, right next to the pull that
+        # produced the new capture, that the engine walked the fresh data.
+        # The sys_log() inside folds into this pull's envelope (thread
+        # capture is still active here).
+        try:
+            _recompute_diffs_at_startup(load_config())
+        except Exception as _e:  # noqa: BLE001 — observability must never fail a pull
+            logger.exception("Post-pull diff recompute failed: %s", _e)
+
     # Snapshot the thread-captured server-process events.
     captured_steps = list(thread_captured_steps)
 
@@ -1315,7 +1327,9 @@ def api_case_history(label: str):
     entries = load_case_entries(label)
     days = bin_by_day(entries)
     location_entries = load_location_entries(label)
-    changes = _merge_changes(day_changes(entries), location_day_changes(location_entries))
+    changes = _merge_changes(
+        snapshot_changes(entries), location_snapshot_changes(location_entries)
+    )
     return jsonify(
         {
             "label": label,
@@ -1332,7 +1346,7 @@ def api_updates():
     """Flat feed of every diff across every configured case, newest first.
 
     Each record is enriched with:
-      - `id`            stable key `{receipt}:{source}:{toDate}` (dedup / email tracking)
+      - `id`            stable key `{receipt}:{source}:{toTimestamp}` (dedup / email tracking)
       - `caseLabel`     e.g. "I-485"
       - `receiptNumber`
       - `source`        "case" | "location" (which endpoint produced the diff)
@@ -1640,13 +1654,14 @@ def api_system_log_export():
 def api_system_log_recompute():
     """Force a fresh chronological diff recompute across every configured case.
 
-    Diffs are derived state — `day_changes()` runs live off the snapshot
+    Diffs are derived state — `snapshot_changes()` runs live off the snapshot
     JSONs on each API call and nothing is cached server-side, so this
     endpoint never *needs* to run for correctness. What it provides is
     observability on demand: it re-walks the full diff feed for every
     case and appends a single `diff_recomputed` event (per-case change
     counts) to the system log, the same routine the server runs at
-    startup. The operator can fire it after dropping in a backfilled
+    startup and after every pull. The operator can fire it after dropping
+    in a backfilled
     snapshot and confirm at a glance that the data flowed through.
 
     Returns the per-case stats payload that was logged so the UI can
@@ -2121,7 +2136,7 @@ def _recompute_diffs_at_startup(config: dict) -> dict:
 
     Rationale
     ---------
-    Diffs are *derived* state: `day_changes()` runs live off the snapshot
+    Diffs are *derived* state: `snapshot_changes()` runs live off the snapshot
     JSONs on every API call and nothing is cached server-side. So adding
     or replacing a snapshot file by hand is automatically picked up by
     the next page load — no restart is required for correctness.
@@ -2129,9 +2144,10 @@ def _recompute_diffs_at_startup(config: dict) -> dict:
     What an operator-driven restart *does* need is **observability**:
     proof that the new data made it through the pipeline. This helper
     walks the diff feed for every configured case and emits a single
-    `diff_recomputed` event carrying the per-case change counts. The
-    operator can open the system log after a restart and confirm at a
-    glance that the recompute happened against the current on-disk data.
+    `diff_recomputed` event carrying the per-case change counts. It runs
+    at startup and after every successful pull, and the operator can open
+    the system log and confirm at a glance that the recompute happened
+    against the current on-disk data.
 
     Failure is non-fatal — the live API path still works (and will
     surface the same error there). We emit `diff_recompute_failed` and
@@ -2148,8 +2164,8 @@ def _recompute_diffs_at_startup(config: dict) -> dict:
             label = c.get("label")
             if not label:
                 continue
-            case_changes = day_changes(load_case_entries(label))
-            loc_changes = location_day_changes(load_location_entries(label))
+            case_changes = snapshot_changes(load_case_entries(label))
+            loc_changes = location_snapshot_changes(load_location_entries(label))
             cases_summary.append({
                 "label": label,
                 "case_changes": len(case_changes),

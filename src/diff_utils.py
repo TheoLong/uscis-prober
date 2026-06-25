@@ -1,16 +1,20 @@
 # Copyright (C) 2026 the USCIS Prober contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Compute per-day differences between USCIS case captures.
+"""Compute differences between consecutive USCIS case captures.
 
-Day-binning rule: when multiple captures exist for a single calendar day
-(UTC), keep only the last one. The daily series is the chronological list
-of those "last of day" snapshots.
+Change extraction: every capture is diffed against the one immediately
+before it (ordered by `capturedAt`). For each pair we record which scalar
+flags flipped, which events/notices/documents were added or removed, and
+whether `updatedAt` advanced. Each change is then *classified* into a
+category (silent, event, notice, appointment, decision, status) so the UI
+can emphasise signal over noise.
 
-Change extraction: for each consecutive pair of day-binned snapshots,
-record which scalar flags flipped, which events/notices/documents were
-added or removed, and whether `updatedAt` advanced. Each change is then
-*classified* into a category (silent, event, notice, appointment,
-decision, status) so the UI can emphasise signal over noise.
+Captures are never collapsed: if USCIS touched a case several times in one
+calendar day, every transition surfaces as its own change record. The only
+pairs that produce no record are those where the payload was byte-identical
+(nothing moved). `bin_by_day` remains as a helper for day-oriented
+summaries (latest snapshot of a day, distinct-day counts) but is NOT used
+by the change feed.
 """
 
 from __future__ import annotations
@@ -213,7 +217,7 @@ def _diff_collection(
 
 
 def compute_change(prev: dict, curr: dict) -> dict:
-    """Describe what's different from `prev` to `curr` (both day-binned entries).
+    """Describe what's different from `prev` to `curr` (consecutive captures).
 
     Returns a dict with the shape the UI expects:
       {
@@ -291,7 +295,7 @@ def _unwrap_location_entry(entry: dict) -> dict | None:
 
 
 def _compute_location_change(prev: dict, curr: dict) -> dict | None:
-    """Diff two day-binned location snapshots. Returns None when unchanged.
+    """Diff two consecutive location captures. Returns None when unchanged.
 
     `kind` encodes the most specific signal:
       - `location_assigned`: prev was null, curr is populated.
@@ -351,33 +355,52 @@ def _compute_location_change(prev: dict, curr: dict) -> dict | None:
     }
 
 
-def location_day_changes(entries: list[dict]) -> list[dict]:
-    """Change feed for the location API: one entry per day-pair where the
-    `receipt_details` payload (or its null-vs-populated state) differs.
+def location_snapshot_changes(entries: list[dict]) -> list[dict]:
+    """Change feed for the location API: one entry per consecutive-capture
+    pair where the `receipt_details` payload (or its null-vs-populated
+    state) differs.
 
-    Parallel to `day_changes` but operates on location snapshots, which
-    carry a different envelope shape and a much smaller set of interesting
-    scalars. Each change record is tagged with `source="location"` so the
-    merged UI feed can style it distinctively.
+    Parallel to `snapshot_changes` but operates on location snapshots,
+    which carry a different envelope shape and a much smaller set of
+    interesting scalars. Each change record is tagged with
+    `source="location"` so the merged UI feed can style it distinctively.
+
+    Captures are diffed in `capturedAt` order with no day-binning — every
+    distinct location transition surfaces, even multiple within one day.
     """
-    days = bin_by_day(entries)
+    ordered = _sorted_by_capture(entries)
     feed: list[dict] = []
-    for prev, curr in zip(days, days[1:]):
+    for prev, curr in zip(ordered, ordered[1:]):
         change = _compute_location_change(prev, curr)
         if change is not None:
             feed.append(change)
     return feed
 
 
-def day_changes(entries: list[dict]) -> list[dict]:
-    """Full change feed: one entry per day-pair where something differed.
+# Backwards-compatible alias. The feed is no longer day-binned, but the old
+# name is kept so any out-of-tree caller keeps working.
+location_day_changes = location_snapshot_changes
 
-    Each item is enriched with a `kind` classification (see classify_change)
-    so the UI can label silent updates vs. new events vs. appointment moves.
+
+def _sorted_by_capture(entries: list[dict]) -> list[dict]:
+    """Captures in chronological order by `capturedAt` (stable, ascending)."""
+    return sorted(entries or [], key=lambda e: e.get("capturedAt", ""))
+
+
+def snapshot_changes(entries: list[dict]) -> list[dict]:
+    """Full change feed: one entry per consecutive-capture pair where
+    something differed.
+
+    Captures are diffed in `capturedAt` order with NO day-binning — every
+    transition USCIS produced surfaces as its own record, including several
+    within a single calendar day. The only pairs dropped are byte-identical
+    ones (nothing moved). Each item is enriched with a `kind` classification
+    (see classify_change) so the UI can label silent updates vs. new events
+    vs. appointment moves.
     """
-    days = bin_by_day(entries)
+    ordered = _sorted_by_capture(entries)
     feed: list[dict] = []
-    for prev, curr in zip(days, days[1:]):
+    for prev, curr in zip(ordered, ordered[1:]):
         change = compute_change(prev, curr)
         if not _has_any_diff(change):
             continue
@@ -385,6 +408,10 @@ def day_changes(entries: list[dict]) -> list[dict]:
         change["source"] = "case"
         feed.append(change)
     return feed
+
+
+# Backwards-compatible alias (see location_day_changes note above).
+day_changes = snapshot_changes
 
 
 def classify_change(change: dict) -> str:
@@ -477,7 +504,7 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
             seen.add(u)
             distinct_updated_at.append(u)
 
-    changes = day_changes(entries)
+    changes = snapshot_changes(entries)
     silent_update_count = sum(1 for c in changes if c.get("kind") == "silent_update")
     silent_ping_count = sum(1 for c in changes if c.get("kind") == "same_day_refresh")
 

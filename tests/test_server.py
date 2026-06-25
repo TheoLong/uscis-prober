@@ -149,9 +149,45 @@ def test_all_update_records_enriches_id(monkeypatch, tmp_path):
     ])
     records = server._all_update_records()
     assert len(records) == 1
-    assert records[0]["id"] == "IOE1:case:2026-03-10"
+    # ID keys on the full capturedAt timestamp so multiple transitions on the
+    # same calendar day stay distinct (each emails independently).
+    assert records[0]["id"] == "IOE1:case:2026-03-10T00:00:00Z"
     assert records[0]["caseLabel"] == "I-485"
     assert records[0]["detectedOn"] == "2026-03-10"
+
+
+def test_all_update_records_distinct_ids_for_same_day_transitions(monkeypatch, tmp_path):
+    """Two transitions on the SAME calendar day must get distinct IDs so the
+    notification dedup emails each one. This is the email-suppression half of
+    the today's-bug fix: a day-keyed ID collided, silently swallowing the
+    second email."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    _seed_log(data_dir, [
+        _entry("2026-06-24T18:00:00Z", updatedAt="2026-06-24",
+               events=[{"eventCode": "FTA0", "eventId": "a"}]),
+        # Morning silent update (updatedAt advances).
+        _entry("2026-06-25T14:00:00Z", updatedAt="2026-06-25",
+               events=[{"eventCode": "FTA0", "eventId": "a"}]),
+        # Afternoon event, same UTC day.
+        _entry("2026-06-25T17:00:00Z", updatedAt="2026-06-25",
+               events=[{"eventCode": "FTA0", "eventId": "a"},
+                       {"eventCode": "FTA1", "eventId": "b"}]),
+    ])
+    records = server._all_update_records()
+    ids = [r["id"] for r in records]
+    # Two distinct same-day records, distinct IDs — neither is dropped by dedup.
+    assert ids == [
+        "IOE1:case:2026-06-25T14:00:00Z",
+        "IOE1:case:2026-06-25T17:00:00Z",
+    ]
+    assert len(set(ids)) == 2
 
 
 # -------- startup diff recompute --------------------------------------
@@ -223,7 +259,7 @@ def test_recompute_diffs_at_startup_handles_empty_config(monkeypatch, tmp_path):
 
 
 def test_recompute_diffs_at_startup_swallows_errors_and_logs(monkeypatch, tmp_path):
-    """A crash inside day_changes() must not propagate — it would prevent
+    """A crash inside snapshot_changes() must not propagate — it would prevent
     the server from finishing startup. The error is logged and an empty
     payload is returned so callers can keep going."""
     import system_log
@@ -231,7 +267,7 @@ def test_recompute_diffs_at_startup_swallows_errors_and_logs(monkeypatch, tmp_pa
 
     def _boom(_entries):
         raise RuntimeError("synthetic diff explosion")
-    monkeypatch.setattr(server, "day_changes", _boom)
+    monkeypatch.setattr(server, "snapshot_changes", _boom)
 
     cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
     result = server._recompute_diffs_at_startup(cfg)
@@ -278,7 +314,7 @@ def test_api_system_log_recompute_reports_failure(client, monkeypatch):
 
     def _boom(_entries):
         raise RuntimeError("synthetic diff explosion")
-    monkeypatch.setattr(server, "day_changes", _boom)
+    monkeypatch.setattr(server, "snapshot_changes", _boom)
 
     r = client.post("/api/system-log/recompute")
     assert r.status_code == 200
@@ -1370,10 +1406,11 @@ def test_api_updates_tags_location_records(client, tmp_path):
     r = client.get("/api/updates")
     records = r.get_json()["updates"]
     ids = {rec["id"] for rec in records}
-    # Source is embedded in the ID so case + location detected on the same
-    # day stay distinct for email-notification deduping.
-    assert any(i.endswith(":location:2026-04-22") for i in ids)
-    assert any(i.endswith(":case:2026-04-21") for i in ids)
+    # Source is embedded in the ID so case + location transitions stay
+    # distinct for email-notification deduping. The ID now carries the full
+    # capturedAt timestamp so same-day transitions don't collide.
+    assert any(i.endswith(":location:2026-04-22T00:00:00Z") for i in ids)
+    assert any(i.endswith(":case:2026-04-21T00:00:00Z") for i in ids)
 
 
 def test_api_case_history_includes_location_entries(client, tmp_path):
@@ -1429,7 +1466,7 @@ def test_api_updates_returns_sorted_feed(client, tmp_path):
     assert body["updates"]
     rec = body["updates"][0]
     assert rec["caseLabel"] == "I-485"
-    assert rec["id"] == "IOE1:case:2026-03-10"
+    assert rec["id"] == "IOE1:case:2026-03-10T00:00:00Z"
 
 
 def test_api_pull_starts_new_pull(client, monkeypatch):
