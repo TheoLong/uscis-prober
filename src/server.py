@@ -1443,7 +1443,7 @@ def api_storage():
 
     Categories are disjoint and cover the full data/ tree plus the
     config / session files. Used by the System-tab storage chart, which
-    renders each category as a share of the total (no fixed quota).
+    renders each category as a share of the total.
     """
     # Walk collects every bucket; total_bytes uses ALL of them. Display
     # categories filter out `other` (sub-kilobyte flotsam from the data

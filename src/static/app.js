@@ -3306,11 +3306,9 @@ function renderStorageBar(data) {
   if (!track || !totalEl) return;
 
   const cats = (data.categories || []).filter(c => c.bytes > 0);
-  // There is no storage limit — usage stays tiny and is bounded by
-  // suppression, so the bar is a pure stacked breakdown. The
-  // denominator is the sum of the displayed categories (cases +
-  // System log), so the bar always fills the full track and each
-  // segment's percentage is its share of what's shown.
+  // Stacked breakdown: the denominator is the sum of the displayed
+  // categories, so the bar always fills the track and each segment is
+  // its share of the whole.
   const shown = cats.reduce((s, c) => s + c.bytes, 0);
 
   track.innerHTML = "";
@@ -3318,10 +3316,8 @@ function renderStorageBar(data) {
 
   totalEl.textContent = formatBytes(shown);
 
-  // Display order matches the main case list (config order: I-485,
-  // I-765, I-131), then "System log" last. Cases are the primary
-  // data; system log grows with retained traces, so the right-hand
-  // position makes its growth easy to eyeball.
+  // Cases first, in the same order as the main case list; system log
+  // last.
   const caseOrder = new Map();
   (state.cases || []).forEach((c, i) => caseOrder.set(c.label, i));
   const ordered = [...cats].sort((a, b) => {
@@ -3338,15 +3334,13 @@ function renderStorageBar(data) {
     const pct = shown > 0 ? (cat.bytes / shown) * 100 : 0;
     const pctLabel = `${Math.round(pct)}%`;
     const sizeLabel = formatBytes(cat.bytes);
-    // Segment width is the category's share of the displayed total.
     // `flex: 0 0 X%` pins the basis so segments stack proportionally
-    // and together fill the whole track.
+    // and together fill the track.
     const seg = document.createElement("div");
     seg.className = "storage-bar-seg events-tooltip";
     seg.dataset.key = cat.key;
     seg.style.flex = `0 0 ${pct}%`;
-    // Hover/tap shows the category's size via the shared body-level
-    // popup (instant + viewport-bounded, unlike a native title delay).
+    // Hover/tap shows the size via the shared body-level popup.
     const tip =
       `${cat.label} — ${sizeLabel} · ${pctLabel} ` +
       `(${cat.file_count} file${cat.file_count === 1 ? "" : "s"})`;
