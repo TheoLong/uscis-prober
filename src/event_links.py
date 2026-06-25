@@ -59,8 +59,14 @@ def event_links(events: list[dict] | None) -> list[dict]:
 
     One link record per re-emit (a group of N members yields N-1 links, all
     pointing at the single origin). Groups with a single member produce no
-    link. Order is by the origin's eventTimestamp, then re-emit createdAt, so
-    output is deterministic.
+    link. Links are ordered by APPEARANCE TIME — the re-emit's
+    `createdAtTimestamp`, i.e. when USCIS wrote the row that made the link
+    detectable. This is the stable, monotonic order: the first link ever
+    observed stays first, and a newly-detected link always appends to the end,
+    so a consumer keying a color (or any per-link assignment) off the index
+    keeps that assignment consistent as new links appear. `eventTimestamp`
+    is NOT used for ordering — USCIS backdates it, which would let a new link
+    insert in the middle and reshuffle every later index.
     """
     groups: "OrderedDict[tuple, list[dict]]" = OrderedDict()
     for e in events or []:
@@ -74,14 +80,18 @@ def event_links(events: list[dict] | None) -> list[dict]:
             continue
         groups.setdefault(k, []).append(e)
 
-    links: list[dict] = []
+    links: list[tuple[str, dict]] = []
     for (code, ts), members in groups.items():
         if len(members) < 2:
             continue
         members = sorted(members, key=lambda m: m.get("createdAtTimestamp") or "")
         origin = members[0]
         for reemit in members[1:]:
-            links.append({
+            # The re-emit's write time is when this link became detectable —
+            # the appearance-time sort key (kept out of the link record so the
+            # API response carries only the link's own fields).
+            appeared_at = reemit.get("createdAtTimestamp") or ""
+            links.append((appeared_at, {
                 "kind": "reemit",
                 "eventCode": code,
                 "eventTimestamp": ts,
@@ -91,8 +101,11 @@ def event_links(events: list[dict] | None) -> list[dict]:
                     origin.get("createdAtTimestamp"),
                     reemit.get("createdAtTimestamp"),
                 ),
-            })
-    return links
+            }))
+    # Order by appearance time so the first-observed link is always index 0 and
+    # later links append without renumbering the earlier ones.
+    links.sort(key=lambda pair: pair[0])
+    return [link for _appeared_at, link in links]
 
 
 def _days_apart(origin_iso: str | None, reemit_iso: str | None) -> int | None:
