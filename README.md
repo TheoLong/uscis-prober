@@ -295,8 +295,7 @@ Fill in `config.json`:
   },
   "pull_hours": [0, 6, 10, 14, 18],
   "retry": 2,
-  "retry_wait_seconds": 180,
-  "storage_limit_mb": 256
+  "retry_wait_seconds": 180
 }
 ```
 
@@ -310,7 +309,6 @@ Fill in `config.json`:
 | `pull_hours` | yes | Automatic-pull schedule: non-empty array of integer hours (0–23, 24h America/New_York). Normalised to sorted unique values. Starter `[0, 6, 10, 14, 18]` pulls five times daily, weighted toward US daytime hours. No default — must be set. |
 | `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). Start with `2`. Only auth failures retry; timeouts and config errors do not. |
 | `retry_wait_seconds` | yes | Wait between retry attempts, in seconds (int, ≥0). `180` is a good default — long enough for a transient anti-bot block to clear. |
-| `storage_limit_mb` | yes | Disk budget across `data/` + session/config files. Storage bar in the System tab tracks it; one alert email fires when crossed. Legal range 10–102400 (MB). |
 | `auth.optional_access_code` | no | Recommended when deployed remotely. When non-empty, dashboard requires this code to view. |
 | `auth.notification_email` | no | Override recipient for diff-update emails. Defaults to `uscis_mfa_email`. |
 | `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace (useful for verifying capture against a green pull). Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
@@ -647,13 +645,12 @@ One file. Gitignored. Minimum viable shape:
   },
   "pull_hours": [0, 6, 10, 14, 18],
   "retry": 2,
-  "retry_wait_seconds": 180,
-  "storage_limit_mb": 256
+  "retry_wait_seconds": 180
 }
 ```
 
 Required keys: `cases`, `auth` (with all four credential fields),
-`retry`, `retry_wait_seconds`, `storage_limit_mb`. Optional runtime
+`retry`, `retry_wait_seconds`, `pull_hours`. Optional runtime
 fields — `trace_successful_pulls` (bool), `optional_access_code`,
 `notification_email` — default sensibly when absent.
 

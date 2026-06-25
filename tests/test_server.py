@@ -425,7 +425,7 @@ def test_run_pull_subprocess_skips_if_already_running(monkeypatch):
 def test_run_pull_subprocess_success_flags_ok(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -447,7 +447,6 @@ def test_run_pull_subprocess_success_with_new_diffs_notifies(monkeypatch, tmp_pa
     cfg_path.write_text(json.dumps({
         "cases": [{"id": "IOE1", "label": "I-485"}],
         "retry": 0, "retry_wait_seconds": 0,
-        "storage_limit_mb": 256,
     }))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
@@ -472,7 +471,7 @@ def test_run_pull_subprocess_success_with_new_diffs_notifies(monkeypatch, tmp_pa
 def test_run_pull_subprocess_failure_sets_error(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -489,7 +488,7 @@ def test_run_pull_subprocess_failure_sets_error(monkeypatch, tmp_path):
 def test_run_pull_subprocess_timeout_recorded(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -506,7 +505,7 @@ def test_run_pull_subprocess_timeout_recorded(monkeypatch, tmp_path):
 def test_run_pull_subprocess_crash_recorded(monkeypatch, tmp_path):
     data_dir = tmp_path / "data"; data_dir.mkdir()
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0, "storage_limit_mb": 256}))
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
     monkeypatch.setattr(server, "DATA_DIR", data_dir)
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_pull_state", server.PullState())
@@ -627,43 +626,7 @@ def test_load_pull_hours_template_value_is_valid():
     assert server.load_pull_hours(example) == (0, 6, 10, 14, 18)
 
 
-# -------- storage_limit_mb + trace_successful_pulls config --------------
-
-def test_load_storage_limit_defaults_when_missing():
-    """Optional — missing returns the default 256 MB."""
-    b = server.load_storage_limit_bytes({"retry": 1, "retry_wait_seconds": 10})
-    assert b == 256 * 1024 * 1024
-
-
-def test_load_storage_limit_parses_mb_to_bytes():
-    b = server.load_storage_limit_bytes({"storage_limit_mb": 512})
-    assert b == 512 * 1024 * 1024
-
-
-def test_load_storage_limit_legacy_gb_key_still_works():
-    """Backward compat — older configs that still ship `storage_limit_gb`
-    are silently converted to MB so a deployed VM doesn't break on the
-    rename. Once both keys exist, `_mb` wins."""
-    b = server.load_storage_limit_bytes({"storage_limit_gb": 1.0})
-    assert b == 1024 * 1024 * 1024
-    # New key wins when both present.
-    b = server.load_storage_limit_bytes(
-        {"storage_limit_gb": 1.0, "storage_limit_mb": 512},
-    )
-    assert b == 512 * 1024 * 1024
-
-
-def test_load_storage_limit_rejects_out_of_range():
-    with pytest.raises(server.ConfigError):
-        server.load_storage_limit_bytes({"storage_limit_mb": 0})
-    with pytest.raises(server.ConfigError):
-        server.load_storage_limit_bytes({"storage_limit_mb": 999_999})
-
-
-def test_load_storage_limit_rejects_non_numeric():
-    with pytest.raises(server.ConfigError):
-        server.load_storage_limit_bytes({"storage_limit_mb": "lots"})
-
+# -------- trace_successful_pulls config --------------------------------
 
 def test_load_trace_successful_pulls_defaults_false_when_missing():
     """Optional field — missing = false. Traces are only written on
@@ -696,12 +659,11 @@ def test_api_storage_categorises_data_dir(client, monkeypatch, tmp_path):
     (data_dir / "full_traces" / "trace1" / "01_after_goto.html.gz").write_bytes(b"x" * 1200)
     (data_dir / "full_traces" / "trace1" / "01_after_goto.png").write_bytes(b"x" * 2000)
 
-    # Extend the existing client's config with required storage key.
+    # Extend the existing client's config.
     cfg_path = tmp_path / "config.json"
     cfg = json.loads(cfg_path.read_text())
     cfg.update({
         "retry": 1, "retry_wait_seconds": 10,
-        "storage_limit_mb": server.STORAGE_MIN_MB,  # minimum legal value
     })
     cfg_path.write_text(json.dumps(cfg))
 
@@ -723,73 +685,6 @@ def test_api_storage_categorises_data_dir(client, monkeypatch, tmp_path):
     assert "config" not in keys
     assert "other" not in keys
     assert body["total_bytes"] > 0
-    assert body["limit_bytes"] == int(server.STORAGE_MIN_MB * 1024 * 1024)
-
-
-def test_api_storage_reports_limit_exceeded(client, monkeypatch, tmp_path):
-    data_dir = tmp_path / "data"
-    (data_dir / "big_case.json").write_bytes(b"x" * 100_000)
-    cfg_path = tmp_path / "config.json"
-    cfg = json.loads(cfg_path.read_text())
-    # 50 KB limit — easily tripped by our 100 KB seed.
-    cfg.update({
-        "retry": 1, "retry_wait_seconds": 10,
-        # storage_limit_mb must be >= STORAGE_MIN_MB; pin to the floor.
-        "storage_limit_mb": server.STORAGE_MIN_MB,
-    })
-    cfg_path.write_text(json.dumps(cfg))
-
-    r = client.get("/api/storage")
-    assert r.status_code == 200
-    body = r.get_json()
-    # 100 KB < STORAGE_MIN_MB (= 10 MB); so limit is NOT exceeded here.
-    # Flip: make the seed file MUCH bigger than the limit.
-    (data_dir / "big_case.json").write_bytes(b"x" * (20 * 1024 * 1024))  # 20 MB
-    r = client.get("/api/storage")
-    body = r.get_json()
-    assert body["limit_exceeded"] is True
-    assert body["limit_ratio"] > 1.0
-
-
-# -------- storage-limit alert + dedup ----------------------------------
-
-def test_storage_limit_check_emits_and_dedups(monkeypatch, tmp_path):
-    data_dir = tmp_path / "data"; data_dir.mkdir()
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({
-        "cases": [],
-        "retry": 0, "retry_wait_seconds": 0,
-        "storage_limit_mb": server.STORAGE_MIN_MB,  # 10 MB
-    }))
-    monkeypatch.setattr(server, "DATA_DIR", data_dir)
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    # Disable email path — we only care about dedup + event emission.
-    monkeypatch.setattr(server, "_send_storage_alert_email", lambda *a, **kw: None)
-
-    # Seed a file big enough to trip the limit (20 MB > 10 MB).
-    (data_dir / "big_case.json").write_bytes(b"x" * int(0.02 * 1024**3))
-
-    # First run: should alert.
-    steps1 = server._check_storage_limit_and_alert()
-    events1 = [s["event"] for s in steps1]
-    assert "storage_limit_exceeded" in events1
-
-    # Second run while still over: must NOT re-alert.
-    steps2 = server._check_storage_limit_and_alert()
-    events2 = [s["event"] for s in steps2]
-    assert "storage_limit_exceeded" not in events2
-
-    # Shrink well below rearm threshold (< 90 % of limit).
-    (data_dir / "big_case.json").unlink()
-    steps3 = server._check_storage_limit_and_alert()
-    events3 = [s["event"] for s in steps3]
-    assert "storage_alert_rearmed" in events3
-
-    # Grow over again: re-alerts.
-    (data_dir / "big_case.json").write_bytes(b"x" * int(0.02 * 1024**3))
-    steps4 = server._check_storage_limit_and_alert()
-    events4 = [s["event"] for s in steps4]
-    assert "storage_limit_exceeded" in events4
 
 
 # -------- /api/debug-mode + /api/auth-trace --------------------------
@@ -803,7 +698,6 @@ def _write_full_cfg(cfg_path, enabled=False):
         },
         "cases": [],
         "retry": 1, "retry_wait_seconds": 10,
-        "storage_limit_mb": 256,
         "trace_successful_pulls": enabled,
     }))
 
@@ -897,7 +791,6 @@ def _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0.0):
         "cases": [],
         "retry": retry,
         "retry_wait_seconds": retry_wait_seconds,
-        "storage_limit_mb": 256,
     }))
 
 
@@ -1878,70 +1771,6 @@ def test_main_server_run_failure_logs_and_reraises(monkeypatch, tmp_path):
             server.main()
 
 
-# -------- _send_storage_alert_email -----------------------------------
-
-def test_send_storage_alert_email_noop_when_config_load_fails(monkeypatch, tmp_path):
-    """If load_config raises, the email path short-circuits without
-    propagating (storage event already written to log is authoritative)."""
-    monkeypatch.setattr(server, "load_config",
-                        MagicMock(side_effect=RuntimeError("nope")))
-    # Must not raise.
-    server._send_storage_alert_email(
-        total_bytes=2 * 1024**3, limit_bytes=1 * 1024**3, categories=[],
-    )
-
-
-def test_send_storage_alert_email_noop_when_creds_missing(monkeypatch, tmp_path):
-    """Missing MFA credentials → no-op log warning, no exception."""
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    server._send_storage_alert_email(
-        total_bytes=2 * 1024**3, limit_bytes=1 * 1024**3, categories=[],
-    )
-
-
-def test_send_storage_alert_email_builds_and_sends(monkeypatch, tmp_path):
-    """Happy path: creds present → mailer.send_email called with a
-    composed subject/body reporting total, limit, over-by, and per-
-    category breakdown in both plain + html."""
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({
-        "auth": {
-            "uscis_mfa_email": "u@example.com",
-            "uscis_mfa_app_password": "pw",
-            "notification_email": "n@example.com",
-        },
-        "cases": [],
-    }))
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-
-    captured = {}
-    import mailer as _mailer
-    def _send(**kw):
-        captured.update(kw)
-    monkeypatch.setattr(_mailer, "send_email", _send)
-
-    categories = [
-        {"key": "case_485", "label": "I-485", "bytes": 5 * 1024**2,
-         "file_count": 7},
-        {"key": "system_log", "label": "System log", "bytes": 800 * 1024,
-         "file_count": 2},
-    ]
-    server._send_storage_alert_email(
-        total_bytes=int(1.2 * 1024**3),
-        limit_bytes=int(1.0 * 1024**3),
-        categories=categories,
-    )
-    assert captured["to"] == "n@example.com"
-    assert "Storage" in captured["subject"]
-    assert "I-485" in captured["plain"]
-    assert "I-485" in captured["html"]
-    assert "over by" in captured["plain"]
-    # Human-readable sizes embedded in both renderings.
-    assert "GB" in captured["subject"] or "MB" in captured["subject"]
-
-
 # -------- /api/mfa-trace/<dir>/summary --------------------------------
 
 def _seed_trace(data_dir: Path, dir_name: str = "t1") -> Path:
@@ -2202,26 +2031,6 @@ def test_latest_location_info_returns_unwrapped_when_known_field_present():
     assert out == {"form": "I-765"}
 
 
-def test_storage_alert_email_human_size_bytes_branch(monkeypatch, tmp_path):
-    """Totals under 1KB fall through to `NNN B` (line 659)."""
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({
-        "auth": {"uscis_mfa_email": "u@e", "uscis_mfa_app_password": "pw",
-                 "notification_email": "n@e"},
-        "cases": [],
-    }))
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    captured = {}
-    import mailer as _mailer
-    monkeypatch.setattr(_mailer, "send_email",
-                        lambda **kw: captured.update(kw))
-    # Use small byte values so the GB/MB/KB branches all fall through.
-    server._send_storage_alert_email(
-        total_bytes=42, limit_bytes=50, categories=[],
-    )
-    assert "42 B" in captured["plain"]
-
-
 def test_api_full_trace_path_escape_blocked(client, tmp_path, monkeypatch):
     """Even when the outer `_is_safe_name_part` gate passes, an attempt
     to resolve to a path outside of full_traces/ returns path_escape."""
@@ -2288,14 +2097,6 @@ def test_extract_email_part_single_part_charset_fallback(monkeypatch):
     assert out is not None
 
 
-def test_load_storage_limit_bytes_rejects_non_numeric_legacy_gb():
-    """The legacy `storage_limit_gb` key still raises a clear error
-    when the value isn't numeric — backward-compat path keeps the
-    diagnostic surface."""
-    with pytest.raises(server.ConfigError, match="not numeric"):
-        server.load_storage_limit_bytes({"storage_limit_gb": "banana"})
-
-
 def test_load_retry_policy_config_error_surfaces_as_pull_step(monkeypatch, tmp_path):
     """When load_retry_policy raises ConfigError, the inner pull runner
     emits pull_config_error and returns an envelope whose steps include
@@ -2323,19 +2124,6 @@ def test_load_retry_policy_config_error_surfaces_as_pull_step(monkeypatch, tmp_p
     assert any(
         s.get("event") == "pull_config_error" for s in envelope["steps"]
     )
-
-
-def test_api_storage_config_error_returns_500(client, tmp_path):
-    """Out-of-range storage_limit_mb → /api/storage returns 500
-    with ConfigError message (covers the early-return error path
-    in api_storage)."""
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({
-        "auth": {}, "cases": [], "storage_limit_mb": 999_999,
-    }))
-    r = client.get("/api/storage")
-    assert r.status_code == 500
-    assert "storage_limit_mb" in r.get_json()["error"]
 
 
 def test_api_debug_mode_get_config_error_returns_500(client, tmp_path):
@@ -2400,21 +2188,6 @@ def test_api_mfa_trace_email_rejects_bad_uid(client, tmp_path):
     assert r.get_json()["error"] == "invalid_path"
 
 
-def test_collect_storage_categories_buckets_storage_alert_state(
-    monkeypatch, tmp_path,
-):
-    """`.storage_alert_state.json` rolls into System log, not Other
-    (lines 1633-1635)."""
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    (data_dir / ".storage_alert_state.json").write_text('{"alerted_at":"x"}')
-    monkeypatch.setattr(server, "DATA_DIR", data_dir)
-    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
-    cats = {c["key"]: c for c in server._collect_storage_categories()}
-    assert "system_log" in cats
-    assert cats["system_log"]["bytes"] > 0
-
-
 def test_collect_storage_categories_buckets_session_state(
     monkeypatch, tmp_path,
 ):
@@ -2428,46 +2201,6 @@ def test_collect_storage_categories_buckets_session_state(
     monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
     cats = {c["key"]: c for c in server._collect_storage_categories()}
     assert "system_log" in cats
-
-
-def test_check_storage_limit_config_invalid_emits_skip(monkeypatch, tmp_path):
-    """When load_storage_limit_bytes raises ConfigError (e.g.
-    out-of-range value), the check emits `storage_limit_check_skipped`
-    and returns instead of crashing the pull post-condition path."""
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"storage_limit_mb": 999_999}))
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    steps = server._check_storage_limit_and_alert()
-    assert any(
-        s.get("event") == "storage_limit_check_skipped" for s in steps
-    )
-
-
-def test_send_storage_alert_email_swallows_mailer_failure(monkeypatch, tmp_path):
-    """mailer.send_email raising → alert step records storage_alert_email_failed,
-    does not propagate (lines 619-621 via _check_storage_limit)."""
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({
-        "auth": {
-            "uscis_mfa_email": "u@example.com",
-            "uscis_mfa_app_password": "pw",
-        },
-        "cases": [], "storage_limit_mb": server.STORAGE_MIN_MB,
-    }))
-    data_dir = tmp_path / "data"; data_dir.mkdir()
-    # Seed storage over the limit.
-    (data_dir / "big.json").write_bytes(b"x" * int(0.02 * 1024**3))
-    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
-    monkeypatch.setattr(server, "DATA_DIR", data_dir)
-
-    import mailer as _mailer
-    monkeypatch.setattr(
-        _mailer, "send_email",
-        MagicMock(side_effect=RuntimeError("smtp down")),
-    )
-    steps = server._check_storage_limit_and_alert()
-    event_types = [s["event"] for s in steps]
-    assert "storage_alert_email_failed" in event_types
 
 
 def test_extract_plain_body_decode_failure_falls_back(monkeypatch):

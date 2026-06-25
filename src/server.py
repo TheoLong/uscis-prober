@@ -183,56 +183,6 @@ def load_retry_policy(config: dict | None = None) -> RetryPolicy:
     return RetryPolicy(retry=clamped_retry, retry_wait_seconds=clamped_wait)
 
 
-# Storage quota. Specified in MB; clamped to [10, 102400] MB
-# (10 MB lower bound prevents "immediately over quota" on every pull
-# while still allowing tight limits; 100 GB upper bound is generous).
-# Default is 256 MB — fits years of snapshot history for typical
-# 3-cases-3x-daily usage with plenty of headroom for traces.
-STORAGE_MIN_MB = 10
-STORAGE_MAX_MB = 100 * 1024
-STORAGE_DEFAULT_MB = 256
-
-
-def load_storage_limit_bytes(config: dict | None = None) -> int:
-    """Read `storage_limit_mb` from config.json and return bytes.
-
-    Optional — defaults to STORAGE_DEFAULT_MB (256) when absent.
-    Present-but-invalid values still raise ConfigError so typos
-    surface at load time. Used by the live storage bar
-    (/api/storage) and the post-pull storage-quota check.
-
-    Backward compat: legacy configs that still carry
-    `storage_limit_gb` are honoured (silently converted to MB) so
-    older deployments keep working without an immediate config edit.
-    """
-    if config is None:
-        config = load_config()
-    # Legacy GB key still supported — convert to MB at load time.
-    if "storage_limit_gb" in config and "storage_limit_mb" not in config:
-        try:
-            gb = float(config["storage_limit_gb"])
-        except (TypeError, ValueError):
-            raise ConfigError(
-                f"config.storage_limit_gb={config['storage_limit_gb']!r}"
-                f" is not numeric."
-            )
-        raw = gb * 1024
-    else:
-        raw = config.get("storage_limit_mb", STORAGE_DEFAULT_MB)
-    try:
-        mb = float(raw)
-    except (TypeError, ValueError):
-        raise ConfigError(
-            f"config.storage_limit_mb={raw!r} is not numeric."
-        )
-    if mb < STORAGE_MIN_MB or mb > STORAGE_MAX_MB:
-        raise ConfigError(
-            f"config.storage_limit_mb={mb} out of range "
-            f"[{STORAGE_MIN_MB}, {STORAGE_MAX_MB}]."
-        )
-    return int(mb * 1024 * 1024)
-
-
 def load_trace_successful_pulls(config: dict | None = None) -> bool:
     """Read `trace_successful_pulls` (bool) from config.json.
 
@@ -608,210 +558,6 @@ def _update_ids(records: list[dict]) -> set[str]:
 def _notify_recipient(auth: dict) -> str | None:
     """Who to email. Prefer an explicit `auth.notify_email`, else the verification mailbox."""
     return auth.get("notification_email") or auth.get("uscis_mfa_email")
-
-
-# Storage-alert dedup state — small sidecar file so we don't emit
-# duplicate `storage_limit_exceeded` events (and send duplicate
-# emails) on every pull while usage remains above the limit. Once
-# usage drops back below 90 % of the limit the dedup is re-armed.
-#
-# The path is computed lazily (not captured at import time) so
-# tests that monkeypatch DATA_DIR redirect the dedup state too,
-# and so a CI runner without a seeded data/ dir doesn't silently
-# fail the state write and re-fire the alert.
-STORAGE_REARM_RATIO = 0.9
-
-
-def _storage_alert_state_path() -> Path:
-    return DATA_DIR / ".storage_alert_state.json"
-
-
-def _read_storage_alert_state() -> dict:
-    try:
-        path = _storage_alert_state_path()
-        if path.exists():
-            return json.loads(path.read_text())
-    except Exception as e:  # pragma: no cover — defensive
-        logger.warning("storage_alert_state read failed: %s", e)
-    return {}
-
-
-def _write_storage_alert_state(state: dict) -> None:
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        path = _storage_alert_state_path()
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state))
-        os.replace(tmp, path)
-    except Exception as e:  # pragma: no cover — best-effort
-        logger.warning("storage_alert_state write failed: %s", e)
-
-
-def _check_storage_limit_and_alert() -> list[dict]:
-    """Post-pull storage-quota check.
-
-    Compares total bytes (via /api/storage's same collector) against
-    `storage_limit_mb`. If over and we haven't already alerted for
-    this crossing, emits `storage_limit_exceeded` (error) and sends
-    an email.
-
-    De-dup rule: once alerted we don't alert again until usage drops
-    below STORAGE_REARM_RATIO × limit. This means a hovering-around-
-    the-line configuration doesn't spam. The state is persisted to
-    `data/.storage_alert_state.json` so it survives restarts.
-
-    Returns a list of sys_log step dicts (empty when no alert fired)
-    so the caller can fold them into the pull envelope.
-    """
-    steps: list[dict] = []
-    try:
-        limit_bytes = load_storage_limit_bytes()
-    except ConfigError as e:
-        steps.append({
-            "ts": _now_iso(), "event": "storage_limit_check_skipped",
-            "level": "warning", "source": "server",
-            "reason": "config_missing",
-            "error": str(e),
-        })
-        return steps
-
-    categories = _collect_storage_categories()
-    total = sum(c["bytes"] for c in categories)
-
-    state = _read_storage_alert_state()
-    already_alerted = bool(state.get("alerted_at"))
-    rearm_threshold = int(limit_bytes * STORAGE_REARM_RATIO)
-
-    if total <= limit_bytes:
-        # Under limit. Clear the dedup state if we've dropped far
-        # enough below so the next breach triggers a fresh alert.
-        if already_alerted and total < rearm_threshold:
-            _write_storage_alert_state({})
-            steps.append({
-                "ts": _now_iso(),
-                "event": "storage_alert_rearmed",
-                "level": "info", "source": "server",
-                "total_bytes": total,
-                "limit_bytes": limit_bytes,
-                "rearm_threshold": rearm_threshold,
-            })
-        return steps
-
-    # Over limit. Emit event + email once per crossing.
-    if already_alerted:
-        return steps  # Still over but we've already told the operator.
-
-    sys_log(
-        "storage_limit_exceeded",
-        level="error", source="server",
-        total_bytes=total,
-        limit_bytes=limit_bytes,
-        over_by_bytes=total - limit_bytes,
-        categories=[{"key": c["key"], "bytes": c["bytes"]}
-                    for c in categories],
-    )
-    # Record a step so the pull envelope surfaces the crossing.
-    steps.append({
-        "ts": _now_iso(), "event": "storage_limit_exceeded",
-        "level": "error", "source": "server",
-        "total_bytes": total, "limit_bytes": limit_bytes,
-    })
-
-    # Try to email the operator.
-    try:
-        _send_storage_alert_email(total, limit_bytes, categories)
-        steps.append({
-            "ts": _now_iso(), "event": "storage_alert_email_sent",
-            "level": "info", "source": "server",
-        })
-    except Exception as e:
-        logger.exception("Failed to send storage-limit alert email: %s", e)
-        steps.append({
-            "ts": _now_iso(), "event": "storage_alert_email_failed",
-            "level": "warning", "source": "server",
-            "error": f"{type(e).__name__}: {e}"[:200],
-        })
-
-    _write_storage_alert_state({
-        "alerted_at": _now_iso(),
-        "alerted_bytes": total,
-        "limit_bytes": limit_bytes,
-    })
-    return steps
-
-
-def _send_storage_alert_email(
-    total_bytes: int, limit_bytes: int, categories: list[dict],
-) -> None:
-    """Email the operator that storage has crossed its configured
-    limit. Uses the same recipient / SMTP path as the diff-update
-    emails. Missing credentials fall back to a no-op with a warning —
-    the storage event in the log is still authoritative."""
-    try:
-        cfg = load_config()
-    except Exception as e:
-        logger.warning("Storage alert: config load failed (%s)", e)
-        return
-    auth = cfg.get("auth") or {}
-    uscis_mfa_email = auth.get("uscis_mfa_email")
-    pw = auth.get("uscis_mfa_app_password")
-    recipient = _notify_recipient(auth)
-    if not (uscis_mfa_email and pw and recipient):
-        logger.warning("Storage alert: missing auth creds; skipping email.")
-        return
-
-    def _human(b: int) -> str:
-        for unit, size in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
-            if b >= size:
-                return f"{b/size:.2f} {unit}"
-        return f"{b} B"
-
-    subject = (
-        f"[USCIS Tracker] Storage limit reached — "
-        f"{_human(total_bytes)} of {_human(limit_bytes)}"
-    )
-    rows_plain = "\n".join(
-        f"  {c['label']:<24} {_human(c['bytes']):>10}  ({c['file_count']} files)"
-        for c in categories
-    )
-    rows_html = "".join(
-        f"<tr><td>{c['label']}</td>"
-        f"<td style='text-align:right'>{_human(c['bytes'])}</td>"
-        f"<td style='text-align:right;color:#888'>{c['file_count']} files</td></tr>"
-        for c in categories
-    )
-    plain = (
-        f"USCIS Case Prober: storage usage has crossed the configured "
-        f"limit.\n\n"
-        f"Total: {_human(total_bytes)}\n"
-        f"Limit: {_human(limit_bytes)} "
-        f"(over by {_human(total_bytes - limit_bytes)})\n\n"
-        f"Breakdown:\n{rows_plain}\n\n"
-        f"Open the dashboard and clear the System log, or raise "
-        f"`storage_limit_mb` in config.json."
-    )
-    html = (
-        f"<h3>USCIS Case Prober — storage limit reached</h3>"
-        f"<p><strong>Total</strong>: {_human(total_bytes)}<br>"
-        f"<strong>Limit</strong>: {_human(limit_bytes)} "
-        f"(over by {_human(total_bytes - limit_bytes)})</p>"
-        f"<table style='border-collapse:collapse'>"
-        f"<thead><tr><th>Category</th><th>Size</th><th>Files</th></tr>"
-        f"</thead><tbody>{rows_html}</tbody></table>"
-        f"<p style='color:#888'>Open the dashboard and clear the "
-        f"System log, or raise <code>storage_limit_mb</code> in "
-        f"config.json.</p>"
-    )
-
-    from mailer import send_email  # local to keep module start-up cheap
-    send_email(
-        uscis_mfa_email=uscis_mfa_email,
-        uscis_mfa_app_password=pw,
-        to=recipient,
-        subject=subject,
-        plain=plain,
-        html=html,
-    )
 
 
 def _send_notifications_for_new(new_records: list[dict]) -> list[dict]:
@@ -1230,19 +976,6 @@ def _run_pull_subprocess_inner(
             steps.extend(_send_notifications_for_new(new_records))
         else:
             logger.info("No new diffs — no email sent.")
-
-    # Post-pull storage-quota check. Runs on every pull (success or
-    # failure) because the bulk of the growth is per-pull snapshots
-    # + per-failure traces, both of which need to be bounded.
-    try:
-        steps.extend(_check_storage_limit_and_alert())
-    except Exception as e:
-        logger.exception("storage-limit check crashed: %s", e)
-        steps.append({
-            "ts": _now_iso(), "event": "storage_limit_check_crashed",
-            "level": "warning", "source": "server",
-            "error": f"{type(e).__name__}: {e}"[:200],
-        })
 
     # Snapshot the thread-captured server-process events.
     captured_steps = list(thread_captured_steps)
@@ -1698,44 +1431,29 @@ MAX_SYSLOG_PAGE_SIZE = 500
 
 @app.route("/api/storage")
 def api_storage():
-    """Return a per-category breakdown of disk usage under data/ plus
-    the configured storage limit.
+    """Return a per-category breakdown of disk usage under data/.
 
     Response shape:
       {
-        "total_bytes":      <int>,
-        "limit_bytes":      <int>,
-        "limit_exceeded":   <bool>,
-        "limit_ratio":      <float>,   # 0.0-1.0+ (can exceed 1 when over)
+        "total_bytes": <int>,
         "categories": [
           {"key": str, "label": str, "bytes": int, "file_count": int}
         ]
       }
 
     Categories are disjoint and cover the full data/ tree plus the
-    config / session files. Used by both the topbar storage chart and
-    the post-pull limit check.
+    config / session files. Used by the System-tab storage chart, which
+    renders each category as a share of the total (no fixed quota).
     """
-    try:
-        limit_bytes = load_storage_limit_bytes()
-    except ConfigError as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-    # Walk collects every bucket; total_bytes uses ALL of them so
-    # quota checks are accurate. Display categories filter out
-    # `other` (sub-kilobyte flotsam from the data dir walk — stale
-    # tmp files, .DS_Store, etc) since those add visual noise
-    # without conveying useful information.
+    # Walk collects every bucket; total_bytes uses ALL of them. Display
+    # categories filter out `other` (sub-kilobyte flotsam from the data
+    # dir walk — stale tmp files, .DS_Store, etc) since those add visual
+    # noise without conveying useful information.
     categories_all = _collect_storage_categories()
     total = sum(c["bytes"] for c in categories_all)
     display = [c for c in categories_all if c["key"] != "other"]
-    limit_exceeded = total > limit_bytes
-    ratio = (total / limit_bytes) if limit_bytes > 0 else 0.0
     return jsonify({
         "total_bytes": total,
-        "limit_bytes": limit_bytes,
-        "limit_exceeded": limit_exceeded,
-        "limit_ratio": ratio,
         "categories": display,
     })
 
@@ -1779,18 +1497,14 @@ def _collect_storage_categories() -> list[dict]:
                 size = _safe_size(full)
                 top = rel.parts[0] if rel.parts else ""
                 # System-log bucket is the aggregate of every
-                # diagnostics artefact (the event log itself, full
-                # traces, storage-alert dedup state). Rationale:
-                # these are the things Clear log wipes; grouping
-                # them matches operator mental model.
+                # diagnostics artefact (the event log itself and full
+                # traces). Rationale: these are the things Clear log
+                # wipes; grouping them matches operator mental model.
                 if top == "full_traces":
                     _bump("system_log", "System log", size)
                     continue
                 if not rel.parts:
                     if name == "system_log.json":
-                        _bump("system_log", "System log", size)
-                        continue
-                    if name == ".storage_alert_state.json":
                         _bump("system_log", "System log", size)
                         continue
                     m = _CASE_FILE_RE.match(name)
@@ -1812,8 +1526,7 @@ def _collect_storage_categories() -> list[dict]:
         _bump("other", "Other", _safe_size(CONFIG_PATH))
 
     # Return every non-empty bucket. Filtering for display (hiding
-    # the always-tiny `other` bucket) happens in the API handler —
-    # the storage-limit check still needs to see every byte.
+    # the always-tiny `other` bucket) happens in the API handler.
     categories = [b for b in buckets.values() if b["bytes"] > 0]
     categories.sort(key=lambda c: c["bytes"], reverse=True)
     return categories

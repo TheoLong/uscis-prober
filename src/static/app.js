@@ -1510,14 +1510,6 @@ const SYSTEMLOG_EVENT_INFO = {
   // Widened case-fetch net
   case_fetch_unexpected_error: { tone: "bad",   label: "Case fetch — unexpected error" },
 
-  // Storage quota / alerting (added 2026-04-24)
-  storage_limit_exceeded:      { tone: "bad",   label: "Storage limit exceeded" },
-  storage_alert_rearmed:       { tone: "info",  label: "Storage alert re-armed" },
-  storage_alert_email_sent:    { tone: "info",  label: "Storage alert email sent" },
-  storage_alert_email_failed:  { tone: "warn",  label: "Storage alert email failed" },
-  storage_limit_check_skipped: { tone: "warn",  label: "Storage limit check skipped" },
-  storage_limit_check_crashed: { tone: "warn",  label: "Storage limit check crashed" },
-
   // Config + debug mode
   pull_config_error:           { tone: "bad",   label: "Pull config error" },
 
@@ -3311,52 +3303,48 @@ function renderStorageBar(data) {
   const track = document.getElementById("storage-bar-track");
   const labelsEl = document.getElementById("storage-bar-labels");
   const totalEl = document.getElementById("storage-bar-total");
-  const limitEl = document.getElementById("storage-bar-limit");
-  if (!track || !totalEl || !limitEl) return;
-  const total = data.total_bytes || 0;
-  const limit = data.limit_bytes || 1;
-  const ratio = limit > 0 ? total / limit : 0;
+  if (!track || !totalEl) return;
+
+  const cats = (data.categories || []).filter(c => c.bytes > 0);
+  // There is no storage limit — usage stays tiny and is bounded by
+  // suppression, so the bar is a pure stacked breakdown. The
+  // denominator is the sum of the displayed categories (cases +
+  // System log), so the bar always fills the full track and each
+  // segment's percentage is its share of what's shown.
+  const shown = cats.reduce((s, c) => s + c.bytes, 0);
 
   track.innerHTML = "";
   if (labelsEl) labelsEl.innerHTML = "";
-  track.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
-  track.classList.toggle("critical", ratio >= 0.9);
-  totalEl.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
-  totalEl.classList.toggle("critical", ratio >= 0.9);
 
-  totalEl.textContent = formatBytes(total);
-  limitEl.textContent = `/ ${formatBytes(limit)} limit · ${(ratio * 100).toFixed(1)}%`;
+  totalEl.textContent = formatBytes(shown);
 
-  // Both the bar AND the label percentages are measured against
-  // the configured limit. Bar fill naturally reflects "how much of
-  // the limit is gone"; each segment's width is its own share of
-  // that limit, NOT its share of what's currently used. Matching
-  // denominators keep the eye's proportion sense in sync with the
-  // numbers next to each swatch.
-  //
-  // Display order: cases first (I-485, I-765, I-131, …) sorted by
-  // size, then "System log" last. Cases are the primary data;
-  // system log grows with retained traces, so giving it the
-  // right-hand position makes its growth easy to eyeball.
-  const ordered = [...(data.categories || [])].sort((a, b) => {
+  // Display order matches the main case list (config order: I-485,
+  // I-765, I-131), then "System log" last. Cases are the primary
+  // data; system log grows with retained traces, so the right-hand
+  // position makes its growth easy to eyeball.
+  const caseOrder = new Map();
+  (state.cases || []).forEach((c, i) => caseOrder.set(c.label, i));
+  const ordered = [...cats].sort((a, b) => {
     const aSys = a.key === "system_log";
     const bSys = b.key === "system_log";
     if (aSys !== bSys) return aSys ? 1 : -1;
+    const ai = caseOrder.has(a.label) ? caseOrder.get(a.label) : Infinity;
+    const bi = caseOrder.has(b.label) ? caseOrder.get(b.label) : Infinity;
+    if (ai !== bi) return ai - bi;
     return b.bytes - a.bytes;
   });
+
   for (const cat of ordered) {
-    if (!cat.bytes) continue;
-    const limitPct = limit > 0 ? (cat.bytes / limit) * 100 : 0;
-    // Segment — fixed width in % of track, NOT flex-grow. Using
-    // `flex: 0 0 X%` pins the basis at X% and locks grow/shrink so
-    // segments never expand to fill leftover space. Track remainder
-    // stays empty (the grey background shows through).
+    const pct = shown > 0 ? (cat.bytes / shown) * 100 : 0;
+    // Segment width is the category's share of the displayed total.
+    // `flex: 0 0 X%` pins the basis so segments stack proportionally
+    // and together fill the whole track.
     const seg = document.createElement("div");
     seg.className = "storage-bar-seg";
     seg.dataset.key = cat.key;
-    seg.style.flex = `0 0 ${limitPct}%`;
+    seg.style.flex = `0 0 ${pct}%`;
     seg.title =
-      `${cat.label} — ${limitPct.toFixed(2)}% of limit · ` +
+      `${cat.label} — ${pct.toFixed(2)}% · ` +
       `${formatBytes(cat.bytes)} (${cat.file_count} file${cat.file_count === 1 ? "" : "s"})`;
     track.appendChild(seg);
     if (labelsEl) {
@@ -3367,7 +3355,7 @@ function renderStorageBar(data) {
       lbl.innerHTML =
         `<span class="storage-bar-label-swatch" data-key="${cat.key}"></span>` +
         `<span class="storage-bar-label-name">${escapeHtml(cat.label)}</span> ` +
-        `<span class="storage-bar-label-pct">${limitPct.toFixed(2)}%</span>`;
+        `<span class="storage-bar-label-pct">${pct.toFixed(2)}%</span>`;
       labelsEl.appendChild(lbl);
     }
   }
@@ -3377,14 +3365,9 @@ function renderSyslogStorageLine(data) {
   const el = document.getElementById("syslog-storage-line");
   if (!el) return;
   // The system_log bucket already aggregates events + traces +
-  // session state — one number tells the whole story. Tinted when
-  // the bucket alone would warn/critical against the limit.
+  // session state — one number tells the whole story.
   const sl = (data.categories || []).find(c => c.key === "system_log");
   const slBytes = sl ? sl.bytes : 0;
-  const limit = data.limit_bytes || 1;
-  const ratio = limit > 0 ? slBytes / limit : 0;
-  el.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
-  el.classList.toggle("critical", ratio >= 0.9);
   // Title above already says "System log", so drop the prefix here —
   // the subtitle just shows the size value followed by the standard
   // separator dot.

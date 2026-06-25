@@ -2346,7 +2346,6 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 }
 .storage-bar-title { font-weight: 600; color: var(--text, #111827); }
 .storage-bar-total { font-variant-numeric: tabular-nums; }
-.storage-bar-limit { color: var(--muted, #6b7280); }
 .storage-bar-track {
   display: flex;
   width: 100%;
@@ -2436,11 +2435,6 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   color: var(--muted, #6b7280);
   font-variant-numeric: tabular-nums;
 }
-/* Critical state — box-shadow ring around the whole bar when close to or over limit. */
-.storage-bar-track.warn     { box-shadow: inset 0 0 0 1px #f59e0b; }
-.storage-bar-track.critical { box-shadow: inset 0 0 0 1px #ef4444; }
-.storage-bar-total.warn     { color: #b45309; }
-.storage-bar-total.critical { color: #b91c1c; font-weight: 600; }
 .storage-bar-seg[title] { cursor: help; }
 
 /* Compact storage indicator inside the System log tab header so
@@ -2452,8 +2446,6 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   margin-left: 12px;
   font-variant-numeric: tabular-nums;
 }
-.syslog-storage-line.warn { color: #b45309; }
-.syslog-storage-line.critical { color: #b91c1c; font-weight: 600; }
 
 /* Linkified trace artefacts (screenshot paths, trace_dir, etc.) */
 .syslog-detail-link {
