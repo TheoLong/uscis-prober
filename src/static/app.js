@@ -469,6 +469,12 @@ function setView(view) {
   document.getElementById("case-list").hidden = view !== "cases";
   document.getElementById("updates-feed").hidden = view !== "updates";
   document.getElementById("systemlog-feed").hidden = view !== "systemlog";
+  if (view === "cases") {
+    // Cards were hidden (zero-width) while another view was active, so any
+    // event-link overlay that tried to draw in the meantime bailed out.
+    // Redraw from the stashed links now that the wraps have width again.
+    redrawAllEventLinks();
+  }
   if (view === "updates") renderUpdates();
   if (view === "systemlog") {
     loadAndRenderSystemLog();
@@ -2870,9 +2876,13 @@ function eventLinkColor(seq) {
 // same level and only genuinely-conflicting ones step out. Each link has its
 // own color; the leg pointing at the origin carries an arrowhead.
 function drawEventLinks(wrap, list, links) {
-  wrap.querySelectorAll(".events-link-overlay").forEach((el) => el.remove());
   const wrapBox = wrap.getBoundingClientRect();
+  // Bail BEFORE removing the existing overlay: a zero-width box means the wrap
+  // is hidden (off-view nav tab), and measuring would collapse every edge to
+  // (0,0). Leave any existing overlay intact and wait for a redraw once the
+  // container is visible again (setView / resize both re-invoke this).
   if (!wrapBox.width) return;
+  wrap.querySelectorAll(".events-link-overlay").forEach((el) => el.remove());
 
   const rowFor = (eid) =>
     list.querySelector(`.events-item[data-event-id="${CSS.escape(eid)}"]`);
@@ -3092,19 +3102,26 @@ function drawEventLinks(wrap, list, links) {
 // Redraw every visible event-link overlay on resize so brackets track the
 // rows as the layout reflows. Wired once.
 let _eventLinkResizeWired = false;
+// Redraw every timeline's event-link overlay from its stashed link list.
+// Used after a wrap regains width (returning to the Cases view) and on
+// window resize. Debounced through a single rAF so a burst of resize events
+// (drag-resize) coalesces into one redraw after layout settles.
+let _eventLinkRedrawRaf = null;
+function redrawAllEventLinks() {
+  if (_eventLinkRedrawRaf) cancelAnimationFrame(_eventLinkRedrawRaf);
+  _eventLinkRedrawRaf = requestAnimationFrame(() => {
+    _eventLinkRedrawRaf = null;
+    document.querySelectorAll(".events-list-wrap").forEach((wrap) => {
+      const list = wrap.querySelector(".events-list");
+      if (wrap._eventLinks && list) drawEventLinks(wrap, list, wrap._eventLinks);
+    });
+  });
+}
+
 function wireEventLinkResize() {
   if (_eventLinkResizeWired) return;
   _eventLinkResizeWired = true;
-  let raf = null;
-  window.addEventListener("resize", () => {
-    if (raf) cancelAnimationFrame(raf);
-    raf = requestAnimationFrame(() => {
-      document.querySelectorAll(".events-list-wrap").forEach((wrap) => {
-        const list = wrap.querySelector(".events-list");
-        if (wrap._eventLinks && list) drawEventLinks(wrap, list, wrap._eventLinks);
-      });
-    });
-  });
+  window.addEventListener("resize", redrawAllEventLinks);
 }
 
 // Format an ISO timestamp for an event/silent-update hover tooltip in the
