@@ -1,0 +1,948 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Tests for the system event log.
+
+Covers the log module in isolation (writes, reads, rotation, atomic
+writes, failure tolerance) and then cross-checks that production call
+sites actually emit the events we expect them to emit.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+import system_log
+
+
+@pytest.fixture(autouse=True)
+def _redirect_log(monkeypatch, tmp_path):
+    """Every test gets a fresh log file in a tmp dir."""
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    system_log.clear()
+    yield
+
+
+# -------- basic write / read -----------------------------------------
+
+def test_log_writes_an_entry_with_required_fields():
+    system_log.log("server_startup", schedule_hours=[7, 14, 20])
+    entries = system_log.read_all()
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["event"] == "server_startup"
+    assert e["level"] == "info"
+    assert e["ts"].endswith("Z")
+    assert isinstance(e["pid"], int)
+    assert e["schedule_hours"] == [7, 14, 20]
+
+
+def test_log_accepts_explicit_level():
+    system_log.log("pull_failed", level="error", exit_code=1)
+    e = system_log.read_all()[0]
+    assert e["level"] == "error"
+    assert e["exit_code"] == 1
+
+
+def test_log_records_source_when_given():
+    system_log.log("pull_started", source="scheduler")
+    assert system_log.read_all()[0]["source"] == "scheduler"
+
+
+def test_log_omits_source_when_not_given():
+    system_log.log("anything")
+    assert "source" not in system_log.read_all()[0]
+
+
+# -------- edge cases / robustness -----------------------------------
+
+def test_log_coerces_non_json_values_with_repr():
+    class Weird:
+        def __repr__(self): return "<weird thing>"
+    system_log.log("strange_event", payload=Weird())
+    e = system_log.read_all()[0]
+    assert e["payload"] == "<weird thing>"
+
+
+def test_read_all_with_limit():
+    for i in range(10):
+        system_log.log("tick", i=i)
+    last_three = system_log.read_all(limit=3)
+    assert [e["i"] for e in last_three] == [7, 8, 9]
+
+
+def test_read_all_returns_empty_before_any_writes():
+    assert system_log.read_all() == []
+
+
+def test_clear_wipes_existing_file():
+    system_log.log("e1")
+    assert system_log.LOG_PATH.exists()
+    system_log.clear()
+    assert not system_log.LOG_PATH.exists()
+    assert system_log.read_all() == []
+
+
+def test_log_tolerates_missing_file(monkeypatch, tmp_path):
+    # Point to a nested dir that doesn't exist yet; log() must create it.
+    nested = tmp_path / "nested" / "deeper" / "system_log.json"
+    monkeypatch.setattr(system_log, "LOG_PATH", nested)
+    system_log.log("boot")
+    assert nested.exists()
+
+
+def test_log_recovers_from_corrupt_file(monkeypatch, tmp_path):
+    path = tmp_path / "system_log.json"
+    path.write_text("not valid json {")
+    monkeypatch.setattr(system_log, "LOG_PATH", path)
+    system_log.log("recovery_event")
+    # After writing once, the file is overwritten to a valid JSON array.
+    data = json.loads(path.read_text())
+    assert isinstance(data, list)
+    assert data[0]["event"] == "recovery_event"
+
+
+# -------- rotation --------------------------------------------------
+
+def test_log_rotates_when_exceeding_max(monkeypatch):
+    monkeypatch.setattr(system_log, "MAX_ENTRIES", 5)
+    for i in range(12):
+        system_log.log("tick", i=i)
+    entries = system_log.read_all()
+    assert len(entries) == 5
+    # Rotation drops OLDEST entries; newest are retained.
+    assert [e["i"] for e in entries] == [7, 8, 9, 10, 11]
+
+
+# -------- server-side integration: sys_log fires from the right places
+
+def _stub_server_config(monkeypatch, tmp_path, cases=None, auth=None):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir(exist_ok=True)
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "cases": cases if cases is not None else [],
+        "auth": auth or {},
+        "retry": 0,
+        "retry_wait_seconds": 0,
+    }))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+    return server
+
+
+# After the v2 refactor, one pull produces exactly one `pull` entry in the
+# system log, with all its internal steps attached as `steps[]`. The tests
+# below check both the top-level envelope (event, level, summary, trigger,
+# duration, exit_code) and the step stream inside.
+
+def test_run_pull_subprocess_emits_one_consolidated_entry_on_success(
+    monkeypatch, tmp_path,
+):
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=0, stdout="", stderr="")
+    with patch.object(subprocess, "run", return_value=proc), \
+         patch.object(server, "_send_notifications_for_new", return_value=[]):
+        server._run_pull_subprocess(trigger="manual")
+
+    entries = system_log.read_all()
+    pull_entries = [e for e in entries if e["event"] == "pull"]
+    assert len(pull_entries) == 1, f"expected exactly 1 `pull` row, got {len(pull_entries)}"
+    pull = pull_entries[0]
+    assert pull["level"] == "info"
+    assert pull["trigger"] == "manual"
+    assert pull["exit_code"] == 0
+    assert pull["timed_out"] is False
+    assert "steps" in pull and isinstance(pull["steps"], list)
+    assert "summary" in pull and isinstance(pull["summary"], dict)
+    # Legacy events must NOT appear any more — the consolidated entry is it.
+    for legacy in ("pull_started", "pull_finished", "pull_triggered_manually",
+                   "pull_failed", "pull_timeout", "pull_crashed"):
+        assert legacy not in {e["event"] for e in entries}, \
+            f"legacy event {legacy!r} still being emitted"
+
+
+def test_run_pull_subprocess_nonzero_exit_flips_level_to_error(monkeypatch, tmp_path):
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=1, stdout="", stderr="Missing auth keys\nother log line")
+    with patch.object(subprocess, "run", return_value=proc):
+        server._run_pull_subprocess(trigger="scheduled")
+
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    assert pull["level"] == "error"
+    assert pull["exit_code"] == 1
+    assert pull["trigger"] == "scheduled"
+    # Non-zero exit appends a `subprocess_exit_nonzero` step with stderr tail.
+    subp_step = [s for s in pull["steps"] if s["event"] == "subprocess_exit_nonzero"]
+    assert len(subp_step) == 1
+    assert subp_step[0]["exit_code"] == 1
+    assert "Missing auth keys" in subp_step[0]["stderr_tail"][0]
+
+
+def test_run_pull_subprocess_timeout_embeds_step(monkeypatch, tmp_path):
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+    from unittest.mock import patch
+    with patch.object(
+        subprocess, "run",
+        side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1),
+    ):
+        server._run_pull_subprocess()
+
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    assert pull["level"] == "error"
+    assert pull["timed_out"] is True
+    assert any(s["event"] == "subprocess_timeout" for s in pull["steps"])
+
+
+def test_run_pull_subprocess_crash_embeds_step(monkeypatch, tmp_path):
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+    from unittest.mock import patch
+    with patch.object(subprocess, "run", side_effect=RuntimeError("boom")):
+        server._run_pull_subprocess()
+
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    assert pull["level"] == "error"
+    crash_steps = [s for s in pull["steps"] if s["event"] == "subprocess_crashed"]
+    assert len(crash_steps) == 1
+    assert crash_steps[0]["error"] == "boom"
+
+
+def test_run_pull_subprocess_logs_skip_when_already_running(monkeypatch, tmp_path):
+    import server
+    monkeypatch.setattr(server, "_pull_state", server.PullState(running=True))
+    server._run_pull_subprocess(trigger="manual")
+    # Skip is still a standalone flat event — no subprocess ran, no steps
+    # to aggregate. This row is deliberately kept tiny for that reason.
+    events = [e for e in system_log.read_all()]
+    skip_rows = [e for e in events if e["event"] == "pull_skipped_already_running"]
+    assert len(skip_rows) == 1
+    assert skip_rows[0]["trigger"] == "manual"
+    # No `pull` envelope row for a skipped trigger.
+    assert not any(e["event"] == "pull" for e in events)
+
+
+def test_subprocess_steps_parsed_from_jsonl_stderr(monkeypatch, tmp_path):
+    # Child processes emit events as prefixed JSONL lines on stderr; the
+    # parent parses those into `steps[]`. This test drives that path end-
+    # to-end with a synthetic stderr stream — no real Playwright launch.
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+    synthetic_stderr = "\n".join([
+        "2026-04-22 22:25:01 INFO session_fetch: Fetching I-485 ...",   # python logging noise
+        f"{system_log._JSONL_PREFIX}"
+        + json.dumps({"ts": "2026-04-22T22:25:01Z", "event": "case_fetch_start",
+                      "level": "info", "source": "session_fetch",
+                      "label": "I-485", "receipt": "IOE1"}),
+        f"{system_log._JSONL_PREFIX}"
+        + json.dumps({"ts": "2026-04-22T22:25:02Z", "event": "case_snapshot_appended",
+                      "level": "info", "source": "session_fetch",
+                      "file": "485_case.json"}),
+    ])
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=0, stdout="", stderr=synthetic_stderr)
+    with patch.object(subprocess, "run", return_value=proc), \
+         patch.object(server, "_send_notifications_for_new", return_value=[]):
+        server._run_pull_subprocess()
+
+    pull = [e for e in system_log.read_all() if e["event"] == "pull"][0]
+    step_events = [s["event"] for s in pull["steps"]]
+    assert "case_fetch_start" in step_events
+    assert "case_snapshot_appended" in step_events
+    # Summary derived from counting events in the step stream.
+    assert pull["summary"]["case_snapshots"] == 1
+    # Python-logging noise is NOT silently added as a step; only structured
+    # JSONL lines become steps.
+    assert all(s["event"] != "Fetching" for s in pull["steps"])
+
+
+def test_send_notifications_returns_skip_step_when_auth_missing(monkeypatch, tmp_path):
+    import server
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    # The function now RETURNS step dicts instead of writing to system_log.
+    steps = server._send_notifications_for_new([{"id": "1", "kind": "event"}])
+    assert len(steps) == 1
+    assert steps[0]["event"] == "notify_skipped"
+    assert steps[0]["reason"] == "auth_missing"
+    assert steps[0]["count"] == 1
+    # Nothing written to the log as a side effect.
+    assert system_log.read_all() == []
+
+
+def test_send_notifications_returns_sent_step_per_record(monkeypatch, tmp_path):
+    import server
+    from unittest.mock import patch
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_mfa_email": "u@example.com",
+            "uscis_mfa_app_password": "pw",
+        }
+    }))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    with patch.object(server, "notify_update"):
+        steps = server._send_notifications_for_new([
+            {"id": "IOE1:case:2026-03-10", "kind": "event"},
+            {"id": "IOE2:case:2026-03-10", "kind": "silent_update"},
+        ])
+    assert {s["event"] for s in steps} == {"notify_sent"}
+    assert {s["record_id"] for s in steps} == {
+        "IOE1:case:2026-03-10", "IOE2:case:2026-03-10",
+    }
+
+
+def test_send_notifications_returns_failure_step_per_error(monkeypatch, tmp_path):
+    import server
+    from unittest.mock import patch
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_mfa_email": "u@example.com",
+            "uscis_mfa_app_password": "pw",
+        }
+    }))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    with patch.object(server, "notify_update", side_effect=RuntimeError("smtp down")):
+        steps = server._send_notifications_for_new([{"id": "1", "kind": "event"}])
+    failed = [s for s in steps if s["event"] == "notify_failed"]
+    assert len(failed) == 1
+    assert failed[0]["level"] == "error"
+    assert failed[0]["record_id"] == "1"
+
+
+def test_jsonl_stderr_mode_writes_to_stderr_not_file(
+    monkeypatch, tmp_path, capsys,
+):
+    # When USCIS_LOG_JSONL_STDERR=1, log() must write nothing to LOG_PATH
+    # and instead emit one prefixed JSON line to stderr.
+    monkeypatch.setenv("USCIS_LOG_JSONL_STDERR", "1")
+    # Point LOG_PATH somewhere the test owns so we can assert nothing landed.
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "should_stay_empty.json")
+
+    system_log.log("case_fetch_start", source="session_fetch", receipt="IOE1")
+
+    assert not (tmp_path / "should_stay_empty.json").exists(), \
+        "JSONL mode must not touch the on-disk log"
+    captured = capsys.readouterr().err
+    lines = [ln for ln in captured.splitlines() if ln.startswith(system_log._JSONL_PREFIX)]
+    assert len(lines) == 1
+    parsed = system_log.parse_jsonl_stderr_line(lines[0])
+    assert parsed is not None
+    assert parsed["event"] == "case_fetch_start"
+    assert parsed["source"] == "session_fetch"
+    assert parsed["receipt"] == "IOE1"
+
+
+def test_pull_absorbs_server_process_events_via_capture(monkeypatch, tmp_path):
+    # This is the point of thread-local capture: any sys_log() fired on
+    # the pull thread (e.g. smtp_* from mailer, snapshot_log_* from a
+    # file read) must fold into the pull envelope's steps[] rather than
+    # leak to disk as a separate flat row.
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+
+    from unittest.mock import MagicMock, patch
+    proc = MagicMock(returncode=0, stdout="", stderr="")
+
+    def _fake_notify(new_records):
+        # Simulate the mailer firing its own sys_log on the way up —
+        # this is how smtp_auth_failed / smtp_send_failed reach here in
+        # real life. With thread-local capture they should be absorbed.
+        import system_log
+        system_log.log("smtp_auth_failed", level="error", source="mailer",
+                       host="smtp.gmail.com", port=587, smtp_code=535,
+                       user="u@example.com",
+                       error="SMTPAuthenticationError: 535 ...")
+        return [{
+            "ts": "2026-04-22T20:00:00Z",
+            "event": "notify_failed", "level": "error", "source": "server",
+            "record_id": "IOE1:case:2026-04-22",
+            "error": "SMTPAuthenticationError",
+        }]
+
+    monkeypatch.setattr(server, "_send_notifications_for_new", _fake_notify)
+
+    # Force "new records" so _send_notifications_for_new actually runs.
+    calls = {"n": 0}
+    def _records(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return []  # before-pull snapshot
+        return [{"id": "IOE1:case:2026-04-22"}]  # after-pull
+    monkeypatch.setattr(server, "_all_update_records", _records)
+    monkeypatch.setattr(server, "_update_ids", lambda recs: {r["id"] for r in recs})
+
+    with patch.object(subprocess, "run", return_value=proc):
+        server._run_pull_subprocess(trigger="manual")
+
+    entries = system_log.read_all()
+    # smtp_auth_failed must NOT have leaked to disk as a flat row.
+    flat_smtp = [e for e in entries if e["event"] == "smtp_auth_failed"]
+    assert flat_smtp == [], "smtp_auth_failed leaked outside the pull envelope"
+
+    pull = [e for e in entries if e["event"] == "pull"][0]
+    step_events = [s["event"] for s in pull["steps"]]
+    assert "smtp_auth_failed" in step_events
+    assert "notify_failed" in step_events
+    # Three-tier rule: exit_code=0 means the pull itself succeeded —
+    # data is on disk. SMTP auth failed as a downstream notification
+    # side-effect, so the envelope is `warning` (yellow), not `error`
+    # (red). Red is reserved for pulls that didn't deliver the data.
+    assert pull["level"] == "warning"
+    assert pull["exit_code"] == 0
+
+
+def test_push_capture_diverts_log_calls_on_same_thread():
+    # With an active capture, log() appends to the buffer instead of
+    # touching the on-disk file. Other threads / processes are unaffected.
+    buf = system_log.push_capture()
+    try:
+        system_log.log("captured_event", level="info", source="test", k="v")
+    finally:
+        system_log.pop_capture()
+    assert len(buf) == 1
+    assert buf[0]["event"] == "captured_event"
+    assert buf[0]["source"] == "test"
+    assert buf[0]["k"] == "v"
+    # Nothing landed on disk.
+    assert system_log.read_all() == []
+
+
+def test_pop_capture_releases_the_stack():
+    system_log.push_capture()
+    system_log.pop_capture()
+    # Events after pop write to disk normally.
+    system_log.log("after_pop", level="info")
+    assert any(e["event"] == "after_pop" for e in system_log.read_all())
+
+
+def test_capture_is_thread_local(monkeypatch):
+    # Active capture on one thread must not swallow log() calls fired
+    # from another thread. Flask handles requests on worker threads; if
+    # capture leaked across threads a concurrent API hit during a pull
+    # would be silently attached to the pull envelope's steps.
+    import threading
+    buf = system_log.push_capture()
+    from_other_thread = []
+
+    def _other():
+        system_log.log("from_worker_thread", source="test")
+        # Read what landed on disk — the other thread shouldn't see the
+        # capture stack at all.
+        from_other_thread.extend(
+            e["event"] for e in system_log.read_all()
+        )
+
+    t = threading.Thread(target=_other)
+    t.start(); t.join(timeout=3)
+
+    # The capture buffer is empty — the other thread's event bypassed it.
+    assert buf == []
+    # And it DID reach disk.
+    assert "from_worker_thread" in from_other_thread
+    system_log.pop_capture()
+
+
+def test_nested_captures_innermost_wins():
+    outer = system_log.push_capture()
+    inner = system_log.push_capture()
+    system_log.log("inside_inner")
+    system_log.pop_capture()
+    system_log.log("inside_outer")
+    system_log.pop_capture()
+    assert [e["event"] for e in inner] == ["inside_inner"]
+    assert [e["event"] for e in outer] == ["inside_outer"]
+
+
+def test_parse_jsonl_stderr_line_ignores_plain_text():
+    assert system_log.parse_jsonl_stderr_line("2026-04-22 INFO some.logger: hi") is None
+    assert system_log.parse_jsonl_stderr_line("") is None
+    # Well-formed prefix but malformed JSON also returns None.
+    bad = system_log._JSONL_PREFIX + "{not json"
+    assert system_log.parse_jsonl_stderr_line(bad) is None
+
+
+# ======================================================================
+# Error-handling coverage — every failure path must sys_log
+# ======================================================================
+
+def test_route_unhandled_exception_emits_sys_log(monkeypatch, tmp_path):
+    import server
+    _stub_server_config(monkeypatch, tmp_path)
+
+    # Force any route to raise by monkeypatching a dependency it uses.
+    def _kaboom(*a, **k):
+        raise RuntimeError("surprise from the data layer")
+    monkeypatch.setattr(server, "load_config", _kaboom)
+
+    with server.app.test_client() as c:
+        r = c.get("/api/cases")
+    assert r.status_code == 500
+    body = r.get_json()
+    # The client gets an opaque body — no traceback leaks.
+    assert body == {"ok": False, "error": "internal_error"}
+
+    events = [e for e in system_log.read_all()
+              if e["event"] == "route_unhandled_exception"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["path"] == "/api/cases"
+    assert ev["method"] == "GET"
+    assert ev["level"] == "error"
+    assert "RuntimeError" in ev["error"]
+    assert "surprise from the data layer" in ev["error"]
+    # Traceback tail is present and bounded.
+    assert "traceback_tail" in ev and len(ev["traceback_tail"]) <= 1200
+
+
+def test_pull_pre_snapshot_failure_emits_sys_log(monkeypatch, tmp_path):
+    # If the before-pull snapshot read itself crashes (e.g. a case file
+    # with a shape that slips past load_case_entries' gracefulness), we
+    # should embed `pull_pre_snapshot_failed` as a STEP inside the pull
+    # envelope (via thread-local capture) and keep going. Nothing should
+    # appear as a flat top-level row — the envelope owns the narrative
+    # for anything that happens on the pull thread.
+    import subprocess
+    server = _stub_server_config(monkeypatch, tmp_path)
+
+    from unittest.mock import MagicMock, patch
+    calls = {"n": 0}
+    def _partial_fail(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom in pre-snapshot")
+        return []
+    monkeypatch.setattr(server, "_all_update_records", _partial_fail)
+
+    proc = MagicMock(returncode=0, stdout="", stderr="")
+    with patch.object(subprocess, "run", return_value=proc):
+        server._run_pull_subprocess(trigger="manual")
+
+    entries = system_log.read_all()
+    # pull_pre_snapshot_failed must NOT appear as a flat row — it's
+    # captured into the envelope's steps[] via thread-local capture.
+    flat_pre_fail = [e for e in entries if e["event"] == "pull_pre_snapshot_failed"]
+    assert flat_pre_fail == [], \
+        "pull_pre_snapshot_failed leaked to disk as a flat row"
+
+    pulls = [e for e in entries if e["event"] == "pull"]
+    assert len(pulls) == 1
+    pull = pulls[0]
+    step_events = [s["event"] for s in pull["steps"]]
+    assert "pull_pre_snapshot_failed" in step_events, \
+        "pre-snapshot failure wasn't folded into the pull envelope"
+    # Envelope severity reflects the warning step.
+    assert pull["level"] == "warning"
+
+
+def test_pull_thread_crash_emits_sys_log(monkeypatch, tmp_path):
+    import server
+    _stub_server_config(monkeypatch, tmp_path)
+
+    # Force _run_pull_subprocess to raise so the outer _runner try/except
+    # in _spawn_pull_async is exercised — the only defender against a
+    # truly unexpected crash in the pull thread.
+    def _boom(trigger="scheduled"):
+        raise RuntimeError("runner exploded")
+    monkeypatch.setattr(server, "_run_pull_subprocess", _boom)
+
+    server._spawn_pull_async(trigger="manual")
+    # The daemon thread runs async; give it a beat to finish and write
+    # its sys_log entry. The call is cheap (our patched runner raises
+    # immediately) so 1s is plenty of headroom.
+    import time as _time
+    for _ in range(20):
+        crashes = [e for e in system_log.read_all()
+                   if e["event"] == "pull_thread_crashed"]
+        if crashes:
+            break
+        _time.sleep(0.05)
+
+    assert len(crashes) == 1
+    assert "runner exploded" in crashes[0]["error"]
+    assert crashes[0]["trigger"] == "manual"
+    # pull_state should have been cleared so the dashboard doesn't think
+    # a pull is still in flight.
+    assert server._pull_state.running is False
+    assert server._pull_state.ok is False
+
+
+def test_setup_scheduler_logs_configured_event(monkeypatch):
+    import server
+    from unittest.mock import MagicMock
+    sched = MagicMock()
+    monkeypatch.setattr(server, "scheduler", sched)
+    server._setup_scheduler()
+    events = [e for e in system_log.read_all() if e["event"] == "scheduler_configured"]
+    assert len(events) == 1
+    assert events[0]["hours"] == list(server.PULL_HOURS)
+    assert events[0]["timezone"] == server.SCHEDULER_TZ
+
+
+# -------- HTTP endpoint ---------------------------------------------
+
+def test_api_system_log_returns_events(tmp_path, monkeypatch):
+    import server
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    system_log.log("server_startup", schedule_hours=[7, 14, 20])
+    system_log.log("pull_started", source="server")
+
+    with server.app.test_client() as c:
+        r = c.get("/api/system-log")
+        assert r.status_code == 200
+        body = r.get_json()
+        assert "events" in body
+        event_names = [e["event"] for e in body["events"]]
+        assert "server_startup" in event_names
+        assert "pull_started" in event_names
+
+
+def test_api_system_log_respects_limit(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(20):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        r = c.get("/api/system-log?limit=5")
+        body = r.get_json()
+        events = body["events"]
+        assert len(events) == 5
+        # The newest 5 entries (indexes 15..19), returned oldest-first.
+        assert [e["i"] for e in events] == [15, 16, 17, 18, 19]
+        # `total` reflects the true count on disk regardless of limit.
+        assert body["total"] == 20
+        assert body["limit"] == 5
+        assert body["offset"] == 0
+
+
+def test_api_system_log_paginates_with_offset(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(888):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        # Page 1 (newest 100): indexes 788..887.
+        body = c.get("/api/system-log?limit=100&offset=0").get_json()
+        assert body["total"] == 888
+        assert [e["i"] for e in body["events"]] == list(range(788, 888))
+
+        # Page 2: indexes 688..787.
+        body = c.get("/api/system-log?limit=100&offset=100").get_json()
+        assert [e["i"] for e in body["events"]] == list(range(688, 788))
+
+        # Last (partial) page, page 9 with offset=800: indexes 0..87 —
+        # 888 total, per_page=100 → 9 pages, last has 88 entries.
+        body = c.get("/api/system-log?limit=100&offset=800").get_json()
+        assert [e["i"] for e in body["events"]] == list(range(0, 88))
+        assert len(body["events"]) == 88
+
+
+def test_api_system_log_offset_past_end_returns_empty_slice(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for _ in range(10):
+        system_log.log("tick")
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log?limit=100&offset=9999").get_json()
+        # No crash; total still correct; empty slice.
+        assert body["total"] == 10
+        assert body["events"] == []
+
+
+def test_api_system_log_clamps_limit_to_500(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(700):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log?limit=99999").get_json()
+        # Clamped to MAX_SYSLOG_PAGE_SIZE (500) so a huge `limit` can't DoS
+        # the dashboard by forcing an unbounded JSON serialisation.
+        assert body["limit"] == 500
+        assert len(body["events"]) == 500
+
+
+def test_api_system_log_default_limit_is_page_size(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for _ in range(250):
+        system_log.log("tick")
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log").get_json()
+        # No limit param → default page size = 100.
+        assert body["limit"] == server.DEFAULT_SYSLOG_PAGE_SIZE == 100
+        assert len(body["events"]) == 100
+        assert body["total"] == 250
+
+
+def test_api_system_log_negative_offset_clamped_to_zero(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    for i in range(5):
+        system_log.log("tick", i=i)
+    with server.app.test_client() as c:
+        body = c.get("/api/system-log?offset=-9").get_json()
+        assert body["offset"] == 0
+        assert len(body["events"]) == 5
+
+
+def test_system_log_count_matches_read_all(monkeypatch, tmp_path):
+    # `count()` must agree with `len(read_all())` — it's the cheap variant,
+    # not a different counter.
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "system_log.json")
+    assert system_log.count() == 0
+    for i in range(7):
+        system_log.log("tick", i=i)
+    assert system_log.count() == 7
+    assert system_log.count() == len(system_log.read_all())
+
+
+def test_api_system_log_ignores_bad_limit(monkeypatch, tmp_path):
+    import server
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    system_log.log("tick")
+    with server.app.test_client() as c:
+        r = c.get("/api/system-log?limit=not-an-int")
+        assert r.status_code == 200
+        assert len(r.get_json()["events"]) == 1
+
+
+# -------- clear endpoint ---------------------------------------------
+
+def test_api_system_log_clear_wipes_and_audits(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    for i in range(3):
+        system_log.log("tick", i=i)
+    assert len(system_log.read_all()) == 3
+
+    with server.app.test_client() as c:
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({"confirm": True}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["ok"] is True
+        assert body["priorEntryCount"] == 3
+
+    # After wipe, only the audit breadcrumb remains (the clear records itself).
+    entries = system_log.read_all()
+    assert len(entries) == 1
+    assert entries[0]["event"] == "system_log_cleared"
+    assert entries[0]["prior_entry_count"] == 3
+    assert entries[0]["source"] == "server"
+
+
+def test_api_system_log_clear_rejects_without_confirm(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    system_log.log("tick")
+    before = system_log.read_all()
+
+    with server.app.test_client() as c:
+        # no body
+        r = c.post("/api/system-log/clear")
+        assert r.status_code == 400
+        assert r.get_json()["error"] == "confirmation_required"
+
+        # body present but confirm not literally `true`
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({"confirm": "yes"}),
+            content_type="application/json",
+        )
+        assert r.status_code == 400
+
+        # Empty JSON object
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        assert r.status_code == 400
+
+    # Log is untouched across all three rejected calls.
+    assert system_log.read_all() == before
+
+
+def test_api_system_log_clear_on_empty_log_is_noop_plus_audit(monkeypatch, tmp_path):
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    # Log starts empty (autouse fixture cleared it).
+    assert system_log.read_all() == []
+
+    with server.app.test_client() as c:
+        r = c.post(
+            "/api/system-log/clear",
+            data=json.dumps({"confirm": True}),
+            content_type="application/json",
+        )
+        assert r.status_code == 200
+        assert r.get_json()["priorEntryCount"] == 0
+
+    entries = system_log.read_all()
+    assert len(entries) == 1
+    assert entries[0]["event"] == "system_log_cleared"
+    assert entries[0]["prior_entry_count"] == 0
+
+
+# -------- system log is NOT included in the cases export ------------
+
+def test_api_export_excludes_system_log(monkeypatch, tmp_path):
+    # The combined /api/export zip is for cases only. The system log has
+    # its own dedicated endpoint so operators can share case archives
+    # without leaking diagnostic metadata (email addresses, scheduler
+    # fires, etc.).
+    import io, zipfile
+    import server
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    system_log.log("server_startup")
+    system_log.log("pull_finished", exit_code=0)
+
+    with server.app.test_client() as c:
+        r = c.get("/api/export")
+        assert r.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+            names = set(z.namelist())
+            assert "system_log.json" not in names
+            assert "manifest.json" in names
+
+
+# -------- dedicated /api/system-log/export ---------------------------
+
+def test_api_system_log_export_returns_zip_with_log_and_traces(monkeypatch, tmp_path):
+    """Export now bundles the system log + every persisted trace
+    directory into a single zip. The log lands at `system_log.json`
+    at the root; traces land under `full_traces/<dir>/...` preserving
+    layout."""
+    import server
+    import zipfile
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    # Seed a fake trace directory.
+    trace_dir = data_dir / "full_traces" / "20260424T000000Z_fail_scheduled"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.zip").write_bytes(b"PK\x03\x04FAKE")
+    (trace_dir / "mfa_trace").mkdir()
+    (trace_dir / "mfa_trace" / "events.jsonl").write_text(
+        '{"event": "imap_ok"}\n'
+    )
+
+    system_log.log("server_startup", hours=[7, 14, 20])
+    system_log.log("pull_finished", exit_code=0)
+
+    with server.app.test_client() as c:
+        r = c.get("/api/system-log/export")
+        assert r.status_code == 200
+        assert r.mimetype == "application/zip"
+        disp = r.headers.get("Content-Disposition", "")
+        assert disp.startswith("attachment;")
+        assert "uscis-diagnostics-" in disp
+        assert disp.endswith('.zip"')
+
+        import io
+        with zipfile.ZipFile(io.BytesIO(r.data)) as zf:
+            names = set(zf.namelist())
+        assert "system_log.json" in names
+        # Trace files bundled under full_traces/<dir>/...
+        assert any(n.startswith("full_traces/") and n.endswith("trace.zip")
+                   for n in names)
+        assert any(n.endswith("mfa_trace/events.jsonl") for n in names)
+
+
+def test_api_system_log_export_on_empty_log_is_zip_with_empty_array(monkeypatch, tmp_path):
+    """Empty log → zip still returned, containing just an empty
+    `system_log.json` and no trace dirs (data/full_traces missing)."""
+    import server
+    import zipfile
+    import io
+
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "auth": {}, "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    with server.app.test_client() as c:
+        r = c.get("/api/system-log/export")
+        assert r.status_code == 200
+        assert r.mimetype == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(r.data)) as zf:
+            contents = zf.read("system_log.json").decode()
+        assert json.loads(contents) == []

@@ -1,0 +1,240 @@
+<!-- Copyright (C) 2026 the USCIS Prober contributors
+     SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>USCIS Prober</title>
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <h1>
+        <!-- Brand block — logo + title bundled in their own pill so
+             every topbar info-zone reads as a discrete box (matches
+             the subtitle and countdown). -->
+        <span class="brand">
+          <img src="/static/logo.svg" alt="" class="brand-logo" width="34" height="34" />
+          <span class="brand-name">
+            <span class="brand-name-line">USCIS</span>
+            <span class="brand-name-line">Prober</span>
+          </span>
+        </span>
+      </h1>
+      <!-- Manual pull trigger — sits next to brand at wide widths and
+           on the same row at narrow widths (right-aligned via margin-
+           left:auto). The label is split into two rows (`Manual` /
+           `pull update`) at wide widths so the button matches the
+           visual height of the brand pill + LAST/NEXT PULL boxes. The
+           narrow-width media query collapses it back to a single line. -->
+      <button id="pull-btn" class="pull-btn">
+        <span class="pull-btn-line">Manual</span>
+        <span class="pull-btn-line">Pull Update</span>
+      </button>
+    </div>
+    <div class="topbar-right">
+      <!-- LAST PULL + NEXT PULL are bundled in their own flex pair so
+           they always wrap together: at narrow widths the operator
+           sees the past-pull / next-pull span side by side instead of
+           the countdown stranded on its own row. The TIMEZONE pill
+           that used to sit here moved to the System info card —
+           reference info that doesn't earn topbar real estate. -->
+      <div class="topbar-pull-pair">
+        <span class="subtitle" id="summary-line">loading…</span>
+        <div class="countdown" title="Next auto-pull">
+          <span class="label">next pull</span>
+          <span class="value" id="countdown">—</span>
+          <span class="when" id="next-when"></span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <nav class="view-tabs">
+    <button class="view-tab active" data-view="cases">Cases</button>
+    <button class="view-tab" data-view="updates">
+      Updates
+      <span class="view-tab-count" id="updates-count" hidden></span>
+    </button>
+    <button class="view-tab" data-view="systemlog">
+      System
+      <span class="view-tab-count" id="systemlog-count" hidden></span>
+    </button>
+  </nav>
+
+  <main id="case-list"></main>
+  <main id="updates-feed" hidden></main>
+
+  <!-- System tab: stacked sections.
+         1. System info  — read-only metadata (build version).
+         2. Actions      — debug toggle + data export.
+         3. Storage      — stacked usage bar + per-category legend.
+         4. System log   — paginated event feed.
+       The actions card hosts only buttons (consistent sizing); the
+       info card carries reference values that aren't actions. -->
+  <main id="systemlog-feed" hidden>
+    <section class="sys-card sys-info-card" data-card-id="sys-info" aria-label="System info">
+      <h2 class="sys-card-title">System info</h2>
+      <div class="sys-info-row">
+        <!-- Build-version chip — populated from /api/pull/status.version
+             every 3s. Tooltip carries full SHA, commit date, server
+             boot time. Lives here (System info) since it's reference
+             metadata, not an action. -->
+        <a id="version-chip" class="version-chip" href="#" title="" hidden></a>
+        <!-- Browser timezone chip — moved from the topbar. Populated
+             on boot from Intl.DateTimeFormat. Tooltip explains that
+             every timestamp in the dashboard renders in this zone. -->
+        <span id="tz-info" class="version-chip"
+              title="All dashboard timestamps render in your browser's local timezone.">—</span>
+      </div>
+    </section>
+    <section class="sys-card sys-actions-card" data-card-id="sys-actions" aria-label="System operations">
+      <h2 class="sys-card-title">Actions</h2>
+      <div class="sys-actions-row">
+        <!-- Each action is a wrapper that hosts the action button +
+             a small `i` info badge anchored to the wrapper's top-right
+             corner so the info chip doesn't compete for row space
+             with the button it describes. -->
+        <div class="action-with-info">
+          <!-- Debug-mode pill: toggles config.trace_successful_pulls
+               via /api/debug-mode. ON keeps the Playwright trace.zip
+               + MFA sidecar for every pull (disk-heavier; useful for
+               verifying capture against a healthy pull). -->
+          <button id="debug-mode-pill" class="action-btn debug-pill"
+                  type="button" role="switch" aria-checked="false"
+                  title="Off: traces only on failure. On: traces on every pull (disk-heavier).">
+            <span class="debug-pill-dot"></span>
+            <span class="debug-pill-label">Debug</span>
+          </button>
+          <button id="debug-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the debug-mode toggle"
+                  aria-expanded="false"
+                  aria-controls="debug-info-popover">i</button>
+          <div id="debug-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Debug mode</strong> forces every pull (success or
+            failure) to preserve its full Playwright trace
+            (<code>trace.zip</code>) plus the <code>mfa_trace/</code>
+            sidecar with wire-level IMAP events and archived emails.
+            Off, traces are only kept when a pull fails. Use this to
+            verify the capture system against a known-good pull.
+            Disk-heavier — flip back off when done.
+          </div>
+        </div>
+        <div class="action-with-info">
+          <!-- Redaction pill: client-side privacy toggle. Masks PII across
+               the dashboard + snapshot JSON and disables download/copy so
+               the site can be screenshotted or shared safely. -->
+          <button id="redaction-pill" class="action-btn debug-pill"
+                  type="button" role="switch" aria-checked="false"
+                  title="Off: data shown. On: mask case numbers + names and disable snapshot download/copy for safe sharing.">
+            <span class="debug-pill-dot"></span>
+            <span class="debug-pill-label">Redaction</span>
+          </button>
+          <button id="redaction-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the redaction toggle"
+                  aria-expanded="false"
+                  aria-controls="redaction-info-popover">i</button>
+          <div id="redaction-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Redaction mode</strong> masks sensitive details —
+            case/receipt numbers, applicant and representative names —
+            everywhere on the site: the Cases, Updates and System tabs,
+            including the raw snapshot JSON and system-log details. It also
+            disables <em>Download full history</em> + <em>Copy this
+            snapshot</em> and locks pull rows from expanding. Masking happens
+            <strong>on the server</strong>, so private data never reaches the
+            browser — it can't be recovered from the network tab or page
+            source. Turn it on before screenshotting or screen-sharing. This
+            is a global, server-side switch.
+          </div>
+        </div>
+        <div class="action-with-info">
+          <!-- Export data: zip of every data/{form}_case.json + manifest. -->
+          <a id="export-btn" class="action-btn pull-btn pull-btn-secondary"
+             href="/api/export">Export data</a>
+          <button id="export-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Export data button"
+                  aria-expanded="false"
+                  aria-controls="export-info-popover">i</button>
+          <div id="export-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Exports every case.</strong>
+            Downloads a single zip containing every
+            <code>data/{form}_case.json</code> (the full per-day snapshot
+            history of each case you track) plus a <code>manifest.json</code>
+            with each case's label, receipt number, and entry count.
+            Each snapshot is the raw USCIS API response — contains
+            applicant info, letter IDs, etc. Treat the file as PII.
+          </div>
+        </div>
+        <div class="action-with-info">
+          <!-- Recompute diff: forces a fresh chronological diff trace
+               on the backend and logs a diff_recomputed event. -->
+          <button id="recompute-btn" class="action-btn pull-btn pull-btn-secondary"
+                  type="button">Recompute diff</button>
+          <button id="recompute-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Recompute diff button"
+                  aria-expanded="false"
+                  aria-controls="recompute-info-popover">i</button>
+          <div id="recompute-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Recomputes every diff.</strong>
+            Clears cached diffs and forces a fresh chronological diff
+            trace across every case you track, re-walking each case's
+            full snapshot history. A <code>diff_recomputed</code> event
+            with per-case change counts is appended to the log below so
+            you can confirm the data flowed through.
+          </div>
+        </div>
+        <!-- Mount slot for Export log + Clear log buttons (rendered
+             into here from app.js so they sit alongside DEBUG and
+             Export data in this single Actions cluster). -->
+        <span id="syslog-controls-mount"></span>
+      </div>
+    </section>
+    <section class="storage-bar-wrap sys-card" id="storage-bar" data-card-id="sys-storage" aria-label="Disk usage">
+      <h2 class="sys-card-title">Storage</h2>
+      <div class="storage-bar-header">
+        <span class="storage-bar-total" id="storage-bar-total">—</span>
+      </div>
+      <div class="storage-bar-track" id="storage-bar-track" role="img"
+           aria-label="Stacked storage usage by category"></div>
+      <div class="storage-bar-labels" id="storage-bar-labels"
+           aria-hidden="true"></div>
+    </section>
+    <section id="systemlog-content" class="sys-card" data-card-id="sys-log"></section>
+  </main>
+
+  <template id="case-card-template">
+    <article class="case-card">
+      <header class="case-header">
+        <div class="case-title">
+          <span class="case-label"></span>
+          <span class="case-receipt"></span>
+        </div>
+        <div class="case-meta"></div>
+      </header>
+
+      <div class="case-badges"></div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="changes">Changes</button>
+        <button class="tab" data-tab="raw">Raw JSON</button>
+      </nav>
+
+      <section class="tab-panels">
+        <div class="tab-panel" data-tab="overview" hidden></div>
+        <div class="tab-panel" data-tab="changes" hidden></div>
+        <div class="tab-panel" data-tab="raw" hidden></div>
+      </section>
+    </article>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

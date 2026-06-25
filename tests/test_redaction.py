@@ -1,0 +1,70 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Tests for the server-side PII redaction module (src/redaction.py)."""
+
+from __future__ import annotations
+
+import redaction
+from redaction import REDACTION_MASK, redact_obj, scrub_text
+
+
+def test_redact_obj_masks_pii_keys_at_top_level():
+    out = redact_obj({
+        "receiptNumber": "IOE0000000000",
+        "applicantName": "DOE, JANE",
+        "representativeName": "SMITH, JOHN",
+        "formName": "I-485, Application to Register Permanent Residence",
+        "formType": "I485",
+        "closed": False,
+    })
+    assert out["receiptNumber"] == REDACTION_MASK
+    assert out["applicantName"] == REDACTION_MASK
+    assert out["representativeName"] == REDACTION_MASK
+    assert out["formName"] == "I-485, Application to Register Permanent Residence"
+    assert out["formType"] == "I485"
+    assert out["closed"] is False
+
+
+def test_redact_obj_masks_system_log_receipt_key_and_nesting():
+    out = redact_obj({
+        "receipt": "IOE0000000000",
+        "concurrentCases": [
+            {"receiptNumber": "IOE2", "formType": "I765"},
+            {"receiptNumber": "IOE3"},
+        ],
+        "deep": {"inner": {"applicantName": "X, Y"}},
+    })
+    assert out["receipt"] == REDACTION_MASK
+    assert out["concurrentCases"][0]["receiptNumber"] == REDACTION_MASK
+    assert out["concurrentCases"][0]["formType"] == "I765"
+    assert out["concurrentCases"][1]["receiptNumber"] == REDACTION_MASK
+    assert out["deep"]["inner"]["applicantName"] == REDACTION_MASK
+
+
+def test_redact_obj_scrubs_pii_embedded_in_strings():
+    out = redact_obj({
+        "url": "https://egov.uscis.gov/casestatus/IOE0000000000/x",
+        "note": "no identifiers here",
+    })
+    assert "IOE0000000000" not in out["url"]
+    assert REDACTION_MASK in out["url"]
+    assert out["note"] == "no identifiers here"
+
+
+def test_redact_obj_is_pure():
+    src = {"receiptNumber": "IOE0000000000", "events": [{"code": "ABC"}]}
+    out = redact_obj(src)
+    assert src["receiptNumber"] == "IOE0000000000"  # unchanged
+    assert out["receiptNumber"] == REDACTION_MASK
+    assert out["events"] is not src["events"]
+
+
+def test_scrub_text_patterns():
+    assert scrub_text("case IOE0000000000 here") == f"case {REDACTION_MASK} here"
+    assert "@" not in scrub_text("mail me a.b@example.com")
+    assert scrub_text("form I-485 on 2026-06-16") == "form I-485 on 2026-06-16"
+    assert scrub_text(42) == 42  # non-strings pass through
+
+
+def test_redact_keys_cover_both_receipt_spellings():
+    assert {"receiptNumber", "receipt", "applicantName", "representativeName"} <= set(redaction.REDACT_KEYS)
