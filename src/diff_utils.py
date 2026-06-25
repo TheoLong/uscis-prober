@@ -39,10 +39,27 @@ _WATCHED_SCALARS: tuple[str, ...] = (
 )
 
 # Timestamp-only fields: when ONLY these change (and nothing else), the
-# change is a "silent update" — internal USCIS activity with no visible
-# event or notice. Community (Lawfully/1point3acres) treats this as a
-# positive sign that someone is actively working the case.
+# change is a candidate "silent update" — internal USCIS activity with no
+# visible event or notice. Community (Lawfully/1point3acres) treats this as a
+# positive sign that someone is actively working the case. A timestamp-only
+# bump that merely echoes an event USCIS just wrote (see _is_event_byproduct)
+# is NOT a silent update — it's the case-level footprint of that event.
 _TIMESTAMP_ONLY: frozenset[str] = frozenset({"updatedAt", "updatedAtTimestamp"})
+
+# When USCIS writes an event row it also moves the case-level
+# `updatedAtTimestamp` to that event's own time. The two land within a
+# second of each other, but our poller can capture the event row and the
+# case-timestamp catch-up in different pulls — surfacing the bump as a
+# standalone timestamp-only diff a pull or two after the event. A bump whose
+# new `updatedAtTimestamp` lands within this window of ANY event's
+# `eventTimestamp` or `createdAtTimestamp` is that event's footprint, not an
+# independent touch. Both fields are checked because a freshly-written event
+# stamps the case from `eventTimestamp`, while a backdated re-emit (old
+# `eventTimestamp`, recent write) stamps it from `createdAtTimestamp`. The
+# gap between real event footprints (sub-10s observed) and genuine silent
+# updates (minutes-to-months observed) is wide, so the exact window is not
+# sensitive.
+_EVENT_FOOTPRINT_WINDOW_SECONDS: float = 60.0
 
 # Decision-readiness scalar flips the community tracks.
 _DECISION_FLAGS: frozenset[str] = frozenset(
@@ -393,10 +410,13 @@ def snapshot_changes(entries: list[dict]) -> list[dict]:
 
     Captures are diffed in `capturedAt` order with NO day-binning — every
     transition USCIS produced surfaces as its own record, including several
-    within a single calendar day. The only pairs dropped are byte-identical
-    ones (nothing moved). Each item is enriched with a `kind` classification
-    (see classify_change) so the UI can label silent updates vs. new events
-    vs. appointment moves.
+    within a single calendar day. Two kinds of pairs produce no record:
+    byte-identical ones (nothing moved), and timestamp-only bumps that are
+    merely an event's case-level footprint (see `_is_event_byproduct`) —
+    those are already represented by the event's own row, so surfacing them
+    again would double-count one USCIS action. Each remaining item is
+    enriched with a `kind` classification (see classify_change) so the UI can
+    label silent updates vs. new events vs. appointment moves.
     """
     ordered = _sorted_by_capture(entries)
     feed: list[dict] = []
@@ -404,6 +424,15 @@ def snapshot_changes(entries: list[dict]) -> list[dict]:
         change = compute_change(prev, curr)
         if not _has_any_diff(change):
             continue
+        # A timestamp-only bump that echoes an event USCIS just wrote is the
+        # case-level footprint of that event — not an independent update. The
+        # event row already records it; drop the duplicate. Matched against
+        # the events present in `curr` (the capture that carries the bump).
+        if _is_timestamp_only_change(change):
+            new_ts = (change.get("scalars") or {}).get("updatedAtTimestamp", {}).get("to")
+            curr_events = (curr.get("data") or {}).get("events") or []
+            if _is_event_byproduct(new_ts, curr_events):
+                continue
         change["kind"] = classify_change(change)
         change["source"] = "case"
         feed.append(change)
@@ -414,6 +443,67 @@ def snapshot_changes(entries: list[dict]) -> list[dict]:
 day_changes = snapshot_changes
 
 
+def _parse_iso(value: str | None):
+    """Parse a USCIS ISO-8601 timestamp into an aware datetime, or None.
+
+    Accepts the trailing-`Z` form USCIS emits (e.g. `2026-06-25T14:26:50.949Z`).
+    Returns None for missing or unparseable input so callers can treat absent
+    timestamps as "no match".
+    """
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _is_timestamp_only_change(change: dict) -> bool:
+    """True when the only thing that moved is `updatedAt` / `updatedAtTimestamp`.
+
+    No event/notice/document was added or removed and the sole scalar diffs
+    are the case-level update timestamps. This is the shape of both a genuine
+    silent update and an event's case-level footprint — `_is_event_byproduct`
+    tells the two apart.
+    """
+    scalars = change.get("scalars") or {}
+    events = change.get("events") or {}
+    notices = change.get("notices") or {}
+    return (
+        bool(scalars)
+        and all(k in _TIMESTAMP_ONLY for k in scalars)
+        and not events.get("added") and not events.get("removed")
+        and not notices.get("added") and not notices.get("removed")
+        and not (change.get("documents") or {}).get("added")
+        and not (change.get("documents") or {}).get("removed")
+    )
+
+
+def _is_event_byproduct(updated_at_timestamp: str | None, events: list[dict]) -> bool:
+    """True when a case-level timestamp bump is the footprint of an event row.
+
+    USCIS moves the case `updatedAtTimestamp` to an event's own time when it
+    writes that event. A timestamp-only bump landing within
+    `_EVENT_FOOTPRINT_WINDOW_SECONDS` of any event's `eventTimestamp` or
+    `createdAtTimestamp` is therefore that event's footprint, already
+    represented by the event's own row — not an independent touch.
+
+    Both fields are checked: a freshly-written event stamps the case from
+    `eventTimestamp`; a backdated re-emit (old `eventTimestamp`, recent write)
+    stamps it from `createdAtTimestamp`.
+    """
+    bump = _parse_iso(updated_at_timestamp)
+    if bump is None:
+        return False
+    for ev in events or []:
+        for field in ("eventTimestamp", "createdAtTimestamp"):
+            t = _parse_iso((ev or {}).get(field))
+            if t is not None and abs((bump - t).total_seconds()) <= _EVENT_FOOTPRINT_WINDOW_SECONDS:
+                return True
+    return False
+
+
 def classify_change(change: dict) -> str:
     """Bucket a diff into the single most specific signal.
 
@@ -422,10 +512,13 @@ def classify_change(change: dict) -> str:
       event       — new case event appeared (FTA0, APR0, etc.)
       appointment — a notice with appointmentDateTime appeared or changed
       notice      — a non-appointment notice appeared
-      silent_update  — `updatedAt` date advanced, no events/notices. Real silent update.
-      same_day_refresh — only `updatedAtTimestamp` advanced within the same day.
-                    Often a sync artifact or weak touch.
+      silent_update  — only the case update timestamp(s) advanced, no events/notices.
+                    USCIS moved the record's clock with nothing visible attached.
       status      — fallback: tracked scalar changed that isn't covered above
+
+    A timestamp-only change that merely echoes an event USCIS just wrote is
+    NOT surfaced here as its own row — `snapshot_changes` drops it via
+    `_is_event_byproduct` so the event's own row is the single record of it.
     """
     scalars = change.get("scalars") or {}
     events = change.get("events") or {}
@@ -443,16 +536,8 @@ def classify_change(change: dict) -> str:
     if notices_added:
         return "notice"
 
-    timestamp_only = (
-        scalars
-        and all(k in _TIMESTAMP_ONLY for k in scalars)
-        and not events.get("added") and not events.get("removed")
-        and not notices_added and not notices_removed
-        and not (change.get("documents") or {}).get("added")
-        and not (change.get("documents") or {}).get("removed")
-    )
-    if timestamp_only:
-        return "silent_update" if "updatedAt" in scalars else "same_day_refresh"
+    if _is_timestamp_only_change(change):
+        return "silent_update"
 
     return "status"
 
@@ -494,8 +579,7 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
     latest_data = latest.get("data") or {}
 
     # Distinct `updatedAt` dates observed over the pull history. Every move
-    # is something USCIS did on their side. Does NOT count same-day timestamp
-    # fluctuations (those are tracked separately as same-day refreshes).
+    # is something USCIS did on their side.
     distinct_updated_at = []
     seen = set()
     for d in days:
@@ -506,7 +590,6 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
 
     changes = snapshot_changes(entries)
     silent_update_count = sum(1 for c in changes if c.get("kind") == "silent_update")
-    silent_ping_count = sum(1 for c in changes if c.get("kind") == "same_day_refresh")
 
     # Event-code metrics the community specifically tracks.
     events = latest_data.get("events") or []
@@ -557,7 +640,6 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
         "uscisUpdates": len(distinct_updated_at),
         "allUpdates": all_updates,
         "silentUpdates": silent_update_count,
-        "sameDayRefreshes": silent_ping_count,
         "fta0Count": fta0_count,
         "eventCodes": event_codes,
         "stage": infer_stage(events),

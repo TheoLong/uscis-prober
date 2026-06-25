@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 _KIND_HEADLINE = {
     "silent_update":  "silent update",
-    "same_day_refresh": "same-day re-stamp",
     "event":       "new case event",
     "notice":      "new notice",
     "appointment": "appointment change",
@@ -35,7 +34,6 @@ _KIND_HEADLINE = {
 
 _KIND_LEAD = {
     "silent_update":  "USCIS advanced the record's update date with no new visible event or notice. Community associates this with active internal work, but it is not predictive of timing.",
-    "same_day_refresh": "USCIS re-touched the record within the same day. Typically a routine sync artifact.",
     "event":       "A new case event appeared on the record. Check the event code for meaning.",
     "notice":      "USCIS issued a new notice (e.g. Request for Evidence, receipt).",
     "appointment": "A notice with an appointment date was added, removed, or changed. Usually a biometrics (biometrics) reschedule.",

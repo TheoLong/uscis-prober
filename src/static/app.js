@@ -1296,9 +1296,7 @@ function renderChanges(panel, c) {
 
 const KIND_INFO = {
   silent_update:  { label: "silent update",  tone: "silent",
-                 desc: "updatedAt date advanced; no visible event or notice." },
-  same_day_refresh: { label: "same-day re-stamp", tone: "silent",
-                 desc: "updatedAtTimestamp moved within the same day — usually a sync artifact." },
+                 desc: "Case update timestamp advanced; no visible event or notice." },
   event:       { label: "new event",      tone: "ok" },
   notice:      { label: "new notice",     tone: "warn" },
   appointment: { label: "appointment",    tone: "warn" },

@@ -522,9 +522,10 @@ def _all_update_records(config: dict | None = None) -> list[dict]:
     """Every diff across every configured case, same shape as /api/updates.
 
     Includes both case-API diffs and location-API diffs (tagged via
-    `source`). IDs embed the source so case and location diffs detected
-    on the same day produce distinct records — critical for the
-    "new since last pull" email-notification snapshot set.
+    `source`). IDs embed the source and the full capture timestamp so case
+    and location diffs — and multiple transitions on one case — produce
+    distinct records, critical for the "new since last pull"
+    email-notification snapshot set.
     """
     config = config or load_config()
     records: list[dict] = []
