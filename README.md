@@ -104,15 +104,17 @@ get the credentials your email provider needs.
 - **Every change gets classified.** For the case API: `event` (new
   event code — FTA0, APR0, etc.), `notice` (Request for Evidence /
   receipt / appointment letter), `appointment` (biometrics
-  rescheduled), `decision` (`closed` / `actionRequired` flipped),
-  `silent_update` (`updatedAt` date advanced with nothing else
-  visible), or `same_day_refresh` (same-day re-stamp, sync artifact).
+  rescheduled), `decision` (`closed` / `actionRequired` flipped), or
+  `silent_update` (case update timestamp advanced with nothing else
+  visible). A timestamp bump that merely echoes an event USCIS just
+  wrote is folded into that event's row, not surfaced separately.
   For the location API: `location_assigned` (null → populated),
   `location_changed` (service center or subtype changed),
   `location_cleared` (populated → null — rare).
 - **Email notifications.** One email per new diff per pull, across
-  both APIs. Record IDs embed the source (`{receipt}:case:{date}` /
-  `{receipt}:location:{date}`) so a same-day case + location diff
+  both APIs. Record IDs embed the source and full capture timestamp
+  (`{receipt}:case:{timestamp}` / `{receipt}:location:{timestamp}`) so
+  a same-day case + location diff
   emits two distinct emails, not a collapsed one. Before / after
   diff-ID snapshotting around each pull → no duplicates, no misses,
   survives restarts.

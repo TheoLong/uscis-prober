@@ -1285,7 +1285,7 @@ function renderChanges(panel, c) {
   const hist = state.histories[c.label];
   const changes = (hist && hist.changes) || [];
   if (!changes.length) {
-    panel.innerHTML = `<div class="no-changes">No differences detected between day-binned captures.</div>`;
+    panel.innerHTML = `<div class="no-changes">No differences detected between consecutive captures.</div>`;
     return;
   }
   // Show newest first
@@ -1296,9 +1296,7 @@ function renderChanges(panel, c) {
 
 const KIND_INFO = {
   silent_update:  { label: "silent update",  tone: "silent",
-                 desc: "updatedAt date advanced; no visible event or notice." },
-  same_day_refresh: { label: "same-day re-stamp", tone: "silent",
-                 desc: "updatedAtTimestamp moved within the same day — usually a sync artifact." },
+                 desc: "Case update timestamp advanced; no visible event or notice." },
   event:       { label: "new event",      tone: "ok" },
   notice:      { label: "new notice",     tone: "warn" },
   appointment: { label: "appointment",    tone: "warn" },
@@ -1328,9 +1326,9 @@ function renderChangeBlock(ch) {
     : "";
   block.innerHTML =
     `<div class="change-block-head">` +
-      // `from` / `to` are the full ISO capturedAt timestamps of the LAST
-      // pull on each day-binned side — show the wall-clock time so the
-      // operator can correlate a diff with the specific pull that saw it.
+      // `from` / `to` are the full ISO capturedAt timestamps of the two
+      // consecutive captures being compared — show the wall-clock time so
+      // the operator can correlate a diff with the specific pull that saw it.
       `<span class="change-range">${escapeHtml(formatLocalDateTime(ch.from))} ` +
       `<span class="change-arrow">→</span> ${escapeHtml(formatLocalDateTime(ch.to))}</span>` +
       sourceBadge +
@@ -2635,8 +2633,8 @@ function renderUpdateRecord(u) {
   const info = KIND_INFO[u.kind] || KIND_INFO.status;
   // Prefer the full capturedAt timestamp (`u.to`) for "Detected" so the
   // operator sees the wall-clock time of the pull that spotted this diff.
-  // `detectedOn` (YYYY-MM-DD) is the legacy day-only field — kept as the
-  // deduplication key but not used for display when `to` is present.
+  // `detectedOn` (YYYY-MM-DD) is the calendar day we observed it — kept for
+  // display fallback; the dedup key is the full `to` timestamp on `u.id`.
   const detectedDisplay = u.to
     ? formatLocalDateTime(u.to)
     : formatDate(u.detectedOn || "");
