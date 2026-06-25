@@ -624,7 +624,7 @@ def test_load_pull_hours_template_value_is_valid():
          / "config.example.json").read_text()
     )
     assert "pull_hours" in example, "config.example.json must ship pull_hours"
-    assert server.load_pull_hours(example) == (0, 6, 12, 18)
+    assert server.load_pull_hours(example) == (0, 6, 10, 14, 18)
 
 
 # -------- storage_limit_mb + trace_successful_pulls config --------------
