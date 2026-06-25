@@ -7,7 +7,6 @@ from diff_utils import (
     bin_by_day,
     classify_change,
     compute_change,
-    day_changes,
     infer_stage,
     location_snapshot_changes,
     snapshot_changes,
@@ -127,7 +126,7 @@ def test_classify_change_silent_update_when_only_timestamp_moves():
     assert classify_change(change) == "silent_update"
 
 
-# -------- compute_change + day_changes ------------------------------------
+# -------- compute_change + snapshot_changes -------------------------------
 
 def test_compute_change_detects_new_event():
     prev = _entry("2026-03-09T12:00:00Z", events=[{"eventCode": "IAF", "eventId": "a"}])
@@ -144,22 +143,20 @@ def test_compute_change_detects_new_event():
     assert added[0]["eventCode"] == "FTA0"
 
 
-def test_day_changes_filters_out_unchanged_day_pairs():
+def test_snapshot_changes_filters_out_unchanged_day_pairs():
     entries = [
         _entry("2026-03-09T00:00:00Z"),
         _entry("2026-03-10T00:00:00Z"),  # identical -> no diff
         _entry("2026-03-11T00:00:00Z", closed=True),  # decision flip
     ]
-    changes = day_changes(entries)
+    changes = snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "decision"
 
 
 def test_snapshot_changes_does_not_collapse_same_day_transitions():
-    """The today's-bug regression: a silent update and a new event on the
-    SAME UTC day must surface as TWO separate change records, not collapse
-    into one. The old day-binning kept only the last capture of the day, so
-    the morning silent update vanished when an afternoon event landed."""
+    """A silent update and a new event on the same UTC day surface as two
+    separate change records, not one."""
     entries = [
         # Yesterday's settled state.
         _entry(
@@ -198,9 +195,8 @@ def test_snapshot_changes_does_not_collapse_same_day_transitions():
 
 def test_snapshot_changes_folds_event_footprint_bump():
     """A timestamp-only bump that lands on an event's own time is that event's
-    case-level footprint — it must NOT surface as a separate row. Mirrors the
-    real case: USCIS wrote an event, then the case updatedAtTimestamp caught up
-    to the event time in a later pull. The event row is the single record."""
+    case-level footprint and is not surfaced as a separate row — only the
+    event row remains."""
     entries = [
         # Settled prior state.
         _entry(
@@ -312,12 +308,6 @@ def test_snapshot_changes_keeps_silent_update_far_from_any_event():
     changes = snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "silent_update"
-
-
-def test_day_changes_is_snapshot_changes_alias():
-    """`day_changes` is retained as a backwards-compatible alias for
-    `snapshot_changes` — same object, no day-binning behaviour left."""
-    assert day_changes is snapshot_changes
 
 
 def test_snapshot_changes_orders_unsorted_captures():
@@ -449,14 +439,14 @@ def test_classify_change_appointment_wins_over_notice_when_removed():
     assert classify_change(change) == "appointment"
 
 
-# -------- day_changes: collection-only diff path --------------------------
+# -------- snapshot_changes: collection-only diff path ---------------------
 
-def test_day_changes_detects_collection_only_diff():
+def test_snapshot_changes_detects_collection_only_diff():
     # No scalar change, but a document was added. Should count as a diff.
-    from diff_utils import day_changes
+    from diff_utils import snapshot_changes
     e0 = _entry("2026-03-09T00:00:00Z", documents=[])
     e1 = _entry("2026-03-10T00:00:00Z", documents=[{"id": "doc1"}])
-    changes = day_changes([e0, e1])
+    changes = snapshot_changes([e0, e1])
     assert len(changes) == 1
 
 
@@ -567,8 +557,8 @@ def test_key_notice_falls_back_to_actiontype_when_no_letter_id():
     n = {"actionType": "X", "generationDate": "2026-04-18"}
     e0 = _entry("2026-03-09T00:00:00Z", notices=[n])
     e1 = _entry("2026-03-10T00:00:00Z", notices=[dict(n)])
-    from diff_utils import day_changes
-    assert day_changes([e0, e1]) == []
+    from diff_utils import snapshot_changes
+    assert snapshot_changes([e0, e1]) == []
 
 
 # ======================================================================
@@ -581,23 +571,23 @@ def _loc_entry(captured_at: str, payload):
     return {"capturedAt": captured_at, "data": {"data": payload}}
 
 
-def test_location_day_changes_empty_history_produces_no_diffs():
-    from diff_utils import location_day_changes
-    assert location_day_changes([]) == []
-    assert location_day_changes([_loc_entry("2026-04-22T00:00:00Z", None)]) == []
+def test_location_snapshot_changes_empty_history_produces_no_diffs():
+    from diff_utils import location_snapshot_changes
+    assert location_snapshot_changes([]) == []
+    assert location_snapshot_changes([_loc_entry("2026-04-22T00:00:00Z", None)]) == []
 
 
-def test_location_day_changes_null_to_null_is_silent():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_null_to_null_is_silent():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", None),
         _loc_entry("2026-04-21T00:00:00Z", None),
     ]
-    assert location_day_changes(entries) == []
+    assert location_snapshot_changes(entries) == []
 
 
-def test_location_day_changes_null_to_populated_emits_assigned():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_null_to_populated_emits_assigned():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", None),
         _loc_entry("2026-04-21T00:00:00Z", {
@@ -606,7 +596,7 @@ def test_location_day_changes_null_to_populated_emits_assigned():
             },
         }),
     ]
-    changes = location_day_changes(entries)
+    changes = location_snapshot_changes(entries)
     assert len(changes) == 1
     c = changes[0]
     assert c["kind"] == "location_assigned"
@@ -615,8 +605,8 @@ def test_location_day_changes_null_to_populated_emits_assigned():
     assert c["scalars"]["subtype"] == {"from": None, "to": "147-C9"}
 
 
-def test_location_day_changes_populated_to_different_populated_emits_changed():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_populated_to_different_populated_emits_changed():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", {
             "receipt_details": {"form": "I-765", "location": "SCD", "subtype": "147-C9"},
@@ -625,28 +615,28 @@ def test_location_day_changes_populated_to_different_populated_emits_changed():
             "receipt_details": {"form": "I-765", "location": "NSC", "subtype": "147-C9"},
         }),
     ]
-    changes = location_day_changes(entries)
+    changes = location_snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "location_changed"
     assert changes[0]["scalars"] == {"location": {"from": "SCD", "to": "NSC"}}
 
 
-def test_location_day_changes_populated_to_null_emits_cleared():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_populated_to_null_emits_cleared():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", {
             "receipt_details": {"form": "I-765", "location": "SCD"},
         }),
         _loc_entry("2026-04-21T00:00:00Z", None),
     ]
-    changes = location_day_changes(entries)
+    changes = location_snapshot_changes(entries)
     assert len(changes) == 1
     assert changes[0]["kind"] == "location_cleared"
     assert changes[0]["source"] == "location"
 
 
-def test_location_day_changes_skips_same_payload_days():
-    from diff_utils import location_day_changes
+def test_location_snapshot_changes_skips_same_payload_days():
+    from diff_utils import location_snapshot_changes
     entries = [
         _loc_entry("2026-04-20T00:00:00Z", {
             "receipt_details": {"form": "I-765", "location": "SCD"},
@@ -655,12 +645,12 @@ def test_location_day_changes_skips_same_payload_days():
             "receipt_details": {"form": "I-765", "location": "SCD"},
         }),
     ]
-    assert location_day_changes(entries) == []
+    assert location_snapshot_changes(entries) == []
 
 
-def test_day_changes_case_source_tagged():
-    from diff_utils import day_changes
+def test_snapshot_changes_case_source_tagged():
+    from diff_utils import snapshot_changes
     e0 = _entry("2026-03-09T00:00:00Z")
     e1 = _entry("2026-03-10T00:00:00Z", closed=True)
-    out = day_changes([e0, e1])
+    out = snapshot_changes([e0, e1])
     assert out and out[0]["source"] == "case"

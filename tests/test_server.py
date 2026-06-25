@@ -157,10 +157,8 @@ def test_all_update_records_enriches_id(monkeypatch, tmp_path):
 
 
 def test_all_update_records_distinct_ids_for_same_day_transitions(monkeypatch, tmp_path):
-    """Two transitions on the SAME calendar day must get distinct IDs so the
-    notification dedup emails each one. This is the email-suppression half of
-    the today's-bug fix: a day-keyed ID collided, silently swallowing the
-    second email."""
+    """Two transitions on the same calendar day get distinct IDs so the
+    notification dedup emails each one."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
@@ -1406,9 +1404,9 @@ def test_api_updates_tags_location_records(client, tmp_path):
     r = client.get("/api/updates")
     records = r.get_json()["updates"]
     ids = {rec["id"] for rec in records}
-    # Source is embedded in the ID so case + location transitions stay
-    # distinct for email-notification deduping. The ID now carries the full
-    # capturedAt timestamp so same-day transitions don't collide.
+    # The ID embeds the source and the full capturedAt timestamp so case and
+    # location transitions stay distinct for email-notification deduping, even
+    # on the same day.
     assert any(i.endswith(":location:2026-04-22T00:00:00Z") for i in ids)
     assert any(i.endswith(":case:2026-04-21T00:00:00Z") for i in ids)
 
