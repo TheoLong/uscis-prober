@@ -16,8 +16,27 @@ import pytest
 
 import server
 
+# Real flock helpers, captured before the autouse bypass patches them — the
+# dedicated lock tests exercise the genuine flock logic through these.
+_real_acquire_pull_lock = server._acquire_pull_lock
+_real_acquire_single_instance_lock = server._acquire_single_instance_lock
+
 
 # -------- common fixtures ------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _bypass_process_locks(monkeypatch):
+    """Bypass the cross-process flock guards by default.
+
+    Most tests call main() / _run_pull_subprocess repeatedly in one pytest
+    process; the real exclusive flocks would block the second call (and would
+    contend with a server running on this machine via the shared data/ dir).
+    The dedicated lock tests call the real helpers directly instead.
+    """
+    monkeypatch.setattr(server, "_instance_lock_fh", None)
+    monkeypatch.setattr(server, "_acquire_single_instance_lock", lambda: True)
+    monkeypatch.setattr(server, "_acquire_pull_lock", lambda: (True, None))
+
 
 @pytest.fixture(autouse=True)
 def _redirect_system_log(monkeypatch, tmp_path):
@@ -585,6 +604,53 @@ def test_run_pull_subprocess_skips_if_already_running(monkeypatch):
     with patch.object(subprocess, "run") as run:
         server._run_pull_subprocess()
     run.assert_not_called()
+
+
+# -------- cross-process locks (single-instance + pull) -----------------
+
+def test_pull_lock_is_exclusive_across_descriptions(monkeypatch, tmp_path):
+    # flock is per open-file-description, so a second acquire of the same file
+    # is refused while the first is held — exactly the cross-PROCESS behavior.
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    ok1, fh1 = _real_acquire_pull_lock()
+    assert ok1 is True and fh1 is not None
+    ok2, fh2 = _real_acquire_pull_lock()
+    assert ok2 is False and fh2 is None, "second pull must be refused while one holds the lock"
+    fh1.close()                                   # release
+    ok3, fh3 = _real_acquire_pull_lock()
+    assert ok3 is True and fh3 is not None, "lock is reusable once released"
+    fh3.close()
+
+
+def test_run_pull_subprocess_skips_when_another_process_holds_lock(monkeypatch, tmp_path):
+    # A foreign holder of the pull lock makes a fresh pull skip (not run).
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+    # Use the REAL lock (the autouse fixture stubbed it out for other tests).
+    monkeypatch.setattr(server, "_acquire_pull_lock", _real_acquire_pull_lock)
+    ok, foreign = _real_acquire_pull_lock()       # simulate the other process
+    assert ok
+    try:
+        with patch.object(subprocess, "run") as run:
+            server._run_pull_subprocess(trigger="scheduled")
+        run.assert_not_called()                   # skipped — no subprocess spawned
+        assert server._pull_state.running is False  # rolled back cleanly
+    finally:
+        foreign.close()
+
+
+def test_single_instance_lock_refuses_second_holder(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_instance_lock_fh", None)
+    assert _real_acquire_single_instance_lock() is True
+    held = server._instance_lock_fh
+    assert held is not None
+    # Simulate a second process: clear the global (so the idempotent shortcut
+    # doesn't fire) but keep the first fd open — its flock still blocks.
+    monkeypatch.setattr(server, "_instance_lock_fh", None)
+    assert _real_acquire_single_instance_lock() is False
+    held.close()
 
 
 def test_run_pull_subprocess_success_flags_ok(monkeypatch, tmp_path):
