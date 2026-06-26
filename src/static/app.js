@@ -1069,13 +1069,13 @@ function renderOverview(panel, c) {
     {
       label: "All events",
       value: s.allEvents ?? 0,
-      sub: "events + silent",
+      sub: "Event + Silent Events",
       tone: "",
     },
     {
       label: "Silent events",
       value: s.silentUpdates ?? 0,
-      sub: "no event code",
+      sub: "Silent timestamp touch",
       tone: (s.silentUpdates ?? 0) > 0 ? "ok" : "",
     },
   ];
