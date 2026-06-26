@@ -2923,11 +2923,14 @@ function renderUpdateRecord(u) {
 // Pure: build the timeline's rows from a snapshot's events + the diff feed,
 // sorted newest-first by each row's REAL timestamp (full precision).
 //
-// Events are dated by createdAtTimestamp ("when USCIS wrote the row" — honest
-// even for backdated re-emits, whose eventDateTime is old). Silent updates are
-// dated by the updatedAtTimestamp USCIS moved to, NOT our detection time, so
-// events and silent updates interleave in true chronological order rather than
-// by the accident of which pull spotted them. Events are deduped by eventId.
+// One consistent rule: rank by USCIS's WRITE/MODIFICATION time. For an event
+// that's createdAtTimestamp (when USCIS wrote the row); for a silent update
+// that's the updatedAtTimestamp USCIS moved the case to. Both are the same
+// "when USCIS touched it" clock — NOT the claimed event time (eventTimestamp,
+// which is backdated by weeks for re-emits) and NOT our detection time (which
+// is an accident of pull cadence). So events and silent updates interleave in
+// true chronological order, and a re-emit lands when observed, not buried at
+// its stale claimed date. Events are deduped by eventId.
 function buildTimelineRows(events, changes) {
   const rows = [];
   const seen = new Set();
@@ -2937,7 +2940,8 @@ function buildTimelineRows(events, changes) {
       if (seen.has(eid)) continue;
       seen.add(eid);
     }
-    const ts = e.createdAtTimestamp || e.eventTimestamp || e.createdAt || e.eventDateTime || "";
+    // Write-time fields first; fall back to claimed-time only if absent.
+    const ts = e.createdAtTimestamp || e.createdAt || e.eventTimestamp || e.eventDateTime || "";
     rows.push({ date: (ts || "").slice(0, 10) || "—", ts, code: e.eventCode || "?",
                 event: e, eventId: eid || null });
   }
