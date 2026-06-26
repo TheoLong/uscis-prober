@@ -19,6 +19,7 @@ const state = {
   systemLogPageSize: 100,
   versionSha: null,        // last-seen short SHA from /api/pull/status
   redacted: false,         // when true, mask PII across the dashboard (share/screenshot mode)
+  accessLockout: false,    // when true, the server gates the site behind the admin-password login
 };
 
 // ---------- redaction (share/screenshot privacy mode) ----------
@@ -35,6 +36,14 @@ const state = {
 const REDACT_KEYS = new Set([
   "receiptNumber", "receipt", "applicantName", "representativeName",
 ]);
+
+// Any identifier key (eventId, letterId, pid, …) is also masked in displayed
+// copies. These are USCIS-internal IDs, so they only need hiding on screen —
+// not withholding from the browser, where the timeline still keys on the real
+// eventId. Display-layer only; never applied to data the renderer keys on.
+function isRedactKey(k) {
+  return REDACT_KEYS.has(k) || /id$/i.test(k);
+}
 
 // A fixed mask — fixed width so it leaks nothing about the original length.
 const REDACTION_MASK = "••••••••";
@@ -61,7 +70,7 @@ function redactSnapshot(value) {
   if (value && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = (REDACT_KEYS.has(k) && v != null && typeof v !== "object")
+      out[k] = (isRedactKey(k) && v != null && typeof v !== "object")
         ? REDACTION_MASK
         : redactSnapshot(v);
     }
@@ -81,7 +90,7 @@ function redactDisplay(value) {
 // any PII embedded in the string. No-op when redaction is off.
 function redactDetailValue(key, value) {
   if (!state.redacted) return value;
-  if (REDACT_KEYS.has(key)) return REDACTION_MASK;
+  if (isRedactKey(key)) return REDACTION_MASK;
   if (value && typeof value === "object") return redactSnapshot(value);
   return scrubText(value);
 }
@@ -91,14 +100,119 @@ function redactMaybe(s) {
   return state.redacted ? scrubText(s) : s;
 }
 
+// ---------- admin-password gating ----------
+// One admin password gates the two latch toggles (always) and, while redaction
+// is latched, every action button. The server (X-Admin-Password header) is the
+// real enforcer; this layer collects the password and shows the lock overlay.
+
+// Mark <body> so CSS can gray + lock-overlay every [data-guard] action.
+function applyRedactionLatch() {
+  document.body?.classList?.toggle("redaction-latched", state.redacted === true);
+}
+
+// The shared password prompt. Resolves with the typed password, or null on
+// cancel. Standalone so tests can stub it.
+function requestAdminPassword({ action = "continue" } = {}) {
+  return new Promise((resolve) => {
+    if (document.querySelector(".modal-overlay[data-modal='admin-pw']")) { resolve(null); return; }
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.dataset.modal = "admin-pw";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "admin-pw-title");
+    overlay.innerHTML =
+      `<div class="modal-card">` +
+      `<h3 id="admin-pw-title" class="modal-title">Admin password required</h3>` +
+      `<p class="modal-body">to ${escapeHtml(action)}</p>` +
+      `<input type="password" class="admin-pw-input" autocomplete="off" ` +
+      `spellcheck="false" placeholder="site admin password" aria-label="Admin password">` +
+      `<div class="modal-actions">` +
+      `<button type="button" class="modal-btn modal-btn-cancel">Cancel</button>` +
+      `<button type="button" class="modal-btn modal-btn-danger">Confirm</button>` +
+      `</div></div>`;
+
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(value);
+    };
+    const input = overlay.querySelector(".admin-pw-input");
+    const submit = () => finish(input.value ? input.value : null);
+    const onKey = (e) => {
+      if (e.key === "Escape") finish(null);
+      else if (e.key === "Enter") { e.preventDefault(); submit(); }
+    };
+    overlay.querySelector(".modal-btn-danger").addEventListener("click", submit);
+    overlay.querySelector(".modal-btn-cancel").addEventListener("click", () => finish(null));
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) finish(null); });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => input.focus());
+  });
+}
+
+// A button's visible label, whitespace-collapsed, used as the prompt's [action].
+function btnLabel(el) {
+  return (el?.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+// Returns "" if no challenge is needed, the password to send, or null on cancel.
+// `always:true` forces the prompt (the latch toggles always require it).
+async function adminChallenge({ always = false, action } = {}) {
+  if (!always && state.redacted !== true) return "";
+  return await requestAdminPassword({ action });
+}
+
+// Clone a fetch init with the X-Admin-Password header attached (no-op for "").
+function withAdminHeader(init = {}, pw = "") {
+  if (!pw) return init;
+  return { ...init, headers: { ...(init.headers || {}), "X-Admin-Password": pw } };
+}
+
+// A bare <a> can't carry the password header, so while redaction is latched
+// fetch the archive with the header and save the blob; otherwise let the href go.
+async function guardedDownload(evt, url) {
+  if (state.redacted !== true) return;  // let the plain href download proceed
+  evt.preventDefault();
+  const pw = await adminChallenge({ action: btnLabel(evt.currentTarget) });
+  if (pw === null) return;
+  try {
+    const res = await fetch(url, withAdminHeader({}, pw));
+    if (res.status === 401) { toast("Wrong password — export blocked.", "bad"); return; }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const name = (m && m[1]) || url.split("/").pop() + ".zip";
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(href);
+  } catch (e) {
+    toast(`Export failed: ${e.message}`, "bad");
+  }
+}
+
 // ---------- boot ----------
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
+  // Export data is an <a href> — intercept for the guarded blob path.
+  document.getElementById("export-btn")
+    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export"));
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
   wireRedactionPill();
+  wireAccessLockoutPill();
   wireMfaModal();
   _wireSyslogFit();
   _wireTopbarFlat();
@@ -115,10 +229,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (savedView && ["cases", "updates", "systemlog"].includes(savedView)) {
     setView(savedView);
   }
-  // Learn the server's redaction state before the first data render so
-  // masking treatment (bars, disabled exports, locked pull rows) is applied
-  // on the initial paint. The data itself is already redacted server-side.
-  await loadRedactionState();
+  // Sync redaction + lockout state before the first render so the masking and
+  // lock overlay land on the initial paint.
+  await Promise.all([loadRedactionState(), loadAccessLockoutState()]);
   await refreshAll();
   setInterval(updateCountdown, 1000);
 
@@ -165,13 +278,16 @@ async function wireDebugPill() {
   pill.addEventListener("click", async () => {
     const currently = pill.getAttribute("aria-checked") === "true";
     const desired = !currently;
+    const pw = await adminChallenge({ action: btnLabel(pill) });
+    if (pw === null) return;
     pill.disabled = true;
     try {
-      const r = await fetch("/api/debug-mode", {
+      const r = await fetch("/api/debug-mode", withAdminHeader({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: desired }),
-      });
+      }, pw));
+      if (r.status === 401) { toast("Wrong password — debug mode unchanged.", "bad"); return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const body = await r.json();
       pill.setAttribute("aria-checked", body.enabled ? "true" : "false");
@@ -214,10 +330,11 @@ function wireExportInfo() {
   // Only one popover may be open at a time — opening one closes the
   // others so they can't visually block each other.
   const pairs = [
-    ["export-info-btn",    "export-info-popover"],
-    ["debug-info-btn",     "debug-info-popover"],
-    ["recompute-info-btn", "recompute-info-popover"],
-    ["redaction-info-btn", "redaction-info-popover"],
+    ["export-info-btn",         "export-info-popover"],
+    ["debug-info-btn",          "debug-info-popover"],
+    ["recompute-info-btn",      "recompute-info-popover"],
+    ["redaction-info-btn",      "redaction-info-popover"],
+    ["access-lockout-info-btn", "access-lockout-info-popover"],
   ];
   const popovers = pairs
     .map(([btnId, popId]) => ({
@@ -281,11 +398,14 @@ function wireRecomputeButton() {
   const btn = document.getElementById("recompute-btn");
   if (!btn) return;
   btn.addEventListener("click", async () => {
+    const pw = await adminChallenge({ action: btnLabel(btn) });
+    if (pw === null) return;
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = "Recomputing…";
     try {
-      const res = await fetch("/api/system-log/recompute", { method: "POST" });
+      const res = await fetch("/api/system-log/recompute", withAdminHeader({ method: "POST" }, pw));
+      if (res.status === 401) { toast("Wrong password — recompute blocked.", "bad"); return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json().catch(() => ({}));
       if (body && body.ok === false) throw new Error("recompute reported failure");
@@ -312,30 +432,31 @@ async function loadRedactionState() {
   } catch (_e) { /* leave as-is; server may be warming up */ }
   const pill = document.getElementById("redaction-pill");
   if (pill) pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+  applyRedactionLatch();
 }
 
-// Redaction toggle (System tab). Redaction is a SERVER-SIDE switch: the
-// server masks PII in every response and blocks exports, so private data is
-// never sent to the browser (not recoverable from console/network/source).
-// The pill flips that server flag, then re-fetches so the now-(un)masked data
-// repaints. state.redacted drives the local masking treatment (bars, disabled
-// exports, locked pull rows).
+// Redaction toggle: server-side switch that masks PII and password-gates every
+// action. Toggling requires the password; on success re-fetch so data repaints.
 function wireRedactionPill() {
   const pill = document.getElementById("redaction-pill");
   if (!pill) return;
   pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
   pill.addEventListener("click", async () => {
     const desired = !state.redacted;
+    const pw = await adminChallenge({ always: true, action: `toggle ${btnLabel(pill)}` });
+    if (pw === null) return;  // cancelled
     pill.disabled = true;
     try {
-      const r = await fetch("/api/redaction-mode", {
+      const r = await fetch("/api/redaction-mode", withAdminHeader({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: desired }),
-      });
+      }, pw));
+      if (r.status === 401) { toast("Wrong password — redaction unchanged.", "bad"); return; }
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       state.redacted = (await r.json()).enabled === true;
       pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
+      applyRedactionLatch();
       // Re-fetch every view's data (now masked / unmasked at the source) and
       // repaint. refreshAll re-renders cases; the visible feed is repainted
       // below (a later tab switch re-renders the others via setView()).
@@ -344,12 +465,57 @@ function wireRedactionPill() {
       else if (state.view === "systemlog") renderSystemLog();
       toast(
         state.redacted
-          ? "Redaction ON — PII masked server-side, downloads disabled"
-          : "Redaction OFF — sensitive data visible",
+          ? "Redaction ON — PII masked, actions locked behind the password"
+          : "Redaction OFF — sensitive data visible, actions unlocked",
         state.redacted ? "warn" : "",
       );
     } catch (e) {
       toast(`Redaction toggle failed: ${e.message}`, "error");
+    } finally {
+      pill.disabled = false;
+    }
+  });
+}
+
+// Sync the access-lockout pill + state.accessLockout from the server.
+async function loadAccessLockoutState() {
+  try {
+    const r = await fetch("/api/access-lockout");
+    if (r.ok) state.accessLockout = (await r.json()).enabled === true;
+  } catch (_e) { /* leave as-is; server may be warming up */ }
+  const pill = document.getElementById("access-lockout-pill");
+  if (pill) pill.setAttribute("aria-checked", state.accessLockout ? "true" : "false");
+}
+
+// Access Lock toggle: when ON, the server gates the site behind the login.
+// Toggling requires the password; no data re-fetch (it changes access, not data).
+function wireAccessLockoutPill() {
+  const pill = document.getElementById("access-lockout-pill");
+  if (!pill) return;
+  pill.setAttribute("aria-checked", state.accessLockout ? "true" : "false");
+  pill.addEventListener("click", async () => {
+    const desired = !state.accessLockout;
+    const pw = await adminChallenge({ always: true, action: `toggle ${btnLabel(pill)}` });
+    if (pw === null) return;
+    pill.disabled = true;
+    try {
+      const r = await fetch("/api/access-lockout", withAdminHeader({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: desired }),
+      }, pw));
+      if (r.status === 401) { toast("Wrong password — lockout unchanged.", "bad"); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      state.accessLockout = (await r.json()).enabled === true;
+      pill.setAttribute("aria-checked", state.accessLockout ? "true" : "false");
+      toast(
+        state.accessLockout
+          ? "Access Lock ON — visitors must sign in with the password"
+          : "Access Lock OFF — dashboard open to view",
+        state.accessLockout ? "warn" : "",
+      );
+    } catch (e) {
+      toast(`Access lockout toggle failed: ${e.message}`, "error");
     } finally {
       pill.disabled = false;
     }
@@ -862,9 +1028,11 @@ async function pollPullStatus() {
     // CSS collapses it to one line at narrow widths. When the pull
     // is running, swap to a single "Pulling…" status so the button
     // reads as state, not action.
+    // Space between the spans so textContent reads "Manual Pull Update"
+    // (display:block, so it collapses visually).
     btn.innerHTML = state.pullRunning
       ? `<span class="pull-btn-line">Pulling…</span>`
-      : `<span class="pull-btn-line">Manual</span>` +
+      : `<span class="pull-btn-line">Manual</span> ` +
         `<span class="pull-btn-line">Pull Update</span>`;
     document.getElementById("next-when").textContent =
       state.nextRun ? formatLocal(state.nextRun) : "—";
@@ -887,8 +1055,14 @@ async function pollPullStatus() {
 
 async function triggerPull() {
   const btn = document.getElementById("pull-btn");
+  const pw = await adminChallenge({ action: btnLabel(btn) });
+  if (pw === null) return;
   try {
-    const res = await fetch("/api/pull", { method: "POST" });
+    const res = await fetch("/api/pull", withAdminHeader({ method: "POST" }, pw));
+    if (res.status === 401) {
+      toast("Wrong password — pull blocked.", "bad");
+      return;
+    }
     if (res.status === 409) {
       toast("A pull is already running…", "bad");
       return;
@@ -1423,7 +1597,8 @@ function describeItem(kind, obj) {
     const appt = obj.appointmentDateTime
       ? ` (appt ${formatLocalDateTime(obj.appointmentDateTime)})`
       : "";
-    return `${obj.actionType || "?"} — letter ${obj.letterId || "?"}${appt}`;
+    const letter = state.redacted ? REDACTION_MASK : (obj.letterId || "?");
+    return `${obj.actionType || "?"} — letter ${letter}${appt}`;
   }
   return JSON.stringify(obj);
 }
@@ -1749,44 +1924,42 @@ function renderSystemLogControls() {
 
   const exportBtn = document.createElement("a");
   exportBtn.href = "/api/system-log/export";
+  exportBtn.dataset.guard = "redaction";
   // .action-btn for unified action-button geometry; the .syslog-export-btn
   // class is preserved for any specialised rules (none currently).
   exportBtn.className = "action-btn syslog-export-btn";
   exportBtn.textContent = "Export log";
   exportBtn.title = "Download this log as JSON";
+  exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
 
   wrap.appendChild(exportBtn);
   wrap.appendChild(renderClearLogControl());
   return wrap;
 }
 
-// Two-step destructive flow for wiping the system log.
-//
-// Step 1 — user clicks "Clear log" in the System log tab header. That
-//   click opens a fixed-position confirmation DIALOG (overlay + centered
-//   modal) layered above the page. Because the dialog is position:fixed
-//   it does not reflow the underlying layout — the event list, the
-//   other controls, and the rest of the page stay exactly where they
-//   were.
-//
-// Step 2 — user clicks the red "Yes, delete all events" action inside
-//   the dialog. That is the only control that POSTs
-//   /api/system-log/clear. The server ALSO requires {"confirm": true}
-//   in the body as a second gate. Cancel, Escape, and backdrop-click
-//   all close the dialog safely.
+// Clear log: password prompt first (while redaction is latched), then a
+// "Clear system log?" confirm dialog, then POST /api/system-log/clear.
 function renderClearLogControl() {
   // Sit as a direct sibling in the parent flex row (no wrapper) so
   // it lines up with DEBUG / Export data / Export log.
   const idle = document.createElement("button");
   idle.type = "button";
   idle.className = "action-btn clear-log-btn";
+  idle.dataset.guard = "redaction";
   idle.textContent = "Clear log";
   idle.title = "Permanently delete every event in this log";
-  idle.addEventListener("click", openClearLogDialog);
+  idle.addEventListener("click", () => requestClearLog(idle));
   return idle;
 }
 
-function openClearLogDialog() {
+// Challenge for the password before the warning, so it takes priority.
+async function requestClearLog(btn) {
+  const pw = await adminChallenge({ action: btnLabel(btn) });
+  if (pw === null) return;
+  openClearLogDialog(pw);
+}
+
+function openClearLogDialog(pw = "") {
   // Prevent stacking multiple dialogs on fast double-clicks.
   if (document.querySelector(".modal-overlay[data-modal='clear-log']")) return;
 
@@ -1840,11 +2013,12 @@ function openClearLogDialog() {
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Clearing…";
     try {
-      const res = await fetch("/api/system-log/clear", {
+      const res = await fetch("/api/system-log/clear", withAdminHeader({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm: true }),
-      });
+      }, pw));
+      if (res.status === 401) { toast("Wrong password — log not cleared.", "bad"); throw new Error("admin_required"); }
       if (!res.ok) throw new Error(`status ${res.status}`);
       // Combined toast: "Cleared N entries + M trace files."
       const body = await res.json().catch(() => ({}));

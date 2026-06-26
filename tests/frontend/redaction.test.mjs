@@ -78,6 +78,33 @@ test("REDACT_KEYS covers both receipt key spellings + the two names", () => {
   assert.deepEqual(keys, ["applicantName", "receipt", "receiptNumber", "representativeName"]);
 });
 
+test("redactSnapshot masks any identifier key (eventId, letterId, pid)", () => {
+  const { T } = load();
+  const out = T.redactSnapshot({
+    events: [{ eventId: "abc-123", eventCode: "RFE", eventDateTime: "2026-03-01" }],
+    notices: [{ letterId: "L-998877", actionType: "ISSUED" }],
+    pid: "P-42",
+    formType: "I485",
+  });
+  assert.equal(out.events[0].eventId, MASK, "eventId masked");
+  assert.equal(out.notices[0].letterId, MASK, "letterId masked");
+  assert.equal(out.pid, MASK, "pid masked");
+  // Non-identifier siblings are untouched.
+  assert.equal(out.events[0].eventCode, "RFE");
+  assert.equal(out.notices[0].actionType, "ISSUED");
+  assert.equal(out.formType, "I485");
+});
+
+test("redactDetailValue masks an identifier-keyed row when redaction is on", () => {
+  const { T } = load();
+  T.state.redacted = true;
+  assert.equal(T.redactDetailValue("eventId", "abc-123"), MASK);
+  assert.equal(T.redactDetailValue("letterId", "L-1"), MASK);
+  assert.equal(T.redactDetailValue("eventCode", "RFE"), "RFE"); // non-id kept
+  T.state.redacted = false;
+  assert.equal(T.redactDetailValue("eventId", "abc-123"), "abc-123"); // no-op when off
+});
+
 test("redactSnapshot masks the system-log style `receipt` key", () => {
   const { T } = load();
   const out = T.redactSnapshot({ receipt: "IOE0000000000", label: "I-485" });
@@ -115,7 +142,7 @@ test("redactDetailValue masks PII keys, scrubs strings, no-ops when off", () => 
 
   T.state.redacted = true;
   assert.equal(T.redactDetailValue("receipt", "IOE0000000000"), T.REDACTION_MASK);
-  assert.equal(T.redactDetailValue("pid", 12345), 12345);            // non-PII number kept
+  assert.equal(T.redactDetailValue("level", 12345), 12345);          // non-PII number kept
   assert.equal(T.redactDetailValue("label", "I-485"), "I-485");      // form type kept
   assert.ok(!T.redactDetailValue("url", "x/IOE0000000000").includes("IOE0000000000"));
 });
@@ -133,7 +160,7 @@ test("_detailKvHtml masks a receipt detail row when redaction is on", () => {
 test("_detailKvHtml leaves non-PII rows untouched and is a no-op when off", () => {
   const { T } = load();
   T.state.redacted = true;
-  assert.ok(T._detailKvHtml("pid", 4242).includes("4242"));
+  assert.ok(T._detailKvHtml("level", 4242).includes("4242"));
 
   T.state.redacted = false;
   assert.ok(T._detailKvHtml("receipt", "IOE0000000000").includes("IOE0000000000"));
@@ -167,17 +194,22 @@ function makePill() {
 }
 
 function harness(view = "cases") {
-  const calls = { fetch: [], toast: [], refresh: 0 };
+  const calls = { fetch: [], toast: [], refresh: 0, pwPrompts: 0 };
   const { T, sandbox } = load();
   T.state.view = view;
   sandbox.refreshAll = async () => { calls.refresh += 1; };
   sandbox.renderUpdates = () => {};
   sandbox.renderSystemLog = () => {};
   sandbox.toast = (msg, kind) => calls.toast.push({ msg, kind });
+  // Toggling redaction always challenges for the admin password — stub the
+  // prompt so the headless test can drive it. Override per-test for cancel /
+  // wrong-password cases.
+  sandbox.requestAdminPassword = async () => { calls.pwPrompts += 1; return "pw"; };
   sandbox.fetch = async (url, opts) => {
-    const enabled = opts ? JSON.parse(opts.body).enabled : false;
-    calls.fetch.push({ url, method: opts && opts.method, enabled });
-    return { ok: true, json: async () => ({ ok: true, enabled }) };
+    const enabled = opts && opts.body ? JSON.parse(opts.body).enabled : false;
+    const adminPw = opts && opts.headers ? opts.headers["X-Admin-Password"] : undefined;
+    calls.fetch.push({ url, method: opts && opts.method, enabled, adminPw });
+    return { ok: true, status: 200, json: async () => ({ ok: true, enabled }) };
   };
   const pill = makePill();
   sandbox.document.getElementById = (id) => (id === "redaction-pill" ? pill : null);
@@ -193,10 +225,23 @@ test("wireRedactionPill ON: POSTs enabled=true to the server, refreshes, warns",
   assert.equal(h.calls.fetch[0].url, "/api/redaction-mode");
   assert.equal(h.calls.fetch[0].method, "POST");
   assert.equal(h.calls.fetch[0].enabled, true);
+  assert.equal(h.calls.pwPrompts, 1, "challenges for the admin password");
+  assert.equal(h.calls.fetch[0].adminPw, "pw", "sends X-Admin-Password header");
   assert.equal(h.T.state.redacted, true);
   assert.equal(h.pill.getAttribute("aria-checked"), "true");
   assert.equal(h.calls.refresh, 1, "re-fetches now-masked data");
   assert.equal(h.calls.toast.at(-1).kind, "warn");
+});
+
+test("wireRedactionPill: cancelling the password prompt aborts (no fetch)", async () => {
+  const h = harness();
+  h.sandbox.requestAdminPassword = async () => null;  // user hits Cancel
+  h.T.state.redacted = false;
+  h.T.wireRedactionPill();
+  await h.pill._click();
+
+  assert.equal(h.calls.fetch.length, 0, "no request when cancelled");
+  assert.equal(h.T.state.redacted, false, "latch unchanged");
 });
 
 test("wireRedactionPill OFF: POSTs enabled=false, refreshes, neutral toast", async () => {

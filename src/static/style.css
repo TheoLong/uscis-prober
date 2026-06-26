@@ -1515,6 +1515,45 @@ main[hidden] { display: none; }
 .modal-btn-danger:focus-visible { outline: 2px solid var(--bad); outline-offset: 2px; }
 .modal-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
 
+/* ---------- admin-password prompt ---------- */
+.admin-pw-input {
+  width: 100%;
+  margin-top: 14px;
+  padding: 9px 12px;
+  font: inherit;
+  font-family: var(--font-mono);
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  box-sizing: border-box;
+}
+.admin-pw-input:focus { border-color: var(--accent-hot); }
+
+/* ---------- redaction lock: grayed action buttons with a faded padlock ----------
+   While redaction is latched, every [data-guard="redaction"] action stays
+   clickable (clicking prompts for the admin password) but reads as locked:
+   desaturated and dimmed, with a faded padlock centered over it. The overlay
+   is pointer-transparent so the click still lands on the button beneath. */
+body.redaction-latched [data-guard="redaction"] {
+  position: relative;
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+body.redaction-latched [data-guard="redaction"]:hover { opacity: 0.78; }
+body.redaction-latched [data-guard="redaction"]::after {
+  content: "🔒";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
 .syslog-detail-v {
   font-family: var(--font-mono);
   color: var(--text);

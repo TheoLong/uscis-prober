@@ -30,7 +30,7 @@
            `pull update`) at wide widths so the button matches the
            visual height of the brand pill + LAST/NEXT PULL boxes. The
            narrow-width media query collapses it back to a single line. -->
-      <button id="pull-btn" class="pull-btn">
+      <button id="pull-btn" class="pull-btn" data-guard="redaction">
         <span class="pull-btn-line">Manual</span>
         <span class="pull-btn-line">Pull Update</span>
       </button>
@@ -99,11 +99,85 @@
              corner so the info chip doesn't compete for row space
              with the button it describes. -->
         <div class="action-with-info">
+          <!-- Redaction pill: server-side privacy + read-only latch. Masks PII
+               across the dashboard and password-gates every action button so
+               the site can be shared as a look-but-don't-touch demo. -->
+          <button id="redaction-pill" class="action-btn debug-pill"
+                  type="button" role="switch" aria-checked="false"
+                  title="Off: data shown. On: mask case numbers + names and lock every action behind the admin password.">
+            <span class="debug-pill-dot"></span>
+            <span class="debug-pill-label">Redaction</span>
+          </button>
+          <button id="redaction-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the redaction toggle"
+                  aria-expanded="false"
+                  aria-controls="redaction-info-popover">i</button>
+          <div id="redaction-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Redaction mode</strong> masks sensitive details —
+            case/receipt numbers, applicant and representative names —
+            everywhere on the site: the Cases, Updates and System tabs,
+            including the raw snapshot JSON and system-log details. It also
+            disables <em>Download full history</em> + <em>Copy this snapshot</em>
+            and grays out every action button (Pull, Debug, Export, Recompute,
+            Clear log) behind a lock — each one then needs the site admin
+            password to actuate. Masking happens <strong>on the server</strong>,
+            so private data never reaches the browser. Turn it on before
+            screenshotting or screen-sharing; toggling it requires the password.
+          </div>
+        </div>
+        <div class="action-with-info">
+          <!-- Access Lock pill: runtime toggle for the login gate. ON makes
+               every visitor sign in with the site admin password before the
+               dashboard loads. Toggling it (either way) requires the password. -->
+          <button id="access-lockout-pill" class="action-btn debug-pill"
+                  type="button" role="switch" aria-checked="false"
+                  title="Off: site open to view. On: visitors must sign in with the admin password.">
+            <span class="debug-pill-dot"></span>
+            <span class="debug-pill-label">Access Lock</span>
+          </button>
+          <button id="access-lockout-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Access Lock toggle"
+                  aria-expanded="false"
+                  aria-controls="access-lockout-info-popover">i</button>
+          <div id="access-lockout-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Access Lock</strong> gates the whole dashboard behind the
+            site admin password: while it's on, every visitor is sent to a login
+            page and the API rejects unauthenticated requests, exactly like a
+            password-protected site. Turn it off to make the dashboard open to
+            view again. Flipping it in either direction requires the admin
+            password. Independent of Redaction — Access Lock controls <em>who can
+            see</em> the site; redaction controls <em>what's visible and what
+            can be done</em> once they're in.
+          </div>
+        </div>
+        <div class="action-with-info">
+          <!-- Recompute diff: forces a fresh chronological diff trace
+               on the backend and logs a diff_recomputed event. -->
+          <button id="recompute-btn" class="action-btn pull-btn pull-btn-secondary"
+                  data-guard="redaction" type="button">Recompute diff</button>
+          <button id="recompute-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Recompute diff button"
+                  aria-expanded="false"
+                  aria-controls="recompute-info-popover">i</button>
+          <div id="recompute-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Recomputes every diff.</strong>
+            Clears cached diffs and forces a fresh chronological diff
+            trace across every case you track, re-walking each case's
+            full snapshot history. A <code>diff_recomputed</code> event
+            with per-case change counts is appended to the log below so
+            you can confirm the data flowed through.
+          </div>
+        </div>
+        <div class="action-with-info">
           <!-- Debug-mode pill: toggles config.trace_successful_pulls
                via /api/debug-mode. ON keeps the Playwright trace.zip
                + MFA sidecar for every pull (disk-heavier; useful for
                verifying capture against a healthy pull). -->
           <button id="debug-mode-pill" class="action-btn debug-pill"
+                  data-guard="redaction"
                   type="button" role="switch" aria-checked="false"
                   title="Off: traces only on failure. On: traces on every pull (disk-heavier).">
             <span class="debug-pill-dot"></span>
@@ -125,37 +199,9 @@
           </div>
         </div>
         <div class="action-with-info">
-          <!-- Redaction pill: client-side privacy toggle. Masks PII across
-               the dashboard + snapshot JSON and disables download/copy so
-               the site can be screenshotted or shared safely. -->
-          <button id="redaction-pill" class="action-btn debug-pill"
-                  type="button" role="switch" aria-checked="false"
-                  title="Off: data shown. On: mask case numbers + names and disable snapshot download/copy for safe sharing.">
-            <span class="debug-pill-dot"></span>
-            <span class="debug-pill-label">Redaction</span>
-          </button>
-          <button id="redaction-info-btn" class="info-badge info-badge-corner"
-                  type="button"
-                  aria-label="About the redaction toggle"
-                  aria-expanded="false"
-                  aria-controls="redaction-info-popover">i</button>
-          <div id="redaction-info-popover" class="info-popover popover-left" hidden role="tooltip">
-            <strong>Redaction mode</strong> masks sensitive details —
-            case/receipt numbers, applicant and representative names —
-            everywhere on the site: the Cases, Updates and System tabs,
-            including the raw snapshot JSON and system-log details. It also
-            disables <em>Download full history</em> + <em>Copy this
-            snapshot</em> and locks pull rows from expanding. Masking happens
-            <strong>on the server</strong>, so private data never reaches the
-            browser — it can't be recovered from the network tab or page
-            source. Turn it on before screenshotting or screen-sharing. This
-            is a global, server-side switch.
-          </div>
-        </div>
-        <div class="action-with-info">
           <!-- Export data: zip of every data/{form}_case.json + manifest. -->
           <a id="export-btn" class="action-btn pull-btn pull-btn-secondary"
-             href="/api/export">Export data</a>
+             data-guard="redaction" href="/api/export">Export data</a>
           <button id="export-info-btn" class="info-badge info-badge-corner"
                   type="button"
                   aria-label="About the Export data button"
@@ -171,28 +217,9 @@
             applicant info, letter IDs, etc. Treat the file as PII.
           </div>
         </div>
-        <div class="action-with-info">
-          <!-- Recompute diff: forces a fresh chronological diff trace
-               on the backend and logs a diff_recomputed event. -->
-          <button id="recompute-btn" class="action-btn pull-btn pull-btn-secondary"
-                  type="button">Recompute diff</button>
-          <button id="recompute-info-btn" class="info-badge info-badge-corner"
-                  type="button"
-                  aria-label="About the Recompute diff button"
-                  aria-expanded="false"
-                  aria-controls="recompute-info-popover">i</button>
-          <div id="recompute-info-popover" class="info-popover popover-left" hidden role="tooltip">
-            <strong>Recomputes every diff.</strong>
-            Clears cached diffs and forces a fresh chronological diff
-            trace across every case you track, re-walking each case's
-            full snapshot history. A <code>diff_recomputed</code> event
-            with per-case change counts is appended to the log below so
-            you can confirm the data flowed through.
-          </div>
-        </div>
         <!-- Mount slot for Export log + Clear log buttons (rendered
-             into here from app.js so they sit alongside DEBUG and
-             Export data in this single Actions cluster). -->
+             into here from app.js so they sit at the end of the Actions
+             cluster, after Export data). -->
         <span id="syslog-controls-mount"></span>
       </div>
     </section>

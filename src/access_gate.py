@@ -87,6 +87,33 @@ class _BruteForceGuard:
 _guard = _BruteForceGuard()
 
 
+# Shared credential check — backs the login gate AND server.py's per-action
+# admin challenges, so one brute-force guard limits every password prompt.
+
+def client_ip() -> str:
+    """Best-effort client IP for the current request, proxy-header aware."""
+    return (request.headers.get("X-Forwarded-For")
+            or request.remote_addr or "?").split(",")[0].strip()
+
+
+def verify_code(provided: str, expected: str, *, ip: str | None = None) -> tuple[bool, int]:
+    """Constant-time check of `provided` against `expected`, brute-force guarded.
+
+    Returns (ok, retry_after_seconds). A non-zero retry_after means the caller
+    IP is currently rate-limited and the attempt was not even compared. A wrong
+    or empty code records a failure; a correct one clears the IP's failures.
+    """
+    ip = ip or client_ip()
+    blocked, retry_after = _guard.is_blocked(ip)
+    if blocked:
+        return False, retry_after
+    if expected and provided and hmac.compare_digest(provided, expected):
+        _guard.clear(ip)
+        return True, 0
+    _guard.record_failure(ip)
+    return False, 0
+
+
 # ---------------------------------------------------------------------------
 # Stable Flask secret key: persist to disk, regenerate when code rotates
 # ---------------------------------------------------------------------------
@@ -201,9 +228,9 @@ LOGIN_HTML = """<!DOCTYPE html>
 <body>
 <form class="gate" id="f" autocomplete="off">
   <h1><img src="/static/logo.svg" alt="">USCIS Prober</h1>
-  <p>Enter access code to continue.</p>
-  <input name="code" id="code" autofocus inputmode="text" autocomplete="off"
-         spellcheck="false" placeholder="access code">
+  <p>Enter the site admin password to continue.</p>
+  <input name="code" id="code" type="password" autofocus inputmode="text" autocomplete="off"
+         spellcheck="false" placeholder="admin password">
   <button type="submit">Sign in</button>
   <div class="err" id="err">__ERR__</div>
 </form>
@@ -231,7 +258,7 @@ LOGIN_HTML = """<!DOCTYPE html>
       const j = await r.json().catch(() => ({}));
       err.textContent = `Too many attempts — try again in ${j.retryAfter || "a few"} seconds.`;
     } else {
-      err.textContent = "Wrong access code.";
+      err.textContent = "Wrong password.";
     }
   });
 </script>
@@ -242,21 +269,40 @@ LOGIN_HTML = """<!DOCTYPE html>
 # Public integration
 # ---------------------------------------------------------------------------
 
-def configure(app: Flask, optional_access_code: str | None, *, root: Path) -> bool:
-    """Install the access gate on `app` if `optional_access_code` is a non-empty string.
+def configure(
+    app: Flask,
+    admin_password: str | None,
+    *,
+    root: Path,
+    is_lockout_enabled=None,
+) -> bool:
+    """Install the access gate on `app` when `admin_password` is a non-empty string.
 
-    Returns True if the gate was installed, False if auth is disabled.
+    The login routes, signed session, and brute-force guard are always installed
+    when a password is set — the password also backs the per-action admin
+    challenge, so it must be live even when the site itself is open.
+
+    Whether an unauthenticated request is actually turned away is decided per
+    request by `is_lockout_enabled`:
+      - None (legacy)        → enforce whenever a password is set (static gate).
+      - callable returning   → enforce only while it returns True, so the UI can
+        a bool                 toggle the lockout on and off at runtime.
+
+    Returns True if the gate was installed, False if auth is disabled (no password).
     """
-    if not optional_access_code:
+    if not admin_password:
         logger.warning(
-            "Access code NOT set. Dashboard is open to every host that "
-            "can reach this port. Safe for localhost / SSH-tunnel use; "
-            "set auth.optional_access_code in config.json before exposing the "
-            "server to a LAN or the public internet."
+            "Admin password NOT set. Dashboard is open to every host that "
+            "can reach this port and no action is password-gated. Safe for "
+            "localhost / SSH-tunnel use; set auth.admin_password in config.json "
+            "before exposing the server to a LAN or the public internet."
         )
         return False
 
-    app.secret_key = _load_or_create_secret(root, optional_access_code)
+    def _lockout_active() -> bool:
+        return is_lockout_enabled() if callable(is_lockout_enabled) else True
+
+    app.secret_key = _load_or_create_secret(root, admin_password)
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     # Flask sits behind Caddy (terminates TLS). Honour X-Forwarded-Proto so
@@ -279,21 +325,21 @@ def configure(app: Flask, optional_access_code: str | None, *, root: Path) -> bo
     # anyone can read on GitHub — we're not leaking anything sensitive.
     OPEN_PATHS = {"/login", "/api/login", "/api/auth/status",
                   "/api/version", "/favicon.ico"}
-    # `/api/full-trace/` is open so trace.playwright.dev can fetch
-    # `trace.zip` cross-origin. The files served are sandboxed inside
-    # `data/full_traces/<dir>/` and path-traversal-guarded; their
-    # content is the same diagnostic material the operator is actively
-    # debugging, so no new PII surface is created.
-    OPEN_PREFIXES = ("/static/", "/api/full-trace/", "/trace-viewer/")
-
-    def _client_ip() -> str:
-        return (request.headers.get("X-Forwarded-For") or request.remote_addr or "?").split(",")[0].strip()
+    # Only static assets are open (the login page needs them). Trace endpoints
+    # (/api/full-trace, /trace-viewer) carry raw PII, so they stay behind the
+    # lock — cross-origin trace viewing simply doesn't work while locked.
+    OPEN_PREFIXES = ("/static/",)
 
     def _logged_in() -> bool:
         return session.get("authed") is True
 
     @app.before_request
     def _gate_before_request():
+        # Only turn requests away while the lockout latch is active. When it's
+        # off the site is open to view; redaction's per-action gate (server.py)
+        # still independently password-protects mutating actions.
+        if not _lockout_active():
+            return None
         path = request.path or "/"
         if path in OPEN_PATHS or path.startswith(OPEN_PREFIXES):
             return None
@@ -325,26 +371,25 @@ def configure(app: Flask, optional_access_code: str | None, *, root: Path) -> bo
 
     @app.route("/api/login", methods=["POST"])
     def api_login():
-        ip = _client_ip()
-        blocked, retry_after = _guard.is_blocked(ip)
-        if blocked:
+        ip = client_ip()
+        body = request.get_json(silent=True) or {}
+        provided = (body.get("code") or "").strip()
+        if not provided:
+            # Distinguish "you sent nothing" from "wrong code", but still
+            # count it against the brute-force budget so empty spam is capped.
+            _guard.record_failure(ip)
+            return jsonify({"ok": False, "error": "missing_code"}), 400
+
+        ok, retry_after = verify_code(provided, admin_password, ip=ip)
+        if ok:
+            session.permanent = True
+            session["authed"] = True
+            return jsonify({"ok": True})
+        if retry_after:
             resp = jsonify({"ok": False, "error": "rate_limited", "retryAfter": retry_after})
             resp.headers["Retry-After"] = str(retry_after)
             return resp, 429
 
-        body = request.get_json(silent=True) or {}
-        provided = (body.get("code") or "").strip()
-        if not provided:
-            _guard.record_failure(ip)
-            return jsonify({"ok": False, "error": "missing_code"}), 400
-
-        if hmac.compare_digest(provided, optional_access_code):
-            _guard.clear(ip)
-            session.permanent = True
-            session["authed"] = True
-            return jsonify({"ok": True})
-
-        _guard.record_failure(ip)
         # Artificial small delay on failure — cheap defence in depth.
         time.sleep(0.25)
         return jsonify({"ok": False, "error": "bad_code"}), 401
@@ -356,10 +401,12 @@ def configure(app: Flask, optional_access_code: str | None, *, root: Path) -> bo
 
     @app.route("/api/auth/status")
     def api_auth_status():
-        return jsonify({"authRequired": True, "authed": _logged_in()})
+        # authRequired tracks the live lockout latch, not just "a password
+        # exists" — the login page polls this to know whether to gate.
+        return jsonify({"authRequired": _lockout_active(), "authed": _logged_in()})
 
     logger.info(
-        "Access gate armed (code length=%d, %dd sessions, %d attempts/%ds IP limit).",
-        len(optional_access_code), SESSION_DAYS, MAX_ATTEMPTS, WINDOW_SECONDS,
+        "Access gate armed (password length=%d, %dd sessions, %d attempts/%ds IP limit).",
+        len(admin_password), SESSION_DAYS, MAX_ATTEMPTS, WINDOW_SECONDS,
     )
     return True
