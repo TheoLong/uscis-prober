@@ -3261,13 +3261,15 @@ function drawEventLinks(wrap, list, links) {
     path.style.stroke = color;
     path.setAttribute("marker-end", `url(#${arrowId})`);
 
-    const title = document.createElementNS(svgNS, "title");
+    // Instant tooltip via the shared events-popup instead of an SVG <title>,
+    // whose native hover delay (~700ms) feels sluggish. The hit path carries
+    // the pointer events, so tag it for _wireEventsTooltipTap.
     const d_ = d.link.daysApart;
-    title.textContent =
+    hit.classList.add("events-tooltip");
+    hit.setAttribute("data-tooltip",
       `${d.link.eventCode} re-emitted` +
       (d_ != null ? ` ${d_} day${d_ === 1 ? "" : "s"} later` : "") +
-      ` (same eventTimestamp ${d.link.eventTimestamp})`;
-    g.appendChild(title);
+      ` (same eventTimestamp ${d.link.eventTimestamp})`);
     g.appendChild(hit);
     g.appendChild(casing);
     g.appendChild(path);
