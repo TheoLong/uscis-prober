@@ -111,10 +111,7 @@ def test_classify_change_silent_update_when_updatedAt_date_advances():
 
 
 def test_classify_change_silent_update_when_only_timestamp_moves():
-    # A bare updatedAtTimestamp move with no event context is a silent update.
-    # (Whether it is actually an event's footprint is decided in
-    # snapshot_changes, which has the surrounding events; classify_change on a
-    # standalone change with no events is a genuine silent update.)
+    # A change whose only diff is the case update timestamp is a silent update.
     change = {
         "scalars": {
             "updatedAtTimestamp": {"from": "2026-03-10T14:59:52Z",
@@ -193,10 +190,11 @@ def test_snapshot_changes_does_not_collapse_same_day_transitions():
     assert [e["eventCode"] for e in changes[1]["events"]["added"]] == ["FTA1"]
 
 
-def test_snapshot_changes_folds_event_footprint_bump():
-    """A timestamp-only bump that lands on an event's own time is that event's
-    case-level footprint and is not surfaced as a separate row — only the
-    event row remains."""
+def test_snapshot_changes_keeps_event_footprint_bump():
+    """A timestamp-only bump trailing a new event (the case timestamp catching
+    up to the event's time in a later pull) is a real, distinct change and must
+    be surfaced — the event's own pair did not record it, so dropping it would
+    lose the latest updatedAtTimestamp."""
     entries = [
         # Settled prior state.
         _entry(
@@ -219,8 +217,8 @@ def test_snapshot_changes_folds_event_footprint_bump():
                      "eventTimestamp": "2026-06-25T15:00:00.000Z",
                      "createdAtTimestamp": "2026-06-25T15:00:01.000Z"}],
         ),
-        # Later pull: case updatedAtTimestamp catches up to the FTA1's time
-        # (within seconds). This bump is the FTA1's footprint -> folded away.
+        # Later pull: case updatedAtTimestamp catches up to the FTA1's time.
+        # This is a real change and must be its own silent_update row.
         _entry(
             "2026-06-25T15:42:40Z",
             updatedAt="2026-06-25",
@@ -234,15 +232,16 @@ def test_snapshot_changes_folds_event_footprint_bump():
         ),
     ]
     changes = snapshot_changes(entries)
-    # Only the FTA1 event row — the trailing footprint bump is folded out.
-    assert [c["kind"] for c in changes] == ["event"]
+    # The FTA1 event row, then the trailing timestamp catch-up — both kept.
+    assert [c["kind"] for c in changes] == ["event", "silent_update"]
     assert [e["eventCode"] for e in changes[0]["events"]["added"]] == ["FTA1"]
+    assert changes[1]["scalars"]["updatedAtTimestamp"]["to"] == "2026-06-25T15:00:00.500Z"
 
 
-def test_snapshot_changes_folds_backdated_event_footprint_via_created_at():
+def test_snapshot_changes_keeps_backdated_event_footprint_bump():
     """A backdated re-emit carries an old eventTimestamp but a recent
-    createdAtTimestamp, and USCIS stamps the case from the WRITE time. The
-    fold must match on createdAtTimestamp, not just eventTimestamp."""
+    createdAtTimestamp; USCIS stamps the case from the WRITE time. The trailing
+    catch-up bump is still a real change and is kept as its own row."""
     entries = [
         _entry(
             "2026-06-05T11:00:00Z",
@@ -265,8 +264,8 @@ def test_snapshot_changes_folds_backdated_event_footprint_via_created_at():
                      "eventTimestamp": "2026-03-10T17:00:00.000Z",
                      "createdAtTimestamp": "2026-06-05T13:30:00.000Z"}],
         ),
-        # Trailing bump matching the backdated event's createdAtTimestamp
-        # (write time) — folds even though eventTimestamp is ~87 days away.
+        # Trailing bump as the case timestamp catches up to the write time —
+        # a real change, kept as its own silent_update row.
         _entry(
             "2026-06-05T18:00:00Z",
             updatedAt="2026-06-05",
@@ -280,7 +279,7 @@ def test_snapshot_changes_folds_backdated_event_footprint_via_created_at():
         ),
     ]
     changes = snapshot_changes(entries)
-    assert [c["kind"] for c in changes] == ["event"]
+    assert [c["kind"] for c in changes] == ["event", "silent_update"]
 
 
 def test_snapshot_changes_keeps_silent_update_far_from_any_event():

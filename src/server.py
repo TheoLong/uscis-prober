@@ -16,6 +16,7 @@ in a subprocess.
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import logging
@@ -372,6 +373,66 @@ class PullState:
 
 _pull_state = PullState()
 _pull_lock = threading.Lock()
+
+# Cross-process coordination via advisory file locks (flock). The in-process
+# _pull_lock above only serialises pulls within ONE process; these guard against
+# a SECOND server instance (a stray manual launch, a systemd restart overlap)
+# running its own scheduler. Two concurrent pulls log into the one USCIS account
+# at once and collide on MFA (each new code invalidates the last), so a second
+# pull must not start while another process holds the lock.
+_INSTANCE_LOCK_NAME = ".server.lock"
+_PULL_LOCK_NAME = ".pull.lock"
+_instance_lock_fh = None  # kept open for the process lifetime once acquired
+
+
+def _acquire_single_instance_lock() -> bool:
+    """Take an exclusive, non-blocking flock so only one server runs at a time.
+
+    Returns True if we got it (we're the singleton), False if another instance
+    already holds it (caller should exit). The fd is parked in a module global
+    so it stays open — the OS releases it when this process dies.
+    """
+    global _instance_lock_fh
+    if _instance_lock_fh is not None:
+        return True  # this process already holds it — idempotent
+    try:
+        fh = open(DATA_DIR / _INSTANCE_LOCK_NAME, "w")
+    except OSError as e:  # pragma: no cover — disk problem; don't block startup
+        logger.warning("Single-instance lock file unopenable (%s); skipping guard.", e)
+        return True
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    try:
+        fh.write(str(os.getpid()) + "\n")
+        fh.flush()
+    except OSError:  # pragma: no cover — best-effort pid marker
+        pass
+    _instance_lock_fh = fh
+    return True
+
+
+def _acquire_pull_lock():
+    """Take the cross-process pull lock. Returns (ok, fh):
+
+    - (True, fh)   — acquired; caller MUST close fh to release after the pull.
+    - (False, None) — another process is mid-pull; caller should skip.
+    - (True, None) — lock file unopenable (disk issue); proceed unlocked rather
+      than halt every pull on a transient FS problem.
+    """
+    try:
+        fh = open(DATA_DIR / _PULL_LOCK_NAME, "w")
+    except OSError as e:  # pragma: no cover — disk problem
+        logger.warning("Pull lock file unopenable (%s); proceeding unlocked.", e)
+        return True, None
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False, None
+    return True, fh
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +817,17 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
             started_at=_now_iso(),
         )
 
+    # Cross-process guard: a second server instance may already be pulling.
+    # Acquire AFTER the in-process guard so we only contend when this process
+    # genuinely intends to pull; release in the finally below.
+    acquired, _pull_lock_fh = _acquire_pull_lock()
+    if not acquired:
+        with _pull_lock:
+            _pull_state = PullState()  # roll back the running flag we just set
+        logger.info("Another process is pulling; skipping %s trigger.", trigger)
+        sys_log("pull_skipped_locked", source="server", trigger=trigger)
+        return
+
     # Start thread-local capture so any sys_log() call fired from the
     # server process on this thread (smtp_* from mailer, snapshot_log_*
     # from load_*_entries, pull_pre_snapshot_failed, etc.) folds into
@@ -780,6 +852,12 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
         # thread. If the inner crashed before producing an envelope,
         # `_spawn_pull_async` already emits `pull_thread_crashed`.
         _syslog_pop_capture()
+        # Release the cross-process pull lock (closing the fd drops the flock).
+        if _pull_lock_fh is not None:
+            try:
+                _pull_lock_fh.close()
+            except OSError:  # pragma: no cover — best-effort
+                pass
 
     # Emit the consolidated envelope OUTSIDE the capture scope so this
     # final sys_log() reaches disk instead of being folded into its own
@@ -2421,6 +2499,21 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Single-instance guard — FIRST, before the scheduler starts. A second
+    # instance (a stray manual `python src/server.py` next to the systemd one,
+    # or a restart overlap) would otherwise run its own scheduler and fire
+    # duplicate, MFA-colliding pulls. The scheduler starts before app.run()
+    # binds the port, so a port clash alone wouldn't stop it — this does.
+    if not _acquire_single_instance_lock():
+        sys_log("server_singleton_abort", level="warning", source="server",
+                pid=str(os.getpid()))
+        logger.warning(
+            "Another uscis-prober instance already holds the lock; exiting so "
+            "we don't run a duplicate scheduler. (Use `systemctl restart "
+            "uscis-prober` rather than launching server.py by hand.)"
+        )
+        return
+
     # Install the access gate before the scheduler. Login routes install
     # whenever auth.admin_password is set; load_access_lockout_enabled decides
     # live whether unauthenticated callers are turned away.
