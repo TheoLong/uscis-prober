@@ -1047,9 +1047,12 @@ async function pollPullStatus() {
     // CSS collapses it to one line at narrow widths. When the pull
     // is running, swap to a single "Pulling…" status so the button
     // reads as state, not action.
+    // Keep a space between the two stacked spans so the button's textContent
+    // reads "Manual Pull Update" (the spans are display:block, so the space
+    // collapses visually but keeps the label correct for the password prompt).
     btn.innerHTML = state.pullRunning
       ? `<span class="pull-btn-line">Pulling…</span>`
-      : `<span class="pull-btn-line">Manual</span>` +
+      : `<span class="pull-btn-line">Manual</span> ` +
         `<span class="pull-btn-line">Pull Update</span>`;
     document.getElementById("next-when").textContent =
       state.nextRun ? formatLocal(state.nextRun) : "—";
