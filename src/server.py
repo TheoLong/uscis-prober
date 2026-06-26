@@ -37,7 +37,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from access_gate import client_ip as _client_ip
 from access_gate import configure as configure_access_gate
+from access_gate import verify_code as _verify_code
 from diff_utils import (
     EVENT_CODE_LABELS,
     bin_by_day,
@@ -283,6 +285,71 @@ def load_redaction_enabled(config: dict | None = None) -> bool:
         except Exception:
             return False
     return config.get("redaction_enabled", False) is True
+
+
+def load_access_lockout_enabled(config: dict | None = None) -> bool:
+    """Read `access_lockout_enabled` (bool) from config.json.
+
+    Optional field — default `false`. When true, the access gate turns away
+    every unauthenticated request (browser → login page, API → 401) until the
+    visitor signs in with the site admin password. Toggled from the UI via
+    /api/access-lockout. Missing or non-boolean = false (defensive: a bad value
+    must never silently disable the lockout the operator asked for, and the
+    flag is read live on every request).
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            return False
+    return config.get("access_lockout_enabled", False) is True
+
+
+def admin_password(config: dict | None = None) -> str:
+    """The single site admin password, or "" when password gating is disabled.
+
+    Reads `auth.admin_password`, falling back to the legacy
+    `auth.optional_access_code` so older configs keep working. Empty/missing
+    means no gating: latches toggle freely and actions are never challenged.
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            return ""
+    auth = config.get("auth") or {}
+    return (auth.get("admin_password") or auth.get("optional_access_code") or "")
+
+
+def _verify_admin_request() -> tuple[bool, int]:
+    """Check the request's `X-Admin-Password` header against the admin password.
+
+    Brute-force guarded and constant-time (shared with the login limiter).
+    Returns (ok, retry_after_seconds); retry_after > 0 means the caller IP is
+    currently rate-limited. Callers must first decide whether a password is
+    even required — when no admin password is configured this always fails.
+    """
+    provided = request.headers.get("X-Admin-Password", "")
+    return _verify_code(provided, admin_password(), ip=_client_ip())
+
+
+def _toggle_password_block():
+    """Password gate shared by the two latch toggles (redaction, access lockout).
+
+    Both latches require the admin password to flip in EITHER direction. Returns
+    a Flask error response to short-circuit the caller, or None to proceed. A
+    no-op when no admin password is configured (gating disabled).
+    """
+    if not admin_password():
+        return None
+    ok, retry_after = _verify_admin_request()
+    if ok:
+        return None
+    if retry_after:
+        resp = jsonify({"ok": False, "error": "rate_limited", "retryAfter": retry_after})
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
+    return jsonify({"ok": False, "error": "admin_required"}), 401
 
 
 _FORM_NUM_RE = re.compile(r"I-?(\d+)")
@@ -1177,6 +1244,61 @@ def _no_cache(resp):
     return resp
 
 
+# Mutating actions that become password-gated while redaction is latched. The
+# two latch toggles (/api/redaction-mode, /api/access-lockout) are deliberately
+# absent: they verify the password themselves, in BOTH directions, so they
+# stay reachable to *unlatch* even while redaction is on.
+_GUARDED_ACTION_POSTS = frozenset({
+    "/api/pull",
+    "/api/debug-mode",
+    "/api/system-log/clear",
+    "/api/system-log/recompute",
+})
+
+
+def _is_guarded_action() -> bool:
+    path = request.path or ""
+    method = request.method
+    if method == "POST":
+        if path in _GUARDED_ACTION_POSTS:
+            return True
+        if path.startswith("/api/cases/") and path.endswith("/fake-links"):
+            return True
+    elif method == "GET":
+        if path in ("/api/export", "/api/system-log/export"):
+            return True
+    return False
+
+
+@app.before_request
+def _redaction_action_gate():
+    """While redaction is latched, every mutating action needs the password.
+
+    This is the server-side teeth behind the grayed-out lock overlay: the UI
+    can't be trusted to enforce it, so the action is rejected here unless the
+    request carries a valid `X-Admin-Password`. Read-only requests, and every
+    request while redaction is off, pass straight through.
+
+    With no admin password configured, redaction degrades to plain read-only
+    (403) — there's no secret to unlock with, so actions are simply blocked.
+    """
+    if not load_redaction_enabled():
+        return None
+    if not _is_guarded_action():
+        return None
+    pw = admin_password()
+    if not pw:
+        return jsonify({"ok": False, "error": "redaction_enabled"}), 403
+    ok, retry_after = _verify_admin_request()
+    if ok:
+        return None
+    if retry_after:
+        resp = jsonify({"ok": False, "error": "rate_limited", "retryAfter": retry_after})
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
+    return jsonify({"ok": False, "error": "admin_required"}), 401
+
+
 @app.after_request
 def _redact_json(resp):
     """When redaction mode is on, mask PII in every JSON response *before* it
@@ -1401,9 +1523,11 @@ def api_export():
     The manifest maps each file to its configured case label + receipt
     so the archive is self-describing. Produced in memory — the repo's
     snapshot history is tiny (a few MB at most).
+
+    While redaction is latched this is a guarded action — the request only
+    reaches here after `_redaction_action_gate` accepts the admin password
+    (or, with no password configured, blocks it outright).
     """
-    if load_redaction_enabled():
-        return jsonify({"ok": False, "error": "redaction_enabled"}), 403
     config = load_config()
     now_iso = _now_iso()
     buf = io.BytesIO()
@@ -1654,9 +1778,10 @@ def api_system_log_export():
     set. Separate from `/api/export` (case snapshots) because these
     diagnostics contain email bodies, HTTP bodies, etc. that the
     operator may want to hand-review before sharing.
+
+    While redaction is latched this is a guarded action, password-gated by
+    `_redaction_action_gate` before the request reaches here.
     """
-    if load_redaction_enabled():
-        return jsonify({"ok": False, "error": "redaction_enabled"}), 403
     entries = read_system_log()
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
     buf = io.BytesIO()
@@ -1804,13 +1929,16 @@ def api_redaction_mode():
     """Read / toggle `redaction_enabled` in config.json.
 
     GET  → {"enabled": bool}
-    POST {"enabled": bool} → persists the change to config.json.
+    POST {"enabled": bool} + `X-Admin-Password` header → persists the change.
 
     When enabled, the server masks PII in every JSON response (see the
-    `_redact_json` after-request hook) and blocks the data exports, so the
-    dashboard can be screenshotted or shared without private data leaving
-    the process. It's a global, server-side switch — the masking is not
-    recoverable client-side. Writes are atomic (tmp file + os.replace).
+    `_redact_json` after-request hook) and turns every action button into a
+    password-gated control (see `_redaction_action_gate`), so the dashboard
+    can be shared as a read-only demo without private data or live actions
+    leaking. The masking is not recoverable client-side.
+
+    Flipping the latch in EITHER direction requires the admin password (when
+    one is configured). Writes are atomic (tmp file + os.replace).
     """
     if request.method == "GET":
         return jsonify({"enabled": load_redaction_enabled()})
@@ -1820,12 +1948,57 @@ def api_redaction_mode():
     if not isinstance(desired, bool):
         return jsonify({"ok": False, "error": "enabled_must_be_bool"}), 400
 
+    blocked = _toggle_password_block()
+    if blocked is not None:
+        return blocked
+
     try:
         cfg = load_config()
     except Exception as e:  # pragma: no cover — defensive
         return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
 
     cfg["redaction_enabled"] = desired
+    try:
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:  # pragma: no cover — filesystem should not fail
+        return jsonify({"ok": False, "error": f"config_write_failed: {e}"}), 500
+
+    return jsonify({"ok": True, "enabled": desired})
+
+
+@app.route("/api/access-lockout", methods=["GET", "POST"])
+def api_access_lockout():
+    """Read / toggle `access_lockout_enabled` in config.json.
+
+    GET  → {"enabled": bool}
+    POST {"enabled": bool} + `X-Admin-Password` header → persists the change.
+
+    When enabled, the access gate turns away every unauthenticated visitor
+    (browser → login page, API → 401) until they sign in with the site admin
+    password — the same logic the static access code used to provide, now a
+    runtime latch. Flipping it in EITHER direction requires the admin password
+    (when one is configured). Writes are atomic (tmp file + os.replace).
+    """
+    if request.method == "GET":
+        return jsonify({"enabled": load_access_lockout_enabled()})
+
+    body = request.get_json(silent=True) or {}
+    desired = body.get("enabled")
+    if not isinstance(desired, bool):
+        return jsonify({"ok": False, "error": "enabled_must_be_bool"}), 400
+
+    blocked = _toggle_password_block()
+    if blocked is not None:
+        return blocked
+
+    try:
+        cfg = load_config()
+    except Exception as e:  # pragma: no cover — defensive
+        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+
+    cfg["access_lockout_enabled"] = desired
     try:
         tmp = CONFIG_PATH.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(cfg, indent=2))
@@ -2233,12 +2406,14 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # Install the access gate before the scheduler / blueprint work —
-    # pulls auth.optional_access_code out of config.json; no-op if it's empty.
+    # Install the access gate before the scheduler / blueprint work — reads
+    # auth.admin_password from config.json. The gate's login routes + session
+    # are installed whenever a password is set; whether unauthenticated callers
+    # are actually turned away is decided live by load_access_lockout_enabled.
     config: dict = {}
     try:
         config = load_config()
-        optional_access_code = (config.get("auth") or {}).get("optional_access_code") or ""
+        site_admin_password = admin_password(config)
     except Exception as e:
         # Config load failing at startup means the operator can't reach
         # the dashboard without a restart. Log loudly AND continue with
@@ -2253,7 +2428,7 @@ def main() -> None:
             )[-800:],
         )
         logger.exception("Failed to load config at startup; access gate disabled.")
-        optional_access_code = ""
+        site_admin_password = ""
 
     # Resolve the REQUIRED pull schedule from config.json into the
     # module-global PULL_HOURS *before* the scheduler reads it. There is
@@ -2275,7 +2450,10 @@ def main() -> None:
         PULL_HOURS = ()
 
     try:
-        configure_access_gate(app, optional_access_code, root=ROOT)
+        configure_access_gate(
+            app, site_admin_password, root=ROOT,
+            is_lockout_enabled=load_access_lockout_enabled,
+        )
     except Exception as e:
         # Access gate wiring failure leaves the app without auth. Log
         # and re-raise — this one IS fatal because a publicly-reachable
@@ -2315,7 +2493,8 @@ def main() -> None:
         source="server",
         schedule_hours=list(PULL_HOURS),
         schedule_timezone=SCHEDULER_TZ,
-        access_gate_armed=bool(optional_access_code),
+        admin_password_set=bool(site_admin_password),
+        access_lockout_enabled=load_access_lockout_enabled(config),
     )
 
     # Recompute the diff feed eagerly so an operator dropping a backfilled
@@ -2326,8 +2505,8 @@ def main() -> None:
     _recompute_diffs_at_startup(config)
 
     # Don't use reloader — it spawns two processes and double-schedules jobs.
-    # Bind to all interfaces — production access is gated by the optional
-    # access-code middleware (see access_gate.py) when auth.optional_access_code is set.
+    # Bind to localhost — production access is fronted by Caddy and gated by
+    # the access-lockout latch (see access_gate.py) when auth.admin_password is set.
     try:
         app.run(host="127.0.0.1", port=int(os.environ.get("USCIS_PORT", "8080")), debug=False, use_reloader=False)
     except Exception as e:

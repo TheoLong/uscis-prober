@@ -73,7 +73,7 @@ def test_login_page_is_open(gated_app):
     c = gated_app.test_client()
     r = c.get("/login")
     assert r.status_code == 200
-    assert b"access code" in r.data.lower()
+    assert b"admin password" in r.data.lower()
 
 
 # -------- API responses ---------------------------------------------------
@@ -418,3 +418,78 @@ def test_flask_secret_write_failure_falls_back_to_ephemeral(_redirect_log, monke
               if e["event"] == "flask_secret_write_failed"]
     assert len(events) == 1
     assert events[0]["level"] == "error"
+
+
+# -------- runtime access-lockout latch ------------------------------------
+
+def _toggleable_app(lockout_state):
+    """A configured app whose lockout is driven by the mutable `lockout_state`
+    dict — `is_lockout_enabled` reads it live, mirroring the config-flag read."""
+    app = Flask("toggle")
+    app.testing = True
+
+    @app.route("/")
+    def index():
+        return "home"
+
+    @app.route("/api/cases")
+    def cases():
+        return jsonify({"cases": []})
+
+    tmp = tempfile.mkdtemp()
+    configure(app, "sesame-open", root=Path(tmp),
+              is_lockout_enabled=lambda: lockout_state["on"])
+    return app
+
+
+def test_lockout_off_means_site_is_open_even_with_password():
+    state = {"on": False}
+    c = _toggleable_app(state).test_client()
+    # Password is configured, but the latch is off → no gate.
+    assert c.get("/").status_code == 200
+    assert c.get("/api/cases").status_code == 200
+    assert c.get("/api/auth/status").get_json()["authRequired"] is False
+
+
+def test_lockout_on_turns_visitors_away_until_login():
+    state = {"on": True}
+    app = _toggleable_app(state)
+    c = app.test_client()
+    assert c.get("/api/cases").status_code == 401          # API → 401
+    assert c.get("/").status_code in (302, 301)            # browser → login redirect
+    assert c.get("/api/auth/status").get_json()["authRequired"] is True
+    # Sign in, then the same routes open up.
+    assert c.post("/api/login", json={"code": "sesame-open"}).status_code == 200
+    assert c.get("/api/cases").status_code == 200
+
+
+def test_lockout_latch_can_flip_at_runtime():
+    state = {"on": False}
+    c = _toggleable_app(state).test_client()
+    assert c.get("/api/cases").status_code == 200
+    state["on"] = True                                     # operator latches it
+    assert c.get("/api/cases").status_code == 401
+    state["on"] = False                                    # and unlatches it
+    assert c.get("/api/cases").status_code == 200
+
+
+# -------- shared verify_code helper ---------------------------------------
+
+def test_verify_code_accepts_correct_and_clears_failures():
+    ok, retry = access_gate.verify_code("hunter2", "hunter2", ip="1.2.3.4")
+    assert ok is True and retry == 0
+
+
+def test_verify_code_rejects_wrong_and_empty():
+    assert access_gate.verify_code("nope", "hunter2", ip="9.9.9.9") == (False, 0)
+    assert access_gate.verify_code("", "hunter2", ip="9.9.9.9")[0] is False
+    # Empty expected (no password configured) can never match.
+    assert access_gate.verify_code("anything", "", ip="9.9.9.9")[0] is False
+
+
+def test_verify_code_rate_limits_after_five_failures():
+    ip = "5.5.5.5"
+    for _ in range(access_gate.MAX_ATTEMPTS):
+        access_gate.verify_code("wrong", "right", ip=ip)
+    ok, retry = access_gate.verify_code("right", "right", ip=ip)
+    assert ok is False and retry > 0                       # blocked even with the right code

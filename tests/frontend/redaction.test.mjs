@@ -167,17 +167,22 @@ function makePill() {
 }
 
 function harness(view = "cases") {
-  const calls = { fetch: [], toast: [], refresh: 0 };
+  const calls = { fetch: [], toast: [], refresh: 0, pwPrompts: 0 };
   const { T, sandbox } = load();
   T.state.view = view;
   sandbox.refreshAll = async () => { calls.refresh += 1; };
   sandbox.renderUpdates = () => {};
   sandbox.renderSystemLog = () => {};
   sandbox.toast = (msg, kind) => calls.toast.push({ msg, kind });
+  // Toggling redaction always challenges for the admin password — stub the
+  // prompt so the headless test can drive it. Override per-test for cancel /
+  // wrong-password cases.
+  sandbox.requestAdminPassword = async () => { calls.pwPrompts += 1; return "pw"; };
   sandbox.fetch = async (url, opts) => {
-    const enabled = opts ? JSON.parse(opts.body).enabled : false;
-    calls.fetch.push({ url, method: opts && opts.method, enabled });
-    return { ok: true, json: async () => ({ ok: true, enabled }) };
+    const enabled = opts && opts.body ? JSON.parse(opts.body).enabled : false;
+    const adminPw = opts && opts.headers ? opts.headers["X-Admin-Password"] : undefined;
+    calls.fetch.push({ url, method: opts && opts.method, enabled, adminPw });
+    return { ok: true, status: 200, json: async () => ({ ok: true, enabled }) };
   };
   const pill = makePill();
   sandbox.document.getElementById = (id) => (id === "redaction-pill" ? pill : null);
@@ -193,10 +198,23 @@ test("wireRedactionPill ON: POSTs enabled=true to the server, refreshes, warns",
   assert.equal(h.calls.fetch[0].url, "/api/redaction-mode");
   assert.equal(h.calls.fetch[0].method, "POST");
   assert.equal(h.calls.fetch[0].enabled, true);
+  assert.equal(h.calls.pwPrompts, 1, "challenges for the admin password");
+  assert.equal(h.calls.fetch[0].adminPw, "pw", "sends X-Admin-Password header");
   assert.equal(h.T.state.redacted, true);
   assert.equal(h.pill.getAttribute("aria-checked"), "true");
   assert.equal(h.calls.refresh, 1, "re-fetches now-masked data");
   assert.equal(h.calls.toast.at(-1).kind, "warn");
+});
+
+test("wireRedactionPill: cancelling the password prompt aborts (no fetch)", async () => {
+  const h = harness();
+  h.sandbox.requestAdminPassword = async () => null;  // user hits Cancel
+  h.T.state.redacted = false;
+  h.T.wireRedactionPill();
+  await h.pill._click();
+
+  assert.equal(h.calls.fetch.length, 0, "no request when cancelled");
+  assert.equal(h.T.state.redacted, false, "latch unchanged");
 });
 
 test("wireRedactionPill OFF: POSTs enabled=false, refreshes, neutral toast", async () => {

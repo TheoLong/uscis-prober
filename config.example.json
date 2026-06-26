@@ -9,7 +9,7 @@
     "uscis_password": "USCIS account password",
     "uscis_mfa_email": "USCIS MFA email",
     "uscis_mfa_app_password": "USCIS MFA Email 16-char-app-password",
-    "optional_access_code": "Optional: dashboard access code if enabled. Leave empty/null to disable.",
+    "admin_password": "Site Admin password. Required to toggle Access Lockout / Redaction and to actuate any action button while Redaction is latched. Leave empty/null to disable all password gating.",
     "notification_email": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email."
   },
   "pull_hours": [0, 6, 10, 14, 18],

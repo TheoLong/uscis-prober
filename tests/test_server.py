@@ -371,6 +371,8 @@ def test_redaction_masks_pii_in_json_responses(client, tmp_path):
 
 
 def test_redaction_blocks_data_exports(client):
+    # No admin password configured in the `client` fixture, so redaction
+    # degrades to plain read-only: guarded actions are blocked outright (403).
     client.post("/api/redaction-mode", json={"enabled": True})
     assert client.get("/api/export").status_code == 403
     assert client.get("/api/system-log/export").status_code == 403
@@ -380,6 +382,98 @@ def test_exports_work_again_when_redaction_off(client):
     client.post("/api/redaction-mode", json={"enabled": True})
     client.post("/api/redaction-mode", json={"enabled": False})
     assert client.get("/api/export").status_code == 200
+
+
+# -------- admin password: latch toggles + per-action gate --------------
+
+ADMIN_PW = "test-admin-pass"
+
+
+@pytest.fixture
+def admin_client(monkeypatch, tmp_path):
+    """Like `client`, but with auth.admin_password set so password gating is live."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg = {
+        "auth": {
+            "uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g@example.com", "uscis_mfa_app_password": "pw",
+            "admin_password": ADMIN_PW,
+        },
+        "cases": [{"id": "IOE1", "label": "I-485"}],
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+    # Reset the shared brute-force guard so IP-rate-limit state can't leak
+    # between tests and trip a false 429.
+    import access_gate
+    monkeypatch.setattr(access_gate, "_guard", access_gate._BruteForceGuard())
+    server.app.config["TESTING"] = True
+    return server.app.test_client()
+
+
+def _pw(password=ADMIN_PW):
+    return {"X-Admin-Password": password}
+
+
+def test_redaction_toggle_requires_password_when_configured(admin_client, tmp_path):
+    # Wrong / missing password is rejected; the latch does not move.
+    assert admin_client.post("/api/redaction-mode", json={"enabled": True}).status_code == 401
+    assert admin_client.post("/api/redaction-mode", json={"enabled": True},
+                             headers=_pw("nope")).status_code == 401
+    assert json.loads((tmp_path / "config.json").read_text()).get("redaction_enabled") in (None, False)
+    # Correct password flips it.
+    r = admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    assert r.status_code == 200 and r.get_json()["enabled"] is True
+    assert json.loads((tmp_path / "config.json").read_text())["redaction_enabled"] is True
+
+
+def test_redaction_unlatch_also_requires_password(admin_client):
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    # Turning it back OFF still needs the password (both directions gated).
+    assert admin_client.post("/api/redaction-mode", json={"enabled": False}).status_code == 401
+    assert admin_client.post("/api/redaction-mode", json={"enabled": False},
+                             headers=_pw()).status_code == 200
+
+
+def test_access_lockout_toggle_persists_and_requires_password(admin_client, tmp_path):
+    assert admin_client.get("/api/access-lockout").get_json() == {"enabled": False}
+    assert admin_client.post("/api/access-lockout", json={"enabled": True}).status_code == 401
+    r = admin_client.post("/api/access-lockout", json={"enabled": True}, headers=_pw())
+    assert r.status_code == 200 and r.get_json()["enabled"] is True
+    assert json.loads((tmp_path / "config.json").read_text())["access_lockout_enabled"] is True
+    assert admin_client.get("/api/access-lockout").get_json() == {"enabled": True}
+
+
+def test_access_lockout_rejects_non_bool(admin_client):
+    assert admin_client.post("/api/access-lockout", json={"enabled": "yes"},
+                             headers=_pw()).status_code == 400
+
+
+def test_guarded_action_needs_password_only_while_redacted(admin_client):
+    # Redaction off → action passes with no password.
+    assert admin_client.post("/api/system-log/recompute").status_code == 200
+    # Latch redaction on (with password), then the same action is challenged.
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    assert admin_client.post("/api/system-log/recompute").status_code == 401
+    assert admin_client.post("/api/system-log/recompute", headers=_pw("wrong")).status_code == 401
+    # Correct password lets the action through.
+    assert admin_client.post("/api/system-log/recompute", headers=_pw()).status_code == 200
+
+
+def test_guarded_export_password_gated_while_redacted(admin_client):
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    assert admin_client.get("/api/export").status_code == 401
+    assert admin_client.get("/api/export", headers=_pw()).status_code == 200
+
+
+def test_readonly_request_never_challenged_while_redacted(admin_client):
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    # GET /api/cases is read-only — it must stay reachable (masked) with no password.
+    assert admin_client.get("/api/cases").status_code == 200
 
 
 # -------- notification dispatcher -------------------------------------
