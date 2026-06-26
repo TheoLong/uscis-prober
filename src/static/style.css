@@ -1516,14 +1516,6 @@ main[hidden] { display: none; }
 .modal-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
 
 /* ---------- admin-password prompt ---------- */
-.modal-btn-primary {
-  background: var(--accent-hot);
-  border: 1px solid var(--accent-hot);
-  color: var(--bg);
-  font-weight: 600;
-}
-.modal-btn-primary:hover { filter: brightness(1.05); }
-.modal-btn-primary:focus-visible { outline: 2px solid var(--accent-hot); outline-offset: 2px; }
 .admin-pw-input {
   width: 100%;
   margin-top: 14px;

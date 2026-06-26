@@ -109,10 +109,11 @@ function applyRedactionLatch() {
   document.body?.classList?.toggle("redaction-latched", state.redacted === true);
 }
 
-// Modal password prompt. Resolves with the typed password, or null if the
-// user cancels (Esc, Cancel button, or backdrop click). Kept as a standalone
-// function so tests can stub it on the sandbox.
-function requestAdminPassword({ title = "Admin password required", reason = "" } = {}) {
+// Modal password prompt — one consistent window for every guarded action:
+// "Admin password required / to <action>" + a red Confirm. Resolves with the
+// typed password, or null if the user cancels (Esc, Cancel, or backdrop
+// click). Standalone so tests can stub it on the sandbox.
+function requestAdminPassword({ action = "continue" } = {}) {
   return new Promise((resolve) => {
     if (document.querySelector(".modal-overlay[data-modal='admin-pw']")) { resolve(null); return; }
     const overlay = document.createElement("div");
@@ -123,13 +124,13 @@ function requestAdminPassword({ title = "Admin password required", reason = "" }
     overlay.setAttribute("aria-labelledby", "admin-pw-title");
     overlay.innerHTML =
       `<div class="modal-card">` +
-      `<h3 id="admin-pw-title" class="modal-title">${escapeHtml(title)}</h3>` +
-      (reason ? `<p class="modal-body">${escapeHtml(reason)}</p>` : "") +
+      `<h3 id="admin-pw-title" class="modal-title">Admin password required</h3>` +
+      `<p class="modal-body">to ${escapeHtml(action)}</p>` +
       `<input type="password" class="admin-pw-input" autocomplete="off" ` +
       `spellcheck="false" placeholder="site admin password" aria-label="Admin password">` +
       `<div class="modal-actions">` +
       `<button type="button" class="modal-btn modal-btn-cancel">Cancel</button>` +
-      `<button type="button" class="modal-btn modal-btn-primary">Unlock</button>` +
+      `<button type="button" class="modal-btn modal-btn-danger">Confirm</button>` +
       `</div></div>`;
 
     let done = false;
@@ -146,7 +147,7 @@ function requestAdminPassword({ title = "Admin password required", reason = "" }
       if (e.key === "Escape") finish(null);
       else if (e.key === "Enter") { e.preventDefault(); submit(); }
     };
-    overlay.querySelector(".modal-btn-primary").addEventListener("click", submit);
+    overlay.querySelector(".modal-btn-danger").addEventListener("click", submit);
     overlay.querySelector(".modal-btn-cancel").addEventListener("click", () => finish(null));
     overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) finish(null); });
     document.addEventListener("keydown", onKey);
@@ -159,10 +160,11 @@ function requestAdminPassword({ title = "Admin password required", reason = "" }
 // Returns "" when no challenge is needed (proceed with no header), the
 // password string to send, or null when the user cancelled (caller aborts).
 // `always:true` forces a prompt regardless of the redaction latch — used by
-// the two latch toggles, which always require the password.
-async function adminChallenge({ always = false, title, reason } = {}) {
+// the two latch toggles, which always require the password. `action` is the
+// short verb phrase shown in the prompt ("run a manual pull", etc.).
+async function adminChallenge({ always = false, action } = {}) {
   if (!always && state.redacted !== true) return "";
-  return await requestAdminPassword({ title, reason });
+  return await requestAdminPassword({ action });
 }
 
 // Clone a fetch init with the X-Admin-Password header attached (no-op for "").
@@ -175,10 +177,10 @@ function withAdminHeader(init = {}, pw = "") {
 // carry the password header, so intercept the click, challenge, fetch the
 // archive with the header, and save the returned blob. When redaction is off
 // the click falls through to the normal href download untouched.
-async function guardedDownload(evt, url) {
+async function guardedDownload(evt, url, action) {
   if (state.redacted !== true) return;  // let the plain href download proceed
   evt.preventDefault();
-  const pw = await adminChallenge({ reason: "Exporting data is a protected action." });
+  const pw = await adminChallenge({ action });
   if (pw === null) return;
   try {
     const res = await fetch(url, withAdminHeader({}, pw));
@@ -208,7 +210,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Export data is an <a href> — intercept so that while redaction is latched
   // the download goes through the password-gated blob path.
   document.getElementById("export-btn")
-    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export"));
+    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export", "export data"));
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
@@ -282,7 +284,7 @@ async function wireDebugPill() {
     const currently = pill.getAttribute("aria-checked") === "true";
     const desired = !currently;
     // Guarded while redaction is latched: challenge for the password first.
-    const pw = await adminChallenge({ reason: "Changing debug mode is a protected action." });
+    const pw = await adminChallenge({ action: "change debug mode" });
     if (pw === null) return;
     pill.disabled = true;
     try {
@@ -334,10 +336,11 @@ function wireExportInfo() {
   // Only one popover may be open at a time — opening one closes the
   // others so they can't visually block each other.
   const pairs = [
-    ["export-info-btn",    "export-info-popover"],
-    ["debug-info-btn",     "debug-info-popover"],
-    ["recompute-info-btn", "recompute-info-popover"],
-    ["redaction-info-btn", "redaction-info-popover"],
+    ["export-info-btn",         "export-info-popover"],
+    ["debug-info-btn",          "debug-info-popover"],
+    ["recompute-info-btn",      "recompute-info-popover"],
+    ["redaction-info-btn",      "redaction-info-popover"],
+    ["access-lockout-info-btn", "access-lockout-info-popover"],
   ];
   const popovers = pairs
     .map(([btnId, popId]) => ({
@@ -402,7 +405,7 @@ function wireRecomputeButton() {
   if (!btn) return;
   btn.addEventListener("click", async () => {
     // Guarded while redaction is latched: challenge before recomputing.
-    const pw = await adminChallenge({ reason: "Recomputing diffs is a protected action." });
+    const pw = await adminChallenge({ action: "recompute diffs" });
     if (pw === null) return;
     const original = btn.textContent;
     btn.disabled = true;
@@ -452,8 +455,7 @@ function wireRedactionPill() {
     const desired = !state.redacted;
     const pw = await adminChallenge({
       always: true,
-      title: desired ? "Latch redaction" : "Unlatch redaction",
-      reason: "Toggling redaction requires the site admin password.",
+      action: desired ? "enable redaction" : "disable redaction",
     });
     if (pw === null) return;  // cancelled
     pill.disabled = true;
@@ -510,8 +512,7 @@ function wireAccessLockoutPill() {
     const desired = !state.accessLockout;
     const pw = await adminChallenge({
       always: true,
-      title: desired ? "Enable access lock" : "Disable access lock",
-      reason: "Toggling Access Lock requires the site admin password.",
+      action: desired ? "enable Access Lock" : "disable Access Lock",
     });
     if (pw === null) return;
     pill.disabled = true;
@@ -1071,7 +1072,7 @@ async function pollPullStatus() {
 async function triggerPull() {
   const btn = document.getElementById("pull-btn");
   // Guarded while redaction is latched: challenge for the password first.
-  const pw = await adminChallenge({ reason: "Running a manual pull is a protected action." });
+  const pw = await adminChallenge({ action: "run a manual pull" });
   if (pw === null) return;
   try {
     const res = await fetch("/api/pull", withAdminHeader({ method: "POST" }, pw));
@@ -1948,7 +1949,7 @@ function renderSystemLogControls() {
   // While redaction is latched, route the download through the guarded
   // blob path (password challenge + X-Admin-Password header) instead of a
   // bare navigation that can't carry the header.
-  exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
+  exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export", "export the system log"));
 
   wrap.appendChild(exportBtn);
   wrap.appendChild(renderClearLogControl());
@@ -2035,7 +2036,7 @@ function openClearLogDialog() {
   confirmBtn.addEventListener("click", async () => {
     // While redaction is latched, clearing is a guarded action — challenge
     // for the admin password before the destructive POST.
-    const pw = await adminChallenge({ reason: "Clearing the system log is a protected action." });
+    const pw = await adminChallenge({ action: "clear the system log" });
     if (pw === null) return;  // cancelled — leave the dialog open
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Clearing…";
