@@ -2920,19 +2920,42 @@ function renderUpdateRecord(u) {
   return block;
 }
 
-// Factual combined timeline: every USCIS event on the case plus every
-// silent update we've detected, merged chronologically (newest first).
-// Date + code only — no interpretation, no community folklore, no stage
-// inference. Form-agnostic: works the same for I-140, I-485, I-765, I-131…
+// Pure: build the timeline's rows from a snapshot's events + the diff feed,
+// sorted newest-first by each row's REAL timestamp (full precision).
 //
-// Events have eventIds, so they ARE the records — one row per eventId
-// from the latest snapshot, dated by its own eventDateTime. No editorial
-// layer. If USCIS adds, removes, or re-emits an eventId, the timeline
-// reflects that directly.
-//
-// Silent updates are the only thing that needs the diff feed: they have
-// no intrinsic id or date, so we anchor them on the day we observed the
-// updatedAt bump.
+// Events are dated by createdAtTimestamp ("when USCIS wrote the row" — honest
+// even for backdated re-emits, whose eventDateTime is old). Silent updates are
+// dated by the updatedAtTimestamp USCIS moved to, NOT our detection time, so
+// events and silent updates interleave in true chronological order rather than
+// by the accident of which pull spotted them. Events are deduped by eventId.
+function buildTimelineRows(events, changes) {
+  const rows = [];
+  const seen = new Set();
+  for (const e of events || []) {
+    const eid = e.eventId;
+    if (eid) {
+      if (seen.has(eid)) continue;
+      seen.add(eid);
+    }
+    const ts = e.createdAtTimestamp || e.eventTimestamp || e.createdAt || e.eventDateTime || "";
+    rows.push({ date: (ts || "").slice(0, 10) || "—", ts, code: e.eventCode || "?",
+                event: e, eventId: eid || null });
+  }
+  for (const ch of changes || []) {
+    if (ch.kind !== "silent_update") continue;
+    const sc = ch.scalars || {};
+    const ts = (sc.updatedAtTimestamp || {}).to || (sc.updatedAt || {}).to || ch.to || "";
+    rows.push({ date: (ts || "").slice(0, 10) || "—", ts, code: "silent update",
+                silent: true, change: ch });
+  }
+  // Fall back to the day when a row has no timestamp at all.
+  rows.sort((a, b) => (b.ts || b.date).localeCompare(a.ts || a.date));
+  return rows;
+}
+
+// Factual combined timeline: every USCIS event on the case plus every silent
+// update we've detected, merged chronologically (newest first). Date + code
+// only — no interpretation, no stage inference. Form-agnostic.
 function renderObservedEventCodes(c) {
   const section = document.createElement("section");
   section.className = "events-section";
@@ -2957,29 +2980,7 @@ function renderObservedEventCodes(c) {
   // re-emitted with a new eventId at a later date, createdAt reflects
   // the re-emit day directly, no editorial layer required.
   const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
-  const seen = new Set();
-  const rows = [];
-  for (const e of events) {
-    const eid = e.eventId;
-    if (eid) {
-      if (seen.has(eid)) continue;
-      seen.add(eid);
-    }
-    rows.push({
-      date: (e.createdAt || e.createdAtTimestamp || "").slice(0, 10) || "—",
-      code: e.eventCode || "?",
-      event: e,
-      eventId: eid || null,
-    });
-  }
-
-  // 2. Silent updates from the diff history (no intrinsic date — anchor
-  // on the day we observed the updatedAt bump).
-  for (const ch of changes) {
-    if (ch.kind !== "silent_update") continue;
-    const when = (ch.to || "").slice(0, 10) || "—";
-    rows.push({ date: when, code: "silent update", silent: true, change: ch });
-  }
+  const rows = buildTimelineRows(events, changes);
 
   if (!rows.length) {
     const empty = document.createElement("div");
@@ -2988,9 +2989,6 @@ function renderObservedEventCodes(c) {
     section.appendChild(empty);
     return section;
   }
-
-  // Newest first.
-  rows.sort((a, b) => b.date.localeCompare(a.date));
 
   // The list lives in a positioned wrapper so the SVG link overlay can be
   // absolutely positioned over the rows after layout.
