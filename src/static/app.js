@@ -217,7 +217,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   _wireSyslogFit();
   _wireTopbarFlat();
   _wireSysCardCollapse();
-  _wireEventsTooltipTap();
+  _wireTooltips();
   wireEventLinkResize();
   document.querySelectorAll(".view-tab").forEach(btn =>
     btn.addEventListener("click", () => setView(btn.dataset.view))
@@ -737,53 +737,74 @@ function _wireSysCardCollapse() {
 }
 
 // ============================================================
-// Timeline-event hover/tap popup. Why this isn't a CSS-pseudo tooltip:
-// `.events-tooltip::after` would be a pure-CSS solution, but pseudo
-// elements can't be repositioned by JS — they inherit their parent's
-// position absolute, and a trigger near the right edge always pushes
-// the popup off-screen. Mobile-correct positioning needs a real DOM
-// node we can run through positionPopover().
+// ONE site-wide hover tooltip. Every tooltip on the site flows through this
+// single instant popup so they look and behave identically — no native
+// ~700ms `title` delay, no separate CSS-pseudo variant. Any element carrying
+// `data-tooltip` qualifies; a native `title` is upgraded in place (moved to
+// `data-tooltip`, dropped from `title`) on first hover so the browser's own
+// tooltip never fires. iframes are exempt (their `title` is an a11y label).
 //
-// One singleton popup div, reparented to <body>, fed by the active
-// pill's data-tooltip. Hover or focus opens it; outside click /
-// Escape / tap elsewhere dismisses. On a hover-capable device it
-// follows the cursor; on touch it tap-toggles.
+// Why a JS popup and not a CSS pseudo-element: pseudos can't be repositioned,
+// so a trigger near the right edge pushes the popup off-screen. A real <body>
+// node run through positionPopover() stays on-screen and never gets clipped by
+// an ancestor's overflow. On hover devices it shows on pointer-enter; on touch
+// it tap-toggles.
 // ============================================================
-function _wireEventsTooltipTap() {
-  if (document.body.dataset.eventsTapWired === "true") return;
-  document.body.dataset.eventsTapWired = "true";
+const _TIP_SELECTOR = "[data-tooltip], [title]";
 
-  // Singleton popup, attached to body so it never inherits a clipping
-  // overflow from card / panel ancestors.
+function _wireTooltips() {
+  if (document.body.dataset.tipsWired === "true") return;
+  document.body.dataset.tipsWired = "true";
+
   const pop = document.createElement("div");
   pop.className = "events-popup";
   pop.hidden = true;
   pop.setAttribute("role", "tooltip");
   document.body.appendChild(pop);
 
-  let activePill = null;
+  let active = null;
   const hoverCapable = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+  // Resolve the tooltip text, migrating a native `title` to `data-tooltip` so
+  // the native tooltip is suppressed. Preserve the accessible name for
+  // icon-only triggers by copying it to aria-label when nothing else labels them.
+  const tipText = (el) => {
+    if (el.hasAttribute("title")) {
+      const t = el.getAttribute("title");
+      if (t) {
+        if (!el.dataset.tooltip) el.dataset.tooltip = t;
+        if (!el.getAttribute("aria-label") && !el.textContent.trim()) {
+          el.setAttribute("aria-label", t);
+        }
+      }
+      el.removeAttribute("title");
+    }
+    return el.dataset.tooltip || "";
+  };
+
+  const match = (target) => {
+    const el = target?.closest?.(_TIP_SELECTOR);
+    return el && el.tagName !== "IFRAME" ? el : null;
+  };
 
   const closePopup = () => {
     pop.hidden = true;
     pop.style.transform = "";
     pop.style.top = "";
     pop.style.left = "";
-    activePill = null;
+    active = null;
   };
 
-  const openFor = (pill) => {
-    const text = pill.getAttribute("data-tooltip") || "";
+  const openFor = (el) => {
+    const text = tipText(el);
     if (!text) return;
     pop.textContent = text;
     pop.hidden = false;
-    activePill = pill;
-    // Position above the pill; positionPopover then snaps it back
-    // inside the viewport if either edge spilled out.
+    active = el;
+    // Anchor above the trigger; positionPopover snaps it back on-screen.
     requestAnimationFrame(() => {
-      const r = pill.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
       const popR = pop.getBoundingClientRect();
-      // Anchor above the pill; if no room, drop below.
       const above = r.top - popR.height - 6;
       const below = r.bottom + 6;
       const top = above >= 8 ? above : below;
@@ -793,37 +814,34 @@ function _wireEventsTooltipTap() {
     });
   };
 
-  // Hover (desktop). Use pointerenter/leave so it works with mouse + pen
-  // but not touch (touch fires pointerdown→click without a hover state).
+  // Hover (mouse + pen, not touch). pointerenter/leave fire per element, so
+  // close only when the trigger ITSELF is left (not a child).
   if (hoverCapable) {
     document.addEventListener("pointerenter", (e) => {
-      const pill = e.target?.closest?.(".events-tooltip");
-      if (pill) openFor(pill);
+      const el = match(e.target);
+      if (el) openFor(el);
     }, true);
     document.addEventListener("pointerleave", (e) => {
-      const pill = e.target?.closest?.(".events-tooltip");
-      if (pill && pill === activePill) closePopup();
+      if (active && e.target === active) closePopup();
     }, true);
+    // Tooltips are advisory — never let one swallow a real click on a button.
+    document.addEventListener("click", (e) => {
+      if (active && !pop.contains(e.target)) closePopup();
+    });
+  } else {
+    // Touch: tap toggles (the only way to reveal a tooltip without hover).
+    document.addEventListener("click", (e) => {
+      const el = match(e.target);
+      if (el) { el === active ? closePopup() : openFor(el); return; }
+      if (active && !pop.contains(e.target)) closePopup();
+    });
   }
 
-  // Click / tap. On hover-capable devices, also lets click pin the
-  // popup; on touch it's the primary open mechanism.
-  document.addEventListener("click", (e) => {
-    const pill = e.target.closest(".events-tooltip");
-    if (pill) {
-      if (pill === activePill) closePopup();
-      else openFor(pill);
-      return;
-    }
-    if (activePill && !pop.contains(e.target)) closePopup();
-  });
-
-  // Escape dismisses, and a resize / orientation change reflows.
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && activePill) closePopup();
+    if (e.key === "Escape" && active) closePopup();
   });
   window.addEventListener("resize", () => {
-    if (activePill) openFor(activePill);   // re-anchor cleanly
+    if (active) openFor(active);   // re-anchor cleanly
   });
 }
 
@@ -3263,7 +3281,7 @@ function drawEventLinks(wrap, list, links) {
 
     // Instant tooltip via the shared events-popup instead of an SVG <title>,
     // whose native hover delay (~700ms) feels sluggish. The hit path carries
-    // the pointer events, so tag it for _wireEventsTooltipTap.
+    // the pointer events, so it carries the data-tooltip for _wireTooltips.
     const d_ = d.link.daysApart;
     hit.classList.add("events-tooltip");
     hit.setAttribute("data-tooltip",
@@ -3697,10 +3715,9 @@ function formatValue(v) {
 // Format a scalar diff value (the `from` / `to` side of a `change-scalar`
 // row) as HTML. Identical to escapeHtml(formatValue(v)) except that any
 // ISO-8601 UTC timestamp embedded in the value is wrapped in a
-// `<span class="utc-ts">` carrying a `title` attribute with the same
-// instant rendered in the browser's local timezone — so the operator can
-// hover over a raw `updatedAtTimestamp` and read the wall-clock time
-// without doing the conversion in their head.
+// `<span class="utc-ts">` carrying a `data-tooltip` with the same instant
+// rendered in the browser's local timezone — so the operator can hover over a
+// raw `updatedAtTimestamp` and read the wall-clock time without converting.
 //
 // The browser's timezone comes from
 // Intl.DateTimeFormat().resolvedOptions().timeZone, computed once per
@@ -3719,10 +3736,8 @@ function formatScalarValueHtml(v) {
   const local = formatLocalDateTime(d, { withSeconds: true });
   const tz = _localTimezoneAbbrev(d);
   const title = tz ? `${local} ${tz}` : local;
-  // data-tooltip + CSS pseudo-element (see .utc-ts in style.css) so we
-  // control the hover delay. The native `title` attribute fires after
-  // a browser-controlled ~700ms which feels sluggish for a high-density
-  // diff view; our CSS uses --utc-tooltip-delay (default 120ms).
+  // `data-tooltip` is picked up by the one site-wide tooltip (_wireTooltips);
+  // `.utc-ts` only carries the dotted-underline affordance.
   return `<span class="utc-ts" data-tooltip="${escapeHtml(title)}">${escapeHtml(raw)}</span>`;
 }
 
