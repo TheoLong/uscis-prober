@@ -78,6 +78,33 @@ test("REDACT_KEYS covers both receipt key spellings + the two names", () => {
   assert.deepEqual(keys, ["applicantName", "receipt", "receiptNumber", "representativeName"]);
 });
 
+test("redactSnapshot masks any identifier key (eventId, letterId, pid)", () => {
+  const { T } = load();
+  const out = T.redactSnapshot({
+    events: [{ eventId: "abc-123", eventCode: "RFE", eventDateTime: "2026-03-01" }],
+    notices: [{ letterId: "L-998877", actionType: "ISSUED" }],
+    pid: "P-42",
+    formType: "I485",
+  });
+  assert.equal(out.events[0].eventId, MASK, "eventId masked");
+  assert.equal(out.notices[0].letterId, MASK, "letterId masked");
+  assert.equal(out.pid, MASK, "pid masked");
+  // Non-identifier siblings are untouched.
+  assert.equal(out.events[0].eventCode, "RFE");
+  assert.equal(out.notices[0].actionType, "ISSUED");
+  assert.equal(out.formType, "I485");
+});
+
+test("redactDetailValue masks an identifier-keyed row when redaction is on", () => {
+  const { T } = load();
+  T.state.redacted = true;
+  assert.equal(T.redactDetailValue("eventId", "abc-123"), MASK);
+  assert.equal(T.redactDetailValue("letterId", "L-1"), MASK);
+  assert.equal(T.redactDetailValue("eventCode", "RFE"), "RFE"); // non-id kept
+  T.state.redacted = false;
+  assert.equal(T.redactDetailValue("eventId", "abc-123"), "abc-123"); // no-op when off
+});
+
 test("redactSnapshot masks the system-log style `receipt` key", () => {
   const { T } = load();
   const out = T.redactSnapshot({ receipt: "IOE0000000000", label: "I-485" });
@@ -115,7 +142,7 @@ test("redactDetailValue masks PII keys, scrubs strings, no-ops when off", () => 
 
   T.state.redacted = true;
   assert.equal(T.redactDetailValue("receipt", "IOE0000000000"), T.REDACTION_MASK);
-  assert.equal(T.redactDetailValue("pid", 12345), 12345);            // non-PII number kept
+  assert.equal(T.redactDetailValue("level", 12345), 12345);          // non-PII number kept
   assert.equal(T.redactDetailValue("label", "I-485"), "I-485");      // form type kept
   assert.ok(!T.redactDetailValue("url", "x/IOE0000000000").includes("IOE0000000000"));
 });
@@ -133,7 +160,7 @@ test("_detailKvHtml masks a receipt detail row when redaction is on", () => {
 test("_detailKvHtml leaves non-PII rows untouched and is a no-op when off", () => {
   const { T } = load();
   T.state.redacted = true;
-  assert.ok(T._detailKvHtml("pid", 4242).includes("4242"));
+  assert.ok(T._detailKvHtml("level", 4242).includes("4242"));
 
   T.state.redacted = false;
   assert.ok(T._detailKvHtml("receipt", "IOE0000000000").includes("IOE0000000000"));

@@ -19,6 +19,11 @@ from typing import Any
 # Object keys whose values are PII, matched anywhere in any payload tree: the
 # case/receipt number (snapshot `receiptNumber` and system-log `receipt`), the
 # applicant's name, and the representative's name.
+#
+# Identifier keys (eventId, letterId, pid, …) are deliberately NOT masked here:
+# the browser keys the event timeline on the real eventId, so the server can't
+# withhold it. Those are masked client-side at the display layer instead (see
+# isRedactKey in static/app.js).
 REDACT_KEYS = frozenset({
     "receiptNumber", "receipt", "applicantName", "representativeName",
 })

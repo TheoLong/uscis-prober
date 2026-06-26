@@ -37,6 +37,14 @@ const REDACT_KEYS = new Set([
   "receiptNumber", "receipt", "applicantName", "representativeName",
 ]);
 
+// Any identifier key (eventId, letterId, pid, …) is also masked in displayed
+// copies. These are USCIS-internal IDs, so they only need hiding on screen —
+// not withholding from the browser, where the timeline still keys on the real
+// eventId. Display-layer only; never applied to data the renderer keys on.
+function isRedactKey(k) {
+  return REDACT_KEYS.has(k) || /id$/i.test(k);
+}
+
 // A fixed mask — fixed width so it leaks nothing about the original length.
 const REDACTION_MASK = "••••••••";
 
@@ -62,7 +70,7 @@ function redactSnapshot(value) {
   if (value && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = (REDACT_KEYS.has(k) && v != null && typeof v !== "object")
+      out[k] = (isRedactKey(k) && v != null && typeof v !== "object")
         ? REDACTION_MASK
         : redactSnapshot(v);
     }
@@ -82,7 +90,7 @@ function redactDisplay(value) {
 // any PII embedded in the string. No-op when redaction is off.
 function redactDetailValue(key, value) {
   if (!state.redacted) return value;
-  if (REDACT_KEYS.has(key)) return REDACTION_MASK;
+  if (isRedactKey(key)) return REDACTION_MASK;
   if (value && typeof value === "object") return redactSnapshot(value);
   return scrubText(value);
 }
@@ -1589,7 +1597,8 @@ function describeItem(kind, obj) {
     const appt = obj.appointmentDateTime
       ? ` (appt ${formatLocalDateTime(obj.appointmentDateTime)})`
       : "";
-    return `${obj.actionType || "?"} — letter ${obj.letterId || "?"}${appt}`;
+    const letter = state.redacted ? REDACTION_MASK : (obj.letterId || "?");
+    return `${obj.actionType || "?"} — letter ${letter}${appt}`;
   }
   return JSON.stringify(obj);
 }
