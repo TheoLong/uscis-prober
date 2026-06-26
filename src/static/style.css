@@ -1840,63 +1840,18 @@ body.redaction-latched [data-guard="redaction"]::after {
 }
 .change-scalar .to { color: var(--ok); }
 
-/* UTC ISO timestamps inside a scalar diff row get a subtle dotted
- * underline so the operator knows the value is hoverable. The custom
- * tooltip (CSS pseudo-element fed by `data-tooltip`) renders the same
- * instant in the browser's local timezone; the visible text stays UTC
- * so it matches USCIS's payload byte-for-byte.
- *
- * We don't use the native `title` attribute because its delay is
- * browser-controlled (~700ms) and feels sluggish in a dense diff list.
- * --utc-tooltip-delay tunes the hover-before-show delay; bump it up
- * if the tooltip feels twitchy when sweeping across a row. */
+/* Tooltip palette — consumed by the one site-wide popup (.events-popup),
+ * which _wireTooltips() drives for every hover tooltip on the site. */
 :root {
-  --utc-tooltip-delay: 120ms;
   --utc-tooltip-bg: #1f2330;
   --utc-tooltip-fg: #e8ecf3;
 }
+/* UTC ISO timestamps inside a scalar diff row get a subtle dotted underline so
+ * the operator knows the value is hoverable; the tooltip itself comes from the
+ * shared popup (fed by `data-tooltip`), not a per-element pseudo-element. */
 .utc-ts {
-  position: relative;
   border-bottom: 1px dotted currentColor;
   cursor: help;
-}
-.utc-ts::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  bottom: calc(100% + 4px);
-  /* Left-anchored to the trigger (not centered) so a trigger near the
-   * right edge doesn't push half the tooltip off-screen. We can't run
-   * positionPopover on a pseudo, so we get viewport correctness by
-   * clamping max-width and letting `right: auto` cap us at the line. */
-  left: 0;
-  max-width: min(calc(100vw - 24px), 320px);
-  width: max-content;
-  padding: 4px 8px;
-  background: var(--utc-tooltip-bg);
-  color: var(--utc-tooltip-fg);
-  border-radius: 4px;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  font-weight: 500;
-  text-decoration: none;
-  /* Allow wrap on narrow viewports; the timestamp+tz strings would
-   * otherwise force horizontal overflow. */
-  white-space: pre-wrap;
-  word-break: break-word;
-  text-align: left;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 80ms ease-out;
-  transition-delay: 0s;        /* fade out immediately on leave */
-  z-index: 10;
-  /* Restore line-height — parent's line-through / strikethrough leaks
-   * through `text-decoration: inherit` on some browsers otherwise. */
-  line-height: 1.2;
-}
-.utc-ts:hover::after,
-.utc-ts:focus-visible::after {
-  opacity: 1;
-  transition-delay: var(--utc-tooltip-delay);   /* applies on hover-in only */
 }
 .change-scalar .from .utc-ts { text-decoration: none; } /* avoid double underline w/ line-through */
 
