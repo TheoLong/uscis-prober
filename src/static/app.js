@@ -92,27 +92,18 @@ function redactMaybe(s) {
   return state.redacted ? scrubText(s) : s;
 }
 
-// ============================================================
-// Admin-password gating
-//
-// One site admin password backs everything: toggling the Redaction and
-// Access-Lockout latches (always), and — while Redaction is latched —
-// actuating any action button (Pull, Debug, Export, Recompute, Clear log).
-// The server is the real enforcer (X-Admin-Password header, see
-// _redaction_action_gate); this layer just collects the password and shows
-// the grayed-out lock affordance so the demo reads as "look but don't touch".
-// ============================================================
+// ---------- admin-password gating ----------
+// One admin password gates the two latch toggles (always) and, while redaction
+// is latched, every action button. The server (X-Admin-Password header) is the
+// real enforcer; this layer collects the password and shows the lock overlay.
 
-// Reflect the redaction latch on <body> so CSS can gray out + lock-overlay
-// every [data-guard] action. Called wherever state.redacted changes.
+// Mark <body> so CSS can gray + lock-overlay every [data-guard] action.
 function applyRedactionLatch() {
   document.body?.classList?.toggle("redaction-latched", state.redacted === true);
 }
 
-// Modal password prompt — one consistent window for every guarded action:
-// "Admin password required / to <action>" + a red Confirm. Resolves with the
-// typed password, or null if the user cancels (Esc, Cancel, or backdrop
-// click). Standalone so tests can stub it on the sandbox.
+// The shared password prompt. Resolves with the typed password, or null on
+// cancel. Standalone so tests can stub it.
 function requestAdminPassword({ action = "continue" } = {}) {
   return new Promise((resolve) => {
     if (document.querySelector(".modal-overlay[data-modal='admin-pw']")) { resolve(null); return; }
@@ -156,19 +147,13 @@ function requestAdminPassword({ action = "continue" } = {}) {
   });
 }
 
-// A button's visible label, whitespace-collapsed (the pull button stacks its
-// text across two spans). Used as the prompt's [action] so the wording always
-// matches the button the user clicked — no separate copy to keep in sync.
+// A button's visible label, whitespace-collapsed, used as the prompt's [action].
 function btnLabel(el) {
   return (el?.textContent || "").replace(/\s+/g, " ").trim();
 }
 
-// Decide whether a guarded action needs the password right now, and get it.
-// Returns "" when no challenge is needed (proceed with no header), the
-// password string to send, or null when the user cancelled (caller aborts).
-// `always:true` forces a prompt regardless of the redaction latch — used by
-// the two latch toggles, which always require the password. `action` is the
-// label shown in the prompt, normally the clicked button's own text.
+// Returns "" if no challenge is needed, the password to send, or null on cancel.
+// `always:true` forces the prompt (the latch toggles always require it).
 async function adminChallenge({ always = false, action } = {}) {
   if (!always && state.redacted !== true) return "";
   return await requestAdminPassword({ action });
@@ -180,10 +165,8 @@ function withAdminHeader(init = {}, pw = "") {
   return { ...init, headers: { ...(init.headers || {}), "X-Admin-Password": pw } };
 }
 
-// Guarded download: while redaction is latched a bare <a> navigation can't
-// carry the password header, so intercept the click, challenge, fetch the
-// archive with the header, and save the returned blob. When redaction is off
-// the click falls through to the normal href download untouched.
+// A bare <a> can't carry the password header, so while redaction is latched
+// fetch the archive with the header and save the blob; otherwise let the href go.
 async function guardedDownload(evt, url) {
   if (state.redacted !== true) return;  // let the plain href download proceed
   evt.preventDefault();
@@ -214,8 +197,7 @@ async function guardedDownload(evt, url) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
-  // Export data is an <a href> — intercept so that while redaction is latched
-  // the download goes through the password-gated blob path.
+  // Export data is an <a href> — intercept for the guarded blob path.
   document.getElementById("export-btn")
     ?.addEventListener("click", (e) => guardedDownload(e, "/api/export"));
   wireExportInfo();
@@ -239,10 +221,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (savedView && ["cases", "updates", "systemlog"].includes(savedView)) {
     setView(savedView);
   }
-  // Learn the server's redaction + lockout state before the first data render
-  // so masking treatment (bars, disabled exports, locked pull rows) and the
-  // grayed-out lock overlay are applied on the initial paint. The data itself
-  // is already redacted server-side.
+  // Sync redaction + lockout state before the first render so the masking and
+  // lock overlay land on the initial paint.
   await Promise.all([loadRedactionState(), loadAccessLockoutState()]);
   await refreshAll();
   setInterval(updateCountdown, 1000);
@@ -290,7 +270,6 @@ async function wireDebugPill() {
   pill.addEventListener("click", async () => {
     const currently = pill.getAttribute("aria-checked") === "true";
     const desired = !currently;
-    // Guarded while redaction is latched: challenge for the password first.
     const pw = await adminChallenge({ action: btnLabel(pill) });
     if (pw === null) return;
     pill.disabled = true;
@@ -411,7 +390,6 @@ function wireRecomputeButton() {
   const btn = document.getElementById("recompute-btn");
   if (!btn) return;
   btn.addEventListener("click", async () => {
-    // Guarded while redaction is latched: challenge before recomputing.
     const pw = await adminChallenge({ action: btnLabel(btn) });
     if (pw === null) return;
     const original = btn.textContent;
@@ -449,11 +427,8 @@ async function loadRedactionState() {
   applyRedactionLatch();
 }
 
-// Redaction toggle (System tab). Redaction is a SERVER-SIDE switch: the server
-// masks PII in every response and password-gates every action, so the site
-// becomes a public-safe demo. Flipping the latch (either direction) requires
-// the admin password; the pill challenges for it, sends X-Admin-Password, then
-// re-fetches so the now-(un)masked data repaints and the lock overlay updates.
+// Redaction toggle: server-side switch that masks PII and password-gates every
+// action. Toggling requires the password; on success re-fetch so data repaints.
 function wireRedactionPill() {
   const pill = document.getElementById("redaction-pill");
   if (!pill) return;
@@ -504,10 +479,8 @@ async function loadAccessLockoutState() {
   if (pill) pill.setAttribute("aria-checked", state.accessLockout ? "true" : "false");
 }
 
-// Access-Lockout toggle (System tab). When ON the server sends every
-// unauthenticated visitor to the login page. Flipping it (either direction)
-// requires the admin password. No data re-fetch needed — it changes who can
-// reach the site, not what the current (already authed) session sees.
+// Access Lock toggle: when ON, the server gates the site behind the login.
+// Toggling requires the password; no data re-fetch (it changes access, not data).
 function wireAccessLockoutPill() {
   const pill = document.getElementById("access-lockout-pill");
   if (!pill) return;
@@ -1047,9 +1020,8 @@ async function pollPullStatus() {
     // CSS collapses it to one line at narrow widths. When the pull
     // is running, swap to a single "Pulling…" status so the button
     // reads as state, not action.
-    // Keep a space between the two stacked spans so the button's textContent
-    // reads "Manual Pull Update" (the spans are display:block, so the space
-    // collapses visually but keeps the label correct for the password prompt).
+    // Space between the spans so textContent reads "Manual Pull Update"
+    // (display:block, so it collapses visually).
     btn.innerHTML = state.pullRunning
       ? `<span class="pull-btn-line">Pulling…</span>`
       : `<span class="pull-btn-line">Manual</span> ` +
@@ -1075,7 +1047,6 @@ async function pollPullStatus() {
 
 async function triggerPull() {
   const btn = document.getElementById("pull-btn");
-  // Guarded while redaction is latched: challenge for the password first.
   const pw = await adminChallenge({ action: btnLabel(btn) });
   if (pw === null) return;
   try {
@@ -1950,9 +1921,6 @@ function renderSystemLogControls() {
   exportBtn.className = "action-btn syslog-export-btn";
   exportBtn.textContent = "Export log";
   exportBtn.title = "Download this log as JSON";
-  // While redaction is latched, route the download through the guarded
-  // blob path (password challenge + X-Admin-Password header) instead of a
-  // bare navigation that can't carry the header.
   exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
 
   wrap.appendChild(exportBtn);
@@ -1960,19 +1928,8 @@ function renderSystemLogControls() {
   return wrap;
 }
 
-// Destructive flow for wiping the system log.
-//
-// Step 1 — user clicks "Clear log". While redaction is latched the admin
-//   password prompt takes priority and is shown FIRST; cancelling it aborts
-//   without ever opening the warning. With the password in hand (or none
-//   needed), the fixed-position "Clear system log?" confirmation dialog
-//   opens. It's position:fixed so it doesn't reflow the page beneath it.
-//
-// Step 2 — user clicks the red "Yes, delete everything" action inside the
-//   dialog. That is the only control that POSTs /api/system-log/clear (with
-//   the already-collected password header). The server ALSO requires
-//   {"confirm": true} as a second gate. Cancel, Escape, and backdrop-click
-//   all close the dialog safely.
+// Clear log: password prompt first (while redaction is latched), then a
+// "Clear system log?" confirm dialog, then POST /api/system-log/clear.
 function renderClearLogControl() {
   // Sit as a direct sibling in the parent flex row (no wrapper) so
   // it lines up with DEBUG / Export data / Export log.
@@ -1986,9 +1943,7 @@ function renderClearLogControl() {
   return idle;
 }
 
-// Password-first gate for the clear-log flow: challenge (when redaction is
-// latched) before showing the destructive warning, so the password window
-// always takes priority. Aborts silently if the user cancels the prompt.
+// Challenge for the password before the warning, so it takes priority.
 async function requestClearLog(btn) {
   const pw = await adminChallenge({ action: btnLabel(btn) });
   if (pw === null) return;
@@ -2046,8 +2001,6 @@ function openClearLogDialog(pw = "") {
 
   const confirmBtn = overlay.querySelector(".modal-btn-danger");
   confirmBtn.addEventListener("click", async () => {
-    // The admin password (if redaction is latched) was already collected
-    // before this dialog opened — reuse it for the destructive POST.
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Clearing…";
     try {

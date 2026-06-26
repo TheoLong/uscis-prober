@@ -1272,15 +1272,10 @@ def _is_guarded_action() -> bool:
 
 @app.before_request
 def _redaction_action_gate():
-    """While redaction is latched, every mutating action needs the password.
-
-    This is the server-side teeth behind the grayed-out lock overlay: the UI
-    can't be trusted to enforce it, so the action is rejected here unless the
-    request carries a valid `X-Admin-Password`. Read-only requests, and every
-    request while redaction is off, pass straight through.
-
-    With no admin password configured, redaction degrades to plain read-only
-    (403) — there's no secret to unlock with, so actions are simply blocked.
+    """While redaction is latched, reject guarded actions unless the request
+    carries a valid `X-Admin-Password`. With no password configured, redaction
+    degrades to plain read-only (403). The UI lock overlay is cosmetic; this is
+    the enforcement.
     """
     if not load_redaction_enabled():
         return None
@@ -2406,10 +2401,9 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # Install the access gate before the scheduler / blueprint work — reads
-    # auth.admin_password from config.json. The gate's login routes + session
-    # are installed whenever a password is set; whether unauthenticated callers
-    # are actually turned away is decided live by load_access_lockout_enabled.
+    # Install the access gate before the scheduler. Login routes install
+    # whenever auth.admin_password is set; load_access_lockout_enabled decides
+    # live whether unauthenticated callers are turned away.
     config: dict = {}
     try:
         config = load_config()

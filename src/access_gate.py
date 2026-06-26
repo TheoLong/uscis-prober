@@ -87,13 +87,8 @@ class _BruteForceGuard:
 _guard = _BruteForceGuard()
 
 
-# ---------------------------------------------------------------------------
-# Shared credential check — used by the login gate AND the per-action admin
-# challenge in server.py (toggling latches, actuating buttons while redaction
-# is latched). One brute-force guard and one constant-time compare back every
-# password prompt in the app, so an attacker can't sidestep the login limiter
-# by hammering an action endpoint instead.
-# ---------------------------------------------------------------------------
+# Shared credential check — backs the login gate AND server.py's per-action
+# admin challenges, so one brute-force guard limits every password prompt.
 
 def client_ip() -> str:
     """Best-effort client IP for the current request, proxy-header aware."""
