@@ -38,50 +38,81 @@ from flask import (
 
 logger = logging.getLogger(__name__)
 
-MAX_ATTEMPTS = 5
-WINDOW_SECONDS = 5 * 60
+MAX_ATTEMPTS = 5              # per-IP failures within WINDOW_SECONDS...
+WINDOW_SECONDS = 5 * 60       # ...that trip a per-IP lockout.
+BASE_BLOCK_SECONDS = 5 * 60   # first lockout duration once tripped...
+MAX_BLOCK_SECONDS = 60 * 60   # ...doubling per repeat strike, capped here.
+GLOBAL_MAX_FAILURES = 100     # total failures across ALL IPs within...
+GLOBAL_WINDOW_SECONDS = 10 * 60  # ...this window -> global cooldown (anti-rotation).
 SESSION_DAYS = 30
 
 
 # ---------------------------------------------------------------------------
-# In-memory brute-force tracker. Restart-lossy by design — a server bounce
-# wipes the rate limiter, which is acceptable because restart also rotates
-# zero session cookies (they're signed with the same key) and the code is
-# long/static: an attacker cannot scale meaningfully with 5 attempts per
-# 5-minute window per IP.
+# In-memory brute-force tracker (restart-lossy by design; a bounce also rotates
+# zero session cookies). Three layers, all keyed off the REAL client IP (see
+# client_ip):
+#   1. Per-IP lockout: MAX_ATTEMPTS failures in WINDOW_SECONDS -> blocked.
+#   2. Escalation: each repeat lockout for an IP doubles its block, up to
+#      MAX_BLOCK_SECONDS, so a persistent attacker faces growing timeouts.
+#   3. Global cooldown: a flood across MANY IPs (rotation / botnet) throttles
+#      further FAILED attempts once GLOBAL_MAX_FAILURES is exceeded. A correct
+#      password still passes (verify_code checks it before the global gate), so
+#      the owner can't be locked out by other IPs' noise.
 # ---------------------------------------------------------------------------
 
 class _BruteForceGuard:
     def __init__(self) -> None:
         self._failures: dict[str, deque[float]] = defaultdict(deque)
+        self._blocked_until: dict[str, float] = {}
+        self._strikes: dict[str, int] = defaultdict(int)
+        self._global: deque[float] = deque()
         self._lock = Lock()
 
-    def _prune(self, q: "deque[float]", now: float) -> None:
-        cutoff = now - WINDOW_SECONDS
+    @staticmethod
+    def _prune(q: "deque[float]", now: float, window: float) -> None:
+        cutoff = now - window
         while q and q[0] < cutoff:
             q.popleft()
 
     def is_blocked(self, ip: str) -> tuple[bool, int]:
-        """(blocked_now, seconds_until_next_allowed)."""
+        """Per-IP hard block. (blocked_now, seconds_until_next_allowed)."""
         now = time.time()
         with self._lock:
-            q = self._failures[ip]
-            self._prune(q, now)
-            if len(q) >= MAX_ATTEMPTS:
-                retry_after = int(WINDOW_SECONDS - (now - q[0])) + 1
-                return True, max(retry_after, 1)
+            until = self._blocked_until.get(ip, 0.0)
+            if now < until:
+                return True, int(until - now) + 1
+            if until:  # expired — forget it so memory doesn't grow unbounded
+                self._blocked_until.pop(ip, None)
+            return False, 0
+
+    def global_active(self) -> tuple[bool, int]:
+        """(active, retry_after) — a cross-IP flood is throttling failed attempts."""
+        now = time.time()
+        with self._lock:
+            self._prune(self._global, now, GLOBAL_WINDOW_SECONDS)
+            if len(self._global) >= GLOBAL_MAX_FAILURES:
+                return True, int(GLOBAL_WINDOW_SECONDS - (now - self._global[0])) + 1
             return False, 0
 
     def record_failure(self, ip: str) -> None:
         now = time.time()
         with self._lock:
+            self._global.append(now)
             q = self._failures[ip]
-            self._prune(q, now)
+            self._prune(q, now, WINDOW_SECONDS)
             q.append(now)
+            if len(q) >= MAX_ATTEMPTS:
+                block = min(BASE_BLOCK_SECONDS * (2 ** self._strikes[ip]),
+                            MAX_BLOCK_SECONDS)
+                self._blocked_until[ip] = now + block
+                self._strikes[ip] += 1
+                q.clear()  # the block governs now; start a fresh count after it
 
     def clear(self, ip: str) -> None:
         with self._lock:
             self._failures.pop(ip, None)
+            self._blocked_until.pop(ip, None)
+            self._strikes.pop(ip, None)
 
 
 _guard = _BruteForceGuard()
@@ -91,17 +122,32 @@ _guard = _BruteForceGuard()
 # admin challenges, so one brute-force guard limits every password prompt.
 
 def client_ip() -> str:
-    """Best-effort client IP for the current request, proxy-header aware."""
-    return (request.headers.get("X-Forwarded-For")
-            or request.remote_addr or "?").split(",")[0].strip()
+    """The REAL client IP, used to key the rate limiter.
+
+    Behind the Cloudflare tunnel, `CF-Connecting-IP` is set by Cloudflare and
+    cannot be forged by the client, so prefer it. Otherwise take the LAST
+    `X-Forwarded-For` entry — the one appended by the trusted proxy — NOT the
+    first, which is client-supplied and could be rotated per request to dodge
+    the per-IP limit. Fall back to the socket peer.
+    """
+    cf = request.headers.get("CF-Connecting-IP")
+    if cf and cf.strip():
+        return cf.strip()
+    xff = request.headers.get("X-Forwarded-For")
+    if xff and xff.strip():
+        return xff.split(",")[-1].strip()
+    return (request.remote_addr or "?").strip()
 
 
 def verify_code(provided: str, expected: str, *, ip: str | None = None) -> tuple[bool, int]:
     """Constant-time check of `provided` against `expected`, brute-force guarded.
 
-    Returns (ok, retry_after_seconds). A non-zero retry_after means the caller
-    IP is currently rate-limited and the attempt was not even compared. A wrong
-    or empty code records a failure; a correct one clears the IP's failures.
+    Returns (ok, retry_after_seconds). A non-zero retry_after means the attempt
+    is rate-limited (per-IP lockout or a cross-IP flood cooldown). A wrong or
+    empty code records a failure; a correct one clears the IP's failures.
+
+    A CORRECT code is honoured before the global cooldown is consulted, so a
+    distributed flood from other IPs can never lock the legitimate owner out.
     """
     ip = ip or client_ip()
     blocked, retry_after = _guard.is_blocked(ip)
@@ -111,6 +157,9 @@ def verify_code(provided: str, expected: str, *, ip: str | None = None) -> tuple
         _guard.clear(ip)
         return True, 0
     _guard.record_failure(ip)
+    active, global_retry = _guard.global_active()
+    if active:
+        return False, global_retry
     return False, 0
 
 

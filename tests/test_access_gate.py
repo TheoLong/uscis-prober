@@ -237,6 +237,70 @@ def test_different_xff_ips_dont_share_bucket(gated_app):
     assert r.status_code == 401  # bad_code, not rate_limited
 
 
+def test_cf_connecting_ip_takes_precedence_over_xff(gated_app):
+    c = gated_app.test_client()
+    # A spammer rotates the spoofable XFF head but is the same real client
+    # (constant CF-Connecting-IP) — all attempts share one bucket → blocked.
+    for i in range(5):
+        c.post("/api/login", json={"code": "x"},
+               headers={"CF-Connecting-IP": "9.9.9.9",
+                        "X-Forwarded-For": f"{i}.{i}.{i}.{i}"})
+    r = c.post("/api/login", json={"code": "x"},
+               headers={"CF-Connecting-IP": "9.9.9.9",
+                        "X-Forwarded-For": "200.200.200.200"})
+    assert r.status_code == 429
+
+
+def test_spoofed_xff_head_cannot_dodge_rate_limit(gated_app):
+    c = gated_app.test_client()
+    # No CF header; the attacker rotates the CLIENT-supplied first XFF token,
+    # but the trusted-proxy tail is constant — so it's still one bucket.
+    for i in range(5):
+        c.post("/api/login", json={"code": "x"},
+               headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 192.168.1.1"})
+    r = c.post("/api/login", json={"code": "x"},
+               headers={"X-Forwarded-For": "8.8.8.8, 192.168.1.1"})
+    assert r.status_code == 429
+
+
+def test_per_ip_block_escalates_on_repeat_strikes(monkeypatch):
+    g = access_gate._BruteForceGuard()
+    t = [1000.0]
+    monkeypatch.setattr(access_gate.time, "time", lambda: t[0])
+
+    def trip():
+        for _ in range(access_gate.MAX_ATTEMPTS):
+            g.record_failure("1.2.3.4")
+
+    trip()
+    _, first = g.is_blocked("1.2.3.4")
+    assert first > 0
+    t[0] += first + 1                       # wait out the first block
+    assert not g.is_blocked("1.2.3.4")[0]
+    trip()
+    _, second = g.is_blocked("1.2.3.4")
+    assert second > first, "a repeat offender's lockout escalates"
+
+
+def test_global_cooldown_throttles_distributed_flood():
+    # GLOBAL_MAX_FAILURES failures from that many DISTINCT IPs — each below the
+    # per-IP limit, so no per-IP block — trips the global cooldown.
+    for i in range(access_gate.GLOBAL_MAX_FAILURES):
+        access_gate.verify_code("wrong", "right", ip=f"10.{i // 256}.{i % 256}.1")
+    # A further wrong attempt from yet another fresh IP is now throttled.
+    ok, retry = access_gate.verify_code("wrong", "right", ip="172.16.0.1")
+    assert ok is False and retry > 0
+
+
+def test_correct_password_survives_a_global_flood():
+    # Same flood, but the OWNER submits the CORRECT password from a fresh IP:
+    # the global cooldown must NOT lock them out (no self-DoS).
+    for i in range(access_gate.GLOBAL_MAX_FAILURES + 5):
+        access_gate.verify_code("wrong", "right", ip=f"10.{i // 256}.{i % 256}.9")
+    ok, retry = access_gate.verify_code("right", "right", ip="172.16.0.2")
+    assert ok is True and retry == 0
+
+
 # -------- open paths + prefixes ------------------------------------------
 
 def test_favicon_is_open(gated_app):
