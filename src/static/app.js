@@ -455,7 +455,7 @@ function wireRedactionPill() {
     const desired = !state.redacted;
     const pw = await adminChallenge({
       always: true,
-      action: desired ? "enable redaction" : "disable redaction",
+      action: `${desired ? "enable" : "disable"} redaction`,
     });
     if (pw === null) return;  // cancelled
     pill.disabled = true;
@@ -512,7 +512,7 @@ function wireAccessLockoutPill() {
     const desired = !state.accessLockout;
     const pw = await adminChallenge({
       always: true,
-      action: desired ? "enable Access Lock" : "disable Access Lock",
+      action: `${desired ? "enable" : "disable"} Access Lock`,
     });
     if (pw === null) return;
     pill.disabled = true;
