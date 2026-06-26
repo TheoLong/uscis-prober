@@ -68,3 +68,33 @@ def test_scrub_text_patterns():
 
 def test_redact_keys_cover_both_receipt_spellings():
     assert {"receiptNumber", "receipt", "applicantName", "representativeName"} <= set(redaction.REDACT_KEYS)
+
+
+def test_redact_obj_pseudonymizes_identifier_keys():
+    out = redact_obj({
+        "events": [{"eventId": "abc-123", "eventCode": "RFE"}],
+        "notices": [{"letterId": "425512420"}],
+        "pid": "P-7",
+        "formType": "I485",
+    })
+    eid = out["events"][0]["eventId"]
+    lid = out["notices"][0]["letterId"]
+    # Real values are withheld — never the original, never the fixed PII mask
+    # (ids must stay unique so the client timeline can still key on them).
+    assert eid not in ("abc-123", REDACTION_MASK) and "abc-123" not in eid
+    assert lid not in ("425512420", REDACTION_MASK) and "425512420" not in lid
+    assert eid.startswith("id-") and lid.startswith("id-")
+    assert out["pid"].startswith("id-") and out["pid"] != "P-7"
+    # Non-identifier siblings untouched.
+    assert out["events"][0]["eventCode"] == "RFE"
+    assert out["formType"] == "I485"
+
+
+def test_pseudonymize_is_stable_and_distinct():
+    # Same input → same token (so dedup + link overlay still match); different
+    # input → different token (no collisions merging distinct events).
+    a1 = redact_obj({"eventId": "same"})["eventId"]
+    a2 = redact_obj({"originId": "same"})["originId"]
+    b = redact_obj({"eventId": "other"})["eventId"]
+    assert a1 == a2, "stable across keys/calls for the same real id"
+    assert a1 != b, "distinct ids yield distinct tokens"

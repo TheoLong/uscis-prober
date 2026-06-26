@@ -1294,6 +1294,26 @@ def _redaction_action_gate():
     return jsonify({"ok": False, "error": "admin_required"}), 401
 
 
+# Raw forensic dumps — Playwright trace.zip (DOM + network + screenshots), the
+# trace viewer, and the MFA email sidecar (.eml/.jsonl + JSON summaries). They
+# carry unmasked PII and are binary/non-JSON, so `_redact_json` can't scrub
+# them. While redaction is latched they're blocked outright (no password
+# bypass): in demo mode the forensic material is simply unavailable. Turn
+# redaction off to inspect a trace.
+_REDACTION_BLOCKED_PREFIXES = (
+    "/api/full-trace/", "/trace-viewer/", "/api/mfa-trace/",
+)
+
+
+@app.before_request
+def _redaction_diagnostic_gate():
+    if not load_redaction_enabled():
+        return None
+    if (request.path or "").startswith(_REDACTION_BLOCKED_PREFIXES):
+        return jsonify({"ok": False, "error": "redaction_enabled"}), 403
+    return None
+
+
 @app.after_request
 def _redact_json(resp):
     """When redaction mode is on, mask PII in every JSON response *before* it

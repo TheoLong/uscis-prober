@@ -384,6 +384,43 @@ def test_exports_work_again_when_redaction_off(client):
     assert client.get("/api/export").status_code == 200
 
 
+def test_redaction_blocks_raw_trace_endpoints(client):
+    # Trace/MFA dumps are unmasked PII (binary/.eml), so redaction blocks them
+    # outright — the gate fires before the route, so no file needs to exist.
+    client.post("/api/redaction-mode", json={"enabled": True})
+    for path in (
+        "/api/full-trace/somedir/trace.zip",
+        "/api/full-trace/somedir/mfa_trace/email_1.eml",
+        "/trace-viewer/index.html",
+        "/api/mfa-trace/somedir/summary",
+    ):
+        r = client.get(path)
+        assert r.status_code == 403, f"{path} must be blocked under redaction"
+        assert r.get_json().get("error") == "redaction_enabled"
+
+
+def test_trace_endpoints_reachable_again_when_redaction_off(client, tmp_path):
+    # With redaction off the gate is gone; a real trace file serves normally.
+    trace_dir = tmp_path / "data" / "full_traces" / "t1"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.zip").write_bytes(b"zipbytes")
+    assert client.get("/api/full-trace/t1/trace.zip").status_code == 200
+
+
+def test_redact_obj_pseudonymizes_event_ids_in_responses(client, tmp_path):
+    # End-to-end: the real eventId must not survive in a redacted JSON response.
+    (tmp_path / "data" / "485_case.json").write_text(json.dumps([
+        {"capturedAt": "2026-03-09T00:00:00Z", "data": {
+            "receiptNumber": "IOE0000000000", "formType": "I-485",
+            "events": [{"eventId": "SECRET-EVENT-ID", "eventCode": "RFE"}],
+            "notices": [], "documents": [], "evidenceRequests": [],
+            "updatedAt": "2026-03-01"}},
+    ]))
+    client.post("/api/redaction-mode", json={"enabled": True})
+    body = client.get("/api/cases/I-485/history").get_data(as_text=True)
+    assert "SECRET-EVENT-ID" not in body, "real eventId must be withheld"
+
+
 # -------- admin password: latch toggles + per-action gate --------------
 
 ADMIN_PW = "test-admin-pass"

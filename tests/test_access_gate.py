@@ -451,6 +451,17 @@ def test_lockout_off_means_site_is_open_even_with_password():
     assert c.get("/api/auth/status").get_json()["authRequired"] is False
 
 
+def test_trace_endpoints_are_gated_under_lockout():
+    # Trace endpoints carry raw PII and must NOT bypass the lock — only
+    # /static/ stays open. (Routes need not exist; the gate runs first.)
+    state = {"on": True}
+    c = _toggleable_app(state).test_client()
+    assert c.get("/api/full-trace/d/trace.zip").status_code == 401
+    assert c.get("/trace-viewer/index.html").status_code in (301, 302, 401)
+    # A static asset stays reachable so the login page can render.
+    assert c.get("/static/anything.css").status_code != 401
+
+
 def test_lockout_on_turns_visitors_away_until_login():
     state = {"on": True}
     app = _toggleable_app(state)

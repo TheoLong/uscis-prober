@@ -325,12 +325,10 @@ def configure(
     # anyone can read on GitHub — we're not leaking anything sensitive.
     OPEN_PATHS = {"/login", "/api/login", "/api/auth/status",
                   "/api/version", "/favicon.ico"}
-    # `/api/full-trace/` is open so trace.playwright.dev can fetch
-    # `trace.zip` cross-origin. The files served are sandboxed inside
-    # `data/full_traces/<dir>/` and path-traversal-guarded; their
-    # content is the same diagnostic material the operator is actively
-    # debugging, so no new PII surface is created.
-    OPEN_PREFIXES = ("/static/", "/api/full-trace/", "/trace-viewer/")
+    # Only static assets are open (the login page needs them). Trace endpoints
+    # (/api/full-trace, /trace-viewer) carry raw PII, so they stay behind the
+    # lock — cross-origin trace viewing simply doesn't work while locked.
+    OPEN_PREFIXES = ("/static/",)
 
     def _logged_in() -> bool:
         return session.get("authed") is True
