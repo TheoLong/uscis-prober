@@ -1960,19 +1960,18 @@ function renderSystemLogControls() {
   return wrap;
 }
 
-// Two-step destructive flow for wiping the system log.
+// Destructive flow for wiping the system log.
 //
-// Step 1 — user clicks "Clear log" in the System log tab header. That
-//   click opens a fixed-position confirmation DIALOG (overlay + centered
-//   modal) layered above the page. Because the dialog is position:fixed
-//   it does not reflow the underlying layout — the event list, the
-//   other controls, and the rest of the page stay exactly where they
-//   were.
+// Step 1 — user clicks "Clear log". While redaction is latched the admin
+//   password prompt takes priority and is shown FIRST; cancelling it aborts
+//   without ever opening the warning. With the password in hand (or none
+//   needed), the fixed-position "Clear system log?" confirmation dialog
+//   opens. It's position:fixed so it doesn't reflow the page beneath it.
 //
-// Step 2 — user clicks the red "Yes, delete all events" action inside
-//   the dialog. That is the only control that POSTs
-//   /api/system-log/clear. The server ALSO requires {"confirm": true}
-//   in the body as a second gate. Cancel, Escape, and backdrop-click
+// Step 2 — user clicks the red "Yes, delete everything" action inside the
+//   dialog. That is the only control that POSTs /api/system-log/clear (with
+//   the already-collected password header). The server ALSO requires
+//   {"confirm": true} as a second gate. Cancel, Escape, and backdrop-click
 //   all close the dialog safely.
 function renderClearLogControl() {
   // Sit as a direct sibling in the parent flex row (no wrapper) so
@@ -1983,11 +1982,20 @@ function renderClearLogControl() {
   idle.dataset.guard = "redaction";
   idle.textContent = "Clear log";
   idle.title = "Permanently delete every event in this log";
-  idle.addEventListener("click", openClearLogDialog);
+  idle.addEventListener("click", () => requestClearLog(idle));
   return idle;
 }
 
-function openClearLogDialog() {
+// Password-first gate for the clear-log flow: challenge (when redaction is
+// latched) before showing the destructive warning, so the password window
+// always takes priority. Aborts silently if the user cancels the prompt.
+async function requestClearLog(btn) {
+  const pw = await adminChallenge({ action: btnLabel(btn) });
+  if (pw === null) return;
+  openClearLogDialog(pw);
+}
+
+function openClearLogDialog(pw = "") {
   // Prevent stacking multiple dialogs on fast double-clicks.
   if (document.querySelector(".modal-overlay[data-modal='clear-log']")) return;
 
@@ -2038,10 +2046,8 @@ function openClearLogDialog() {
 
   const confirmBtn = overlay.querySelector(".modal-btn-danger");
   confirmBtn.addEventListener("click", async () => {
-    // While redaction is latched, clearing is a guarded action — challenge
-    // for the admin password before the destructive POST.
-    const pw = await adminChallenge({ action: btnLabel(document.querySelector(".clear-log-btn")) });
-    if (pw === null) return;  // cancelled — leave the dialog open
+    // The admin password (if redaction is latched) was already collected
+    // before this dialog opened — reuse it for the destructive POST.
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Clearing…";
     try {
