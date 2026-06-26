@@ -7,7 +7,12 @@ Every capture is diffed against the one immediately before it (ordered by
 events/notices/documents were added or removed, and whether `updatedAt`
 advanced. Each change is then *classified* into a category (silent, event,
 notice, appointment, decision, status) so the UI can emphasise signal over
-noise. Pairs whose payload is byte-identical produce no record.
+noise.
+
+The feed is lossless: every pair that differs at all produces exactly one
+record (only byte-identical pairs are skipped). The classification is a label
+for the UI — it never causes a real change to be dropped — so the feed plus an
+initial snapshot fully reconstructs every later snapshot's tracked fields.
 """
 
 from __future__ import annotations
@@ -31,17 +36,9 @@ _WATCHED_SCALARS: tuple[str, ...] = (
     "statusText",
 )
 
-# Timestamp-only fields: when ONLY these change, the diff is either a silent
-# update or an event's case-level footprint (see _is_event_byproduct).
+# Timestamp-only fields: when ONLY these change, the diff is a silent update —
+# the case-level update timestamp advanced with nothing else.
 _TIMESTAMP_ONLY: frozenset[str] = frozenset({"updatedAt", "updatedAtTimestamp"})
-
-# Writing an event moves the case-level `updatedAtTimestamp` to that event's
-# own time. A timestamp-only bump landing within this window of any event's
-# `eventTimestamp` or `createdAtTimestamp` is that event's footprint rather
-# than an independent touch. The two fields cover both fresh events (stamped
-# from `eventTimestamp`) and backdated re-emits (stamped from
-# `createdAtTimestamp`).
-_EVENT_FOOTPRINT_WINDOW_SECONDS: float = 60.0
 
 # Decision-readiness scalar flips the community tracks.
 _DECISION_FLAGS: frozenset[str] = frozenset(
@@ -381,11 +378,12 @@ def _sorted_by_capture(entries: list[dict]) -> list[dict]:
 def snapshot_changes(entries: list[dict]) -> list[dict]:
     """Change feed: one entry per consecutive-capture pair that differs.
 
-    Captures are diffed in `capturedAt` order. Two kinds of pairs produce no
-    record: byte-identical ones, and timestamp-only bumps that are an event's
-    case-level footprint (see `_is_event_byproduct`), which the event's own
-    row already represents. Each remaining item carries a `kind`
-    classification (see classify_change).
+    Captures are diffed in `capturedAt` order. Only byte-identical pairs produce
+    no record — every real change is surfaced, including a timestamp-only bump
+    that trails a new event (the case-level update timestamp catching up to the
+    event's own time in a later pull). That catch-up is a distinct observable
+    change, so dropping it would make the feed unable to reconstruct the latest
+    timestamps. Each item carries a `kind` classification (see classify_change).
     """
     ordered = _sorted_by_capture(entries)
     feed: list[dict] = []
@@ -393,43 +391,18 @@ def snapshot_changes(entries: list[dict]) -> list[dict]:
         change = compute_change(prev, curr)
         if not _has_any_diff(change):
             continue
-        # Drop a timestamp-only bump that is an event's footprint — the event's
-        # own row records it. Match against the events in `curr`, which carries
-        # the bump.
-        if _is_timestamp_only_change(change):
-            new_ts = (change.get("scalars") or {}).get("updatedAtTimestamp", {}).get("to")
-            curr_events = (curr.get("data") or {}).get("events") or []
-            if _is_event_byproduct(new_ts, curr_events):
-                continue
         change["kind"] = classify_change(change)
         change["source"] = "case"
         feed.append(change)
     return feed
 
 
-def _parse_iso(value: str | None):
-    """Parse a USCIS ISO-8601 timestamp into an aware datetime, or None.
-
-    Accepts the trailing-`Z` form USCIS emits (e.g. `2026-06-25T14:26:50.949Z`).
-    Returns None for missing or unparseable input so callers can treat absent
-    timestamps as "no match".
-    """
-    if not value:
-        return None
-    try:
-        from datetime import datetime
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-
-
 def _is_timestamp_only_change(change: dict) -> bool:
     """True when the only thing that moved is `updatedAt` / `updatedAtTimestamp`.
 
-    No event/notice/document was added or removed and the sole scalar diffs
-    are the case-level update timestamps. This is the shape of both a genuine
-    silent update and an event's case-level footprint — `_is_event_byproduct`
-    tells the two apart.
+    No event/notice/document was added or removed and the sole scalar diffs are
+    the case-level update timestamps. classify_change uses this to label the row
+    `silent_update`.
     """
     scalars = change.get("scalars") or {}
     events = change.get("events") or {}
@@ -444,25 +417,6 @@ def _is_timestamp_only_change(change: dict) -> bool:
     )
 
 
-def _is_event_byproduct(updated_at_timestamp: str | None, events: list[dict]) -> bool:
-    """True when a case-level timestamp bump is the footprint of an event row.
-
-    A bump landing within `_EVENT_FOOTPRINT_WINDOW_SECONDS` of any event's
-    `eventTimestamp` or `createdAtTimestamp` is that event's footprint. Both
-    fields are checked: fresh events stamp the case from `eventTimestamp`,
-    backdated re-emits from `createdAtTimestamp`.
-    """
-    bump = _parse_iso(updated_at_timestamp)
-    if bump is None:
-        return False
-    for ev in events or []:
-        for field in ("eventTimestamp", "createdAtTimestamp"):
-            t = _parse_iso((ev or {}).get(field))
-            if t is not None and abs((bump - t).total_seconds()) <= _EVENT_FOOTPRINT_WINDOW_SECONDS:
-                return True
-    return False
-
-
 def classify_change(change: dict) -> str:
     """Bucket a diff into the single most specific signal.
 
@@ -473,10 +427,6 @@ def classify_change(change: dict) -> str:
       notice      — a non-appointment notice appeared
       silent_update  — only the case update timestamp(s) advanced, no events/notices.
       status      — fallback: tracked scalar changed that isn't covered above
-
-    A timestamp-only bump that is an event's footprint is dropped by
-    `snapshot_changes` before reaching here, so it never classifies as a
-    standalone row.
     """
     scalars = change.get("scalars") or {}
     events = change.get("events") or {}
