@@ -273,9 +273,10 @@ function wireExportInfo() {
   });
 }
 
-// Recompute diff button (System tab). POSTs to the backend recompute
-// endpoint, which appends a fresh `diff_recomputed` event, then reloads
-// page 1 of the log so that confirmation lands at the top in view.
+// Recompute diff button (System tab). POSTs to the recompute endpoint, which
+// regenerates the diff feed across every case and appends a diff_recomputed
+// event, then repaints via the shared refreshAfterRecompute() — the same path
+// the scheduled recompute uses.
 function wireRecomputeButton() {
   const btn = document.getElementById("recompute-btn");
   if (!btn) return;
@@ -288,11 +289,10 @@ function wireRecomputeButton() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.json().catch(() => ({}));
       if (body && body.ok === false) throw new Error("recompute reported failure");
-      // The new diff_recomputed event is the newest entry — jump to
-      // page 1 and re-render so the operator sees the confirmation.
+      // diff_recomputed is the newest entry — jump to page 1 so it's in view.
       state.systemLogPage = 1;
-      await loadAndRenderSystemLog();
-      toast("Diff recomputed — see the log below.", "ok");
+      await refreshAfterRecompute();
+      toast("Diff recomputed — views refreshed.", "ok");
     } catch (e) {
       console.error("Recompute diff failed:", e);
       toast("Recompute failed — diff feed not refreshed.", "bad");
@@ -667,6 +667,19 @@ async function refreshAll() {
   await Promise.all([loadCases(), loadUpdates(), loadSystemLog(), pollPullStatus()]);
 }
 
+// Repaint the UI after a diff recompute. A recompute regenerates the diff
+// feed behind the dashboard, the Updates feed, and the system log, and writes
+// a diff_recomputed event that moves the storage bar — so reload all four and
+// repaint the active view (the others repaint on their next tab switch). Both
+// the manual button and the scheduled post-pull path call this, so the trigger
+// never changes the behavior. Excludes pollPullStatus: the scheduled caller is
+// pollPullStatus itself, and the manual caller has no pull to poll.
+async function refreshAfterRecompute() {
+  await Promise.all([loadCases(), loadUpdates(), loadSystemLog(), updateStorageBar()]);
+  if (state.view === "updates") renderUpdates();
+  else if (state.view === "systemlog") renderSystemLog();
+}
+
 async function loadSystemLog(page = state.systemLogPage) {
   try {
     const perPage = state.systemLogPageSize;
@@ -857,25 +870,15 @@ async function pollPullStatus() {
       state.nextRun ? formatLocal(state.nextRun) : "—";
     updateCountdown();
 
-    // If a pull just finished, refresh data
+    // A finished pull always runs a post-pull diff recompute, so repaint with
+    // the same refreshAfterRecompute() the manual button uses.
     if (wasRunning && !state.pullRunning) {
       if (s.ok === false) {
         toast(`Pull failed: ${s.last_error || "see logs"}`, "bad");
       } else {
         toast("Pull complete — data refreshed", "ok");
       }
-      // Reload everything the pull might have touched. Every
-      // completed pull writes (at minimum) case + location
-      // snapshots, a pull-envelope entry, and potentially a trace
-      // dir — ALL of which move the storage bar. Kick the bar
-      // refresh here instead of waiting for the 30s poll.
-      await Promise.all([
-        loadCases(),
-        loadUpdates(),
-        loadSystemLog(),
-        updateStorageBar(),
-      ]);
-      if (state.view === "systemlog") renderSystemLog();
+      await refreshAfterRecompute();
     }
   } catch (e) {
     console.warn("status poll failed:", e);

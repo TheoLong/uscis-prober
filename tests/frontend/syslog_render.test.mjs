@@ -179,12 +179,15 @@ function setupButtonHarness() {
   sandbox.document.getElementById = (id) => (id === "recompute-btn" ? btn : null);
   const calls = { fetch: [], toast: [], reload: 0 };
   sandbox.toast = (msg, kind) => calls.toast.push({ msg, kind });
-  sandbox.loadAndRenderSystemLog = async () => { calls.reload += 1; };
+  // A recompute rewrites the diff feed behind every view, so the button reloads
+  // them all via the shared refreshAfterRecompute() — the SAME routine the
+  // scheduled (post-pull) path uses, so the trigger doesn't change the behavior.
+  sandbox.refreshAfterRecompute = async () => { calls.reload += 1; };
   t.wireRecomputeButton();
   return { t, sandbox, btn, calls, click: () => btn._click() };
 }
 
-test("recompute click POSTs, refreshes page 1, and toasts success", async () => {
+test("recompute click POSTs, refreshes every view, and toasts success", async () => {
   const h = setupButtonHarness();
   h.sandbox.fetch = async (url, opts) => {
     h.calls.fetch.push({ url, opts });
@@ -192,11 +195,13 @@ test("recompute click POSTs, refreshes page 1, and toasts success", async () => 
   };
   await h.btn._click();
 
+  // Only the recompute POST goes through fetch directly; refreshAfterRecompute
+  // (stubbed) owns the cases/updates/log reloads, so the button fires one fetch.
   assert.equal(h.calls.fetch.length, 1);
   assert.equal(h.calls.fetch[0].url, "/api/system-log/recompute");
   assert.equal(h.calls.fetch[0].opts.method, "POST");
   assert.equal(h.t.state.systemLogPage, 1, "jumps to newest page");
-  assert.equal(h.calls.reload, 1, "re-renders the log");
+  assert.equal(h.calls.reload, 1, "reloads every view via refreshAfterRecompute");
   assert.equal(h.calls.toast.length, 1);
   assert.equal(h.calls.toast[0].kind, "ok");
   // Button restored after the run.
