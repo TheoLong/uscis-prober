@@ -156,12 +156,19 @@ function requestAdminPassword({ action = "continue" } = {}) {
   });
 }
 
+// A button's visible label, whitespace-collapsed (the pull button stacks its
+// text across two spans). Used as the prompt's [action] so the wording always
+// matches the button the user clicked — no separate copy to keep in sync.
+function btnLabel(el) {
+  return (el?.textContent || "").replace(/\s+/g, " ").trim();
+}
+
 // Decide whether a guarded action needs the password right now, and get it.
 // Returns "" when no challenge is needed (proceed with no header), the
 // password string to send, or null when the user cancelled (caller aborts).
 // `always:true` forces a prompt regardless of the redaction latch — used by
 // the two latch toggles, which always require the password. `action` is the
-// short verb phrase shown in the prompt ("run a manual pull", etc.).
+// label shown in the prompt, normally the clicked button's own text.
 async function adminChallenge({ always = false, action } = {}) {
   if (!always && state.redacted !== true) return "";
   return await requestAdminPassword({ action });
@@ -177,10 +184,10 @@ function withAdminHeader(init = {}, pw = "") {
 // carry the password header, so intercept the click, challenge, fetch the
 // archive with the header, and save the returned blob. When redaction is off
 // the click falls through to the normal href download untouched.
-async function guardedDownload(evt, url, action) {
+async function guardedDownload(evt, url) {
   if (state.redacted !== true) return;  // let the plain href download proceed
   evt.preventDefault();
-  const pw = await adminChallenge({ action });
+  const pw = await adminChallenge({ action: btnLabel(evt.currentTarget) });
   if (pw === null) return;
   try {
     const res = await fetch(url, withAdminHeader({}, pw));
@@ -210,7 +217,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Export data is an <a href> — intercept so that while redaction is latched
   // the download goes through the password-gated blob path.
   document.getElementById("export-btn")
-    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export", "export data"));
+    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export"));
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
@@ -284,7 +291,7 @@ async function wireDebugPill() {
     const currently = pill.getAttribute("aria-checked") === "true";
     const desired = !currently;
     // Guarded while redaction is latched: challenge for the password first.
-    const pw = await adminChallenge({ action: "change debug mode" });
+    const pw = await adminChallenge({ action: btnLabel(pill) });
     if (pw === null) return;
     pill.disabled = true;
     try {
@@ -405,7 +412,7 @@ function wireRecomputeButton() {
   if (!btn) return;
   btn.addEventListener("click", async () => {
     // Guarded while redaction is latched: challenge before recomputing.
-    const pw = await adminChallenge({ action: "recompute diffs" });
+    const pw = await adminChallenge({ action: btnLabel(btn) });
     if (pw === null) return;
     const original = btn.textContent;
     btn.disabled = true;
@@ -453,10 +460,7 @@ function wireRedactionPill() {
   pill.setAttribute("aria-checked", state.redacted ? "true" : "false");
   pill.addEventListener("click", async () => {
     const desired = !state.redacted;
-    const pw = await adminChallenge({
-      always: true,
-      action: `${desired ? "enable" : "disable"} redaction`,
-    });
+    const pw = await adminChallenge({ always: true, action: `toggle ${btnLabel(pill)}` });
     if (pw === null) return;  // cancelled
     pill.disabled = true;
     try {
@@ -510,10 +514,7 @@ function wireAccessLockoutPill() {
   pill.setAttribute("aria-checked", state.accessLockout ? "true" : "false");
   pill.addEventListener("click", async () => {
     const desired = !state.accessLockout;
-    const pw = await adminChallenge({
-      always: true,
-      action: `${desired ? "enable" : "disable"} Access Lock`,
-    });
+    const pw = await adminChallenge({ always: true, action: `toggle ${btnLabel(pill)}` });
     if (pw === null) return;
     pill.disabled = true;
     try {
@@ -1072,7 +1073,7 @@ async function pollPullStatus() {
 async function triggerPull() {
   const btn = document.getElementById("pull-btn");
   // Guarded while redaction is latched: challenge for the password first.
-  const pw = await adminChallenge({ action: "run a manual pull" });
+  const pw = await adminChallenge({ action: btnLabel(btn) });
   if (pw === null) return;
   try {
     const res = await fetch("/api/pull", withAdminHeader({ method: "POST" }, pw));
@@ -1949,7 +1950,7 @@ function renderSystemLogControls() {
   // While redaction is latched, route the download through the guarded
   // blob path (password challenge + X-Admin-Password header) instead of a
   // bare navigation that can't carry the header.
-  exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export", "export the system log"));
+  exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
 
   wrap.appendChild(exportBtn);
   wrap.appendChild(renderClearLogControl());
@@ -2036,7 +2037,7 @@ function openClearLogDialog() {
   confirmBtn.addEventListener("click", async () => {
     // While redaction is latched, clearing is a guarded action — challenge
     // for the admin password before the destructive POST.
-    const pw = await adminChallenge({ action: "clear the system log" });
+    const pw = await adminChallenge({ action: btnLabel(document.querySelector(".clear-log-btn")) });
     if (pw === null) return;  // cancelled — leave the dialog open
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Clearing…";
