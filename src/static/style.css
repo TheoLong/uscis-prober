@@ -1620,11 +1620,6 @@ body.redaction-latched [data-guard="redaction"]::after {
   font-size: 0.84rem;
   line-height: 1.5;
 }
-.status-office {
-  margin-top: 10px;
-  font-size: 0.78rem;
-  color: var(--muted);
-}
 .status-raw {
   margin: 8px 0 0;
   display: grid;

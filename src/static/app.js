@@ -1254,13 +1254,8 @@ function buildStatusBody(st) {
     body.textContent = stripTags(st.statusText);
     frag.appendChild(body);
   }
-  if (st.jurisdictionDescription) {
-    const office = document.createElement("div");
-    office.className = "status-office";
-    office.textContent = `Jurisdiction: ${st.jurisdictionDescription}`;
-    frag.appendChild(office);
-  }
   const rawList = [
+    ["Jurisdiction", st.jurisdictionDescription],
     ["Current action code", st.currentActionCode],
     // Action-code date is a UTC ISO timestamp; show it in local time.
     ["Action code date", st.currentActionCodeDate
@@ -1353,15 +1348,14 @@ function renderOverview(panel, c) {
 
     block.appendChild(buildStatusBody(st));
 
-    // Historic case status: a dropdown of every distinct status transition
-    // observed over time, newest first. Only rendered when there's more
-    // than the single current status to show.
+    // Status history: a dropdown of every distinct status transition
+    // observed over time, newest first, each timestamped in local time.
     const history = Array.isArray(st.history) ? st.history : [];
-    if (history.length > 1) {
+    if (history.length) {
       const details = document.createElement("details");
       details.className = "status-history";
       const summary = document.createElement("summary");
-      summary.textContent = `Historic case status (${history.length})`;
+      summary.textContent = `Status history (${history.length})`;
       details.appendChild(summary);
       for (const h of history) {
         const item = document.createElement("div");
