@@ -1363,9 +1363,11 @@ function renderOverview(panel, c) {
         item.className = "status-history-item";
         const meta = document.createElement("div");
         meta.className = "status-history-when";
-        // `date` is USCIS's own plain wall-clock string (e.g.
-        // "06-26-2026 00:00:00"), not a UTC ISO timestamp — show verbatim.
-        meta.textContent = [h.date, h.actionCode].filter(Boolean).join(" · ");
+        // `date` is USCIS's own plain wall-clock string; the historical
+        // entries are always midnight (00:00:00), so strip the time and
+        // show just the date. Everything else stays verbatim.
+        const histDate = (h.date || "").replace(/\s+00:00:00$/, "");
+        meta.textContent = [histDate, h.actionCode].filter(Boolean).join(" · ");
         item.appendChild(meta);
         if (h.statusTitle) {
           const title = document.createElement("div");
