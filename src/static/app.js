@@ -1348,8 +1348,9 @@ function renderOverview(panel, c) {
 
     block.appendChild(buildStatusBody(st));
 
-    // Status history: a dropdown of every distinct status transition
-    // observed over time, newest first, each timestamped in local time.
+    // Status history: the API's own historicalCaseStatuses array, shown
+    // verbatim in a dropdown. Each entry has only date / actionCode /
+    // statusTitle — exactly what USCIS returns, nothing more.
     const history = Array.isArray(st.history) ? st.history : [];
     if (history.length) {
       const details = document.createElement("details");
@@ -1360,11 +1361,18 @@ function renderOverview(panel, c) {
       for (const h of history) {
         const item = document.createElement("div");
         item.className = "status-history-item";
-        const when = document.createElement("div");
-        when.className = "status-history-when";
-        when.textContent = formatLocalDateTime(h.capturedAt);
-        item.appendChild(when);
-        item.appendChild(buildStatusBody(h));
+        const meta = document.createElement("div");
+        meta.className = "status-history-when";
+        // `date` is USCIS's own plain wall-clock string (e.g.
+        // "06-26-2026 00:00:00"), not a UTC ISO timestamp — show verbatim.
+        meta.textContent = [h.date, h.actionCode].filter(Boolean).join(" · ");
+        item.appendChild(meta);
+        if (h.statusTitle) {
+          const title = document.createElement("div");
+          title.className = "status-history-title";
+          title.textContent = h.statusTitle;
+          item.appendChild(title);
+        }
         details.appendChild(item);
       }
       block.appendChild(details);

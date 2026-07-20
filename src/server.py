@@ -517,39 +517,29 @@ def _latest_status_info(entries: list[dict]) -> dict | None:
     return inner if isinstance(inner, dict) else None
 
 
-def _status_history(entries: list[dict]) -> list[dict]:
-    """Collapse the status snapshot log to distinct status transitions.
+def _status_history(status_info: dict | None) -> list[dict]:
+    """Return the `historicalCaseStatuses` array from the status response.
 
-    Consecutive snapshots that carry the same (statusTitle, currentActionCode,
-    currentActionCodeDate) are the same status observed repeatedly; only the
-    first observation of each distinct status is kept. Returns newest-first,
-    each entry carrying the fields the UI shows plus `capturedAt` (when we
-    first observed this status).
+    USCIS returns the case history directly in the status payload. Each
+    entry is trimmed to what the API provides and we display — `date`,
+    `actionCode`, `statusTitle` — dropping the Spanish title. Order is left
+    exactly as USCIS returns it (newest first). Returns [] when the field is
+    absent.
     """
+    if not isinstance(status_info, dict):
+        return []
+    raw = status_info.get("historicalCaseStatuses")
+    if not isinstance(raw, list):
+        return []
     history: list[dict] = []
-    prev_key = None
-    for entry in entries:
-        payload = entry.get("data")
-        inner = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(inner, dict):
+    for e in raw:
+        if not isinstance(e, dict):
             continue
-        key = (
-            inner.get("statusTitle"),
-            inner.get("currentActionCode"),
-            inner.get("currentActionCodeDate"),
-        )
-        if key == prev_key:
-            continue
-        prev_key = key
         history.append({
-            "statusTitle": inner.get("statusTitle"),
-            "statusText": inner.get("statusText"),
-            "jurisdictionDescription": inner.get("jurisdictionDescription"),
-            "currentActionCode": inner.get("currentActionCode"),
-            "currentActionCodeDate": inner.get("currentActionCodeDate"),
-            "capturedAt": entry.get("capturedAt"),
+            "date": e.get("date"),
+            "actionCode": e.get("actionCode"),
+            "statusTitle": e.get("statusTitle"),
         })
-    history.reverse()  # newest first
     return history
 
 
@@ -1563,21 +1553,19 @@ def api_cases():
 
         status_entries = load_status_entries(c["label"])
         status_info = _latest_status_info(status_entries)
-        last_status_entry = status_entries[-1] if status_entries else None
         status_block = None
         if status_info:
-            # Strictly what USCIS returns, verbatim: the title, paragraph,
-            # field-office jurisdiction, current action code, and its date.
-            # `history` is the distinct-transition list for the dropdown;
-            # `capturedAt` is when we first observed the current status.
+            # Strictly what USCIS returns, verbatim: the current title,
+            # paragraph, field-office jurisdiction, action code + date, and
+            # the API's own historicalCaseStatuses array (date/actionCode/
+            # statusTitle). Nothing composed or interpreted.
             status_block = {
                 "statusTitle": status_info.get("statusTitle"),
                 "statusText": status_info.get("statusText"),
                 "jurisdictionDescription": status_info.get("jurisdictionDescription"),
                 "currentActionCode": status_info.get("currentActionCode"),
                 "currentActionCodeDate": status_info.get("currentActionCodeDate"),
-                "capturedAt": (last_status_entry or {}).get("capturedAt"),
-                "history": _status_history(status_entries),
+                "history": _status_history(status_info),
             }
 
         cases.append(

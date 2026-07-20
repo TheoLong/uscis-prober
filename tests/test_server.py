@@ -2306,29 +2306,34 @@ def test_latest_status_info_returns_inner_object():
     assert out["currentActionCode"] == "HA"
 
 
-def test_status_history_collapses_repeats_and_is_newest_first():
-    # Three snapshots: two identical, then a transition. History keeps the
-    # first observation of each distinct status, newest first.
-    entries = [
-        {"capturedAt": "2026-03-01T00:00:00Z",
-         "data": {"data": {"statusTitle": "Received", "currentActionCode": "IAF",
-                            "currentActionCodeDate": "2026-02-20T05:00:00.000Z"}}},
-        {"capturedAt": "2026-03-05T00:00:00Z",
-         "data": {"data": {"statusTitle": "Received", "currentActionCode": "IAF",
-                            "currentActionCodeDate": "2026-02-20T05:00:00.000Z"}}},
-        {"capturedAt": "2026-07-20T00:00:00Z",
-         "data": {"data": {"statusTitle": "RFE received", "currentActionCode": "HA",
-                            "currentActionCodeDate": "2026-07-20T17:28:13.000Z"}}},
+def test_status_history_reads_historical_case_statuses_verbatim():
+    # History comes straight from the API's historicalCaseStatuses array,
+    # trimmed to date/actionCode/statusTitle (Spanish dropped), order as-is.
+    status_info = {
+        "statusTitle": "current",
+        "historicalCaseStatuses": [
+            {"date": "06-26-2026 00:00:00", "actionCode": "IK",
+             "statusTitle": "We sent a request for additional evidence.",
+             "statusTitleSpanish": "Le enviamos..."},
+            {"date": "02-20-2026 00:00:00", "actionCode": "IAF",
+             "statusTitle": "We received your Form I-485.",
+             "statusTitleSpanish": "Recibimos..."},
+        ],
+    }
+    hist = server._status_history(status_info)
+    assert hist == [
+        {"date": "06-26-2026 00:00:00", "actionCode": "IK",
+         "statusTitle": "We sent a request for additional evidence."},
+        {"date": "02-20-2026 00:00:00", "actionCode": "IAF",
+         "statusTitle": "We received your Form I-485."},
     ]
-    hist = server._status_history(entries)
-    assert [h["statusTitle"] for h in hist] == ["RFE received", "Received"]
-    # newest first carries its first-observed capturedAt
-    assert hist[0]["capturedAt"] == "2026-07-20T00:00:00Z"
-    assert hist[1]["capturedAt"] == "2026-03-01T00:00:00Z"
+    # Spanish is dropped
+    assert all("statusTitleSpanish" not in h for h in hist)
 
 
-def test_status_history_empty_when_no_entries():
-    assert server._status_history([]) == []
+def test_status_history_empty_when_field_absent():
+    assert server._status_history({"statusTitle": "x"}) == []
+    assert server._status_history(None) == []
 
 
 
