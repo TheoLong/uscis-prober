@@ -1287,6 +1287,37 @@ function renderOverview(panel, c) {
   }
   panel.appendChild(metricRow);
 
+  // --- Current Status: the plain-English statusTitle/statusText USCIS
+  // shows on its public case-status tool, fetched from the dashboard
+  // status endpoint. Rendered strictly verbatim — only the exact title and
+  // paragraph USCIS returned, nothing composed or interpreted (tags in the
+  // statusText are stripped to plain text — no raw HTML injection).
+  const st = c.status;
+  if (st && (st.statusTitle || st.statusText)) {
+    const block = document.createElement("div");
+    block.className = "status-block";
+
+    const head = document.createElement("div");
+    head.className = "status-head";
+    head.textContent = "Current Status";
+    block.appendChild(head);
+
+    if (st.statusTitle) {
+      const title = document.createElement("div");
+      title.className = "status-title";
+      title.textContent = st.statusTitle;
+      block.appendChild(title);
+    }
+    if (st.statusText) {
+      const body = document.createElement("p");
+      body.className = "status-text";
+      body.textContent = stripTags(st.statusText);
+      block.appendChild(body);
+    }
+
+    panel.appendChild(block);
+  }
+
   // --- Factual callouts: ONLY things pulled verbatim from USCIS fields. ---
   // Anything derived or community-interpreted belongs in the Inferred block
   // at the end of the overview, not here.
@@ -3777,6 +3808,16 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
+}
+
+// Strip HTML tags to plain text. USCIS statusText embeds <a> links; we
+// render it as textContent, so tags must be removed first (collapsing the
+// surrounding whitespace the tags left behind).
+function stripTags(s) {
+  return String(s ?? "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ----------------------------------------------------------------------

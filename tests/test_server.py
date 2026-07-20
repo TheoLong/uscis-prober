@@ -88,6 +88,10 @@ def _seed_location_log(data_dir: Path, entries: list[dict]) -> None:
     (data_dir / "485_location.json").write_text(json.dumps(entries))
 
 
+def _seed_status_log(data_dir: Path, entries: list[dict]) -> None:
+    (data_dir / "485_status.json").write_text(json.dumps(entries))
+
+
 # -------- pure helpers ---------------------------------------------------
 
 def test_case_log_file_for_recognises_form_numbers(monkeypatch, tmp_path):
@@ -1638,6 +1642,25 @@ def test_api_export_includes_location_log(client, tmp_path):
         assert entry["locationEntries"] == 1
 
 
+def test_api_export_includes_status_log(client, tmp_path):
+    import io, zipfile
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_status_log(data_dir, [
+        {"capturedAt": "2026-04-22T18:00:00Z",
+         "data": {"data": {"statusTitle": "Case Was Received"}}},
+    ])
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        names = set(z.namelist())
+        assert "485_status.json" in names
+        manifest = json.loads(z.read("manifest.json"))
+        entry = manifest["cases"][0]
+        assert entry["statusFile"] == "485_status.json"
+        assert entry["statusEntries"] == 1
+
+
 def test_api_case_history_returns_changes(client, tmp_path):
     data_dir = tmp_path / "data"
     _seed_log(data_dir, [
@@ -2261,6 +2284,27 @@ def test_latest_location_info_returns_unwrapped_when_known_field_present():
     entries = [{"data": {"data": {"form": "I-765"}}}]
     out = server._latest_location_info(entries)
     assert out == {"form": "I-765"}
+
+
+def test_latest_status_info_none_when_no_entries():
+    assert server._latest_status_info([]) is None
+
+
+def test_latest_status_info_none_when_data_null():
+    # Envelope present but inner data is null (nothing fetched successfully).
+    entries = [{"data": {"data": None}}]
+    assert server._latest_status_info(entries) is None
+
+
+def test_latest_status_info_returns_inner_object():
+    entries = [
+        {"data": {"data": {"statusTitle": "Old", "currentActionCode": "IAF"}}},
+        {"data": {"data": {"statusTitle": "New", "currentActionCode": "HA"}}},
+    ]
+    out = server._latest_status_info(entries)
+    assert out["statusTitle"] == "New"
+    assert out["currentActionCode"] == "HA"
+
 
 
 def test_api_full_trace_path_escape_blocked(client, tmp_path, monkeypatch):

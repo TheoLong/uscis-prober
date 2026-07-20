@@ -93,6 +93,11 @@ get the credentials your email provider needs.
       (service center, subtype, receipt date). Stores the full envelope
       including `{"data": null}` so the moment USCIS flips a case from
       unassigned to assigned is a real diff, not an inference.
+    - `data/{formNum}_status.json` — dashboard status-endpoint response,
+      the plain-English `statusTitle`/`statusText` USCIS shows on its
+      public case-status tool. The full envelope is stored verbatim; the
+      "Current Status" block on each case card shows the exact title +
+      paragraph USCIS returned, nothing composed or interpreted.
 - **Each snapshot is the full API payload**, not a summary string.
   One row per pull per endpoint, ISO-8601 timestamped. No row is ever
   deleted or overwritten.
@@ -593,6 +598,7 @@ tests/                 pytest — 350+ tests, 100% line coverage on src/.
 data/                  Snapshot logs. Gitignored.
   {num}_case.json      Case-API snapshot history per form.
   {num}_location.json  Location-API snapshot history per form.
+  {num}_status.json    Human-readable status snapshot history per form.
   system_log.json      Structured event log (rotates at 5000 entries).
 config.json            Your secrets. Gitignored.
 config.example.json    Template.

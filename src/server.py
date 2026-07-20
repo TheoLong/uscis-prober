@@ -491,6 +491,32 @@ def load_location_entries(form_label: str) -> list[dict]:
     return _load_json_list(_location_log_file_for(form_label))
 
 
+def _status_log_file_for(form_label: str) -> Path | None:
+    """Resolve the human-readable status snapshot-log path for a form label."""
+    return _log_path_for(form_label, suffix="_status.json")
+
+
+def load_status_entries(form_label: str) -> list[dict]:
+    """Human-readable status snapshot history for a form label (oldest → newest)."""
+    return _load_json_list(_status_log_file_for(form_label))
+
+
+def _latest_status_info(entries: list[dict]) -> dict | None:
+    """Return the inner status object from the most recent status snapshot.
+
+    Envelope shape from the status endpoint is `{"data": {statusTitle,
+    statusText, currentActionCode, currentActionCodeDate, ...}}`. Returns
+    the unwrapped inner object, or None when nothing has been fetched yet.
+    """
+    if not entries:
+        return None
+    payload = entries[-1].get("data")
+    if not isinstance(payload, dict):
+        return None
+    inner = payload.get("data")
+    return inner if isinstance(inner, dict) else None
+
+
 def _latest_location_payload(entries: list[dict]) -> dict | None:
     """Return the most recent location API response body, or None.
 
@@ -1499,6 +1525,16 @@ def api_cases():
         location_info = _latest_location_info(location_entries)
         last_location_entry = location_entries[-1] if location_entries else None
 
+        status_entries = load_status_entries(c["label"])
+        status_info = _latest_status_info(status_entries)
+        status_block = None
+        if status_info:
+            # Strictly what USCIS returns: the exact title + paragraph.
+            status_block = {
+                "statusTitle": status_info.get("statusTitle"),
+                "statusText": status_info.get("statusText"),
+            }
+
         cases.append(
             {
                 "id": c["id"],
@@ -1516,6 +1552,7 @@ def api_cases():
                 "notices": latest_data.get("notices", []),
                 "latest": latest_data,
                 "summary": summary,
+                "status": status_block,
                 "location": {
                     "info": location_info,            # populated inner data, or None
                     "captures": len(location_entries),
@@ -1664,6 +1701,22 @@ def api_export():
                     location_entries = []
                     location_arcname = None
 
+            # Status snapshot log (sibling file; may not exist yet)
+            spath = _status_log_file_for(label)
+            status_entries: list = []
+            status_arcname: str | None = None
+            if spath and spath.exists():
+                try:
+                    raw = spath.read_bytes()
+                    parsed = json.loads(raw) if raw else []
+                    if isinstance(parsed, list):
+                        status_entries = parsed
+                        status_arcname = spath.name
+                        z.writestr(status_arcname, raw)
+                except (OSError, json.JSONDecodeError):
+                    status_entries = []
+                    status_arcname = None
+
             manifest["cases"].append({
                 "label": label,
                 "receiptNumber": receipt,
@@ -1671,6 +1724,8 @@ def api_export():
                 "entries": len(entries),
                 "locationFile": location_arcname,
                 "locationEntries": len(location_entries),
+                "statusFile": status_arcname,
+                "statusEntries": len(status_entries),
             })
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
         # Note: the system event log is NOT included in this archive. It has
