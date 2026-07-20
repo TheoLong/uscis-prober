@@ -95,9 +95,12 @@ get the credentials your email provider needs.
       unassigned to assigned is a real diff, not an inference.
     - `data/{formNum}_status.json` — dashboard status-endpoint response,
       the plain-English `statusTitle`/`statusText` USCIS shows on its
-      public case-status tool. The full envelope is stored verbatim; the
-      "Current Status" block on each case card shows the exact title +
-      paragraph USCIS returned, nothing composed or interpreted.
+      public case-status tool. **Not snapshotted** — this file holds only
+      the latest response (overwritten each pull); the "Current Status"
+      block shows the exact title + paragraph + jurisdiction + action code
+      USCIS returned, and the "Status history" dropdown comes from the
+      API's own `historicalCaseStatuses` array. Nothing composed or
+      interpreted.
 - **Each snapshot is the full API payload**, not a summary string.
   One row per pull per endpoint, ISO-8601 timestamped. No row is ever
   deleted or overwritten.
@@ -598,7 +601,7 @@ tests/                 pytest — 350+ tests, 100% line coverage on src/.
 data/                  Snapshot logs. Gitignored.
   {num}_case.json      Case-API snapshot history per form.
   {num}_location.json  Location-API snapshot history per form.
-  {num}_status.json    Human-readable status snapshot history per form.
+  {num}_status.json    Latest human-readable status per form (overwritten each pull, not snapshotted).
   system_log.json      Structured event log (rotates at 5000 entries).
 config.json            Your secrets. Gitignored.
 config.example.json    Template.

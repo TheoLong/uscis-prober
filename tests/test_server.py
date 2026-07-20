@@ -88,8 +88,8 @@ def _seed_location_log(data_dir: Path, entries: list[dict]) -> None:
     (data_dir / "485_location.json").write_text(json.dumps(entries))
 
 
-def _seed_status_log(data_dir: Path, entries: list[dict]) -> None:
-    (data_dir / "485_status.json").write_text(json.dumps(entries))
+def _seed_status_latest(data_dir: Path, record: dict) -> None:
+    (data_dir / "485_status.json").write_text(json.dumps(record))
 
 
 # -------- pure helpers ---------------------------------------------------
@@ -1646,10 +1646,10 @@ def test_api_export_includes_status_log(client, tmp_path):
     import io, zipfile
     data_dir = tmp_path / "data"
     _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
-    _seed_status_log(data_dir, [
-        {"capturedAt": "2026-04-22T18:00:00Z",
-         "data": {"data": {"statusTitle": "Case Was Received"}}},
-    ])
+    _seed_status_latest(data_dir, {
+        "capturedAt": "2026-04-22T18:00:00Z",
+        "data": {"data": {"statusTitle": "Case Was Received"}},
+    })
     r = client.get("/api/export")
     assert r.status_code == 200
     with zipfile.ZipFile(io.BytesIO(r.data)) as z:
@@ -1658,7 +1658,7 @@ def test_api_export_includes_status_log(client, tmp_path):
         manifest = json.loads(z.read("manifest.json"))
         entry = manifest["cases"][0]
         assert entry["statusFile"] == "485_status.json"
-        assert entry["statusEntries"] == 1
+        assert entry["statusPresent"] is True
 
 
 def test_api_case_history_returns_changes(client, tmp_path):
@@ -2286,22 +2286,24 @@ def test_latest_location_info_returns_unwrapped_when_known_field_present():
     assert out == {"form": "I-765"}
 
 
-def test_latest_status_info_none_when_no_entries():
-    assert server._latest_status_info([]) is None
+def test_latest_status_info_none_when_no_record():
+    assert server._latest_status_info(None) is None
+    assert server._latest_status_info({}) is None
 
 
 def test_latest_status_info_none_when_data_null():
-    # Envelope present but inner data is null (nothing fetched successfully).
-    entries = [{"data": {"data": None}}]
-    assert server._latest_status_info(entries) is None
+    # Record present but payload envelope's inner data is null.
+    record = {"capturedAt": "2026-07-20T00:00:00Z", "data": {"data": None}}
+    assert server._latest_status_info(record) is None
 
 
 def test_latest_status_info_returns_inner_object():
-    entries = [
-        {"data": {"data": {"statusTitle": "Old", "currentActionCode": "IAF"}}},
-        {"data": {"data": {"statusTitle": "New", "currentActionCode": "HA"}}},
-    ]
-    out = server._latest_status_info(entries)
+    # Record wraps the full response envelope: {capturedAt, data: {data: {...}}}
+    record = {
+        "capturedAt": "2026-07-20T00:00:00Z",
+        "data": {"data": {"statusTitle": "New", "currentActionCode": "HA"}},
+    }
+    out = server._latest_status_info(record)
     assert out["statusTitle"] == "New"
     assert out["currentActionCode"] == "HA"
 
