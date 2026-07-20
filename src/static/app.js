@@ -1314,6 +1314,33 @@ function renderOverview(panel, c) {
       body.textContent = stripTags(st.statusText);
       block.appendChild(body);
     }
+    if (st.jurisdictionDescription) {
+      const office = document.createElement("div");
+      office.className = "status-office";
+      office.textContent = st.jurisdictionDescription;
+      block.appendChild(office);
+    }
+
+    // Additional raw fields USCIS returns, shown verbatim as label : value.
+    // Jurisdiction is already shown above on its own line, so the raw list
+    // covers the action code + its date.
+    const rawList = [
+      ["Current action code", st.currentActionCode],
+      ["Action code date", st.currentActionCodeDate],
+    ].filter(([, v]) => v);
+    if (rawList.length) {
+      const dl = document.createElement("dl");
+      dl.className = "status-raw";
+      for (const [k, v] of rawList) {
+        const dt = document.createElement("dt");
+        dt.textContent = k;
+        const dd = document.createElement("dd");
+        dd.textContent = v;
+        dl.appendChild(dt);
+        dl.appendChild(dd);
+      }
+      block.appendChild(dl);
+    }
 
     panel.appendChild(block);
   }

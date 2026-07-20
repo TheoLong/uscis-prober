@@ -1529,10 +1529,15 @@ def api_cases():
         status_info = _latest_status_info(status_entries)
         status_block = None
         if status_info:
-            # Strictly what USCIS returns: the exact title + paragraph.
+            # Strictly what USCIS returns, verbatim: the title, paragraph,
+            # field-office jurisdiction, current action code, and its date.
+            # Nothing composed or interpreted.
             status_block = {
                 "statusTitle": status_info.get("statusTitle"),
                 "statusText": status_info.get("statusText"),
+                "jurisdictionDescription": status_info.get("jurisdictionDescription"),
+                "currentActionCode": status_info.get("currentActionCode"),
+                "currentActionCodeDate": status_info.get("currentActionCodeDate"),
             }
 
         cases.append(
