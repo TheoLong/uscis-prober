@@ -407,6 +407,41 @@ def test_all_events_counts_events_plus_silent():
     assert s["allEvents"] == 3  # 3 events on the latest snapshot, 0 silent
 
 
+def test_summarize_case_counts_only_outstanding_evidence_requests():
+    # An evidence request the applicant has answered (or USCIS finalized) stays
+    # in the array but no longer requires action — it must not drive the
+    # "Action required" banner.
+    entries = [
+        _entry(
+            "2026-07-20T12:00:00Z",
+            actionRequired=False,
+            evidenceRequests=[
+                {"noticeId": "n1", "isRespondedTo": True, "finalized": False},
+                {"noticeId": "n2", "isRespondedTo": False, "finalized": True},
+                {"noticeId": "n3", "isRespondedTo": False, "finalized": False},
+            ],
+        ),
+    ]
+    s = summarize_case(entries, today_iso="2026-07-21")
+    assert s["evidenceRequestCount"] == 3
+    assert s["outstandingEvidenceCount"] == 1
+
+
+def test_summarize_case_no_outstanding_when_rfe_responded():
+    entries = [
+        _entry(
+            "2026-07-20T12:00:00Z",
+            actionRequired=False,
+            evidenceRequests=[
+                {"noticeId": "n1", "isRespondedTo": True, "finalized": False},
+            ],
+        ),
+    ]
+    s = summarize_case(entries, today_iso="2026-07-21")
+    assert s["evidenceRequestCount"] == 1
+    assert s["outstandingEvidenceCount"] == 0
+
+
 def test_summarize_case_surfaces_upcoming_appointment_with_days_until():
     entry = _entry(
         "2026-04-15T12:00:00Z",

@@ -534,7 +534,16 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
 
     # High-signal collection sizes — a Request for Evidence shows up in evidenceRequests;
     # approval notices show up in documents.
-    evidence_count = len(latest_data.get("evidenceRequests") or [])
+    evidence_requests = latest_data.get("evidenceRequests") or []
+    evidence_count = len(evidence_requests)
+    # An evidence request still demands a response only while it is neither
+    # responded-to nor finalized. Once USCIS logs the response the record stays
+    # in the array but no longer requires action.
+    outstanding_evidence_count = sum(
+        1
+        for er in evidence_requests
+        if not er.get("isRespondedTo") and not er.get("finalized")
+    )
     document_count = len(latest_data.get("documents") or [])
 
     # "All events" = the timeline pill count: every event row on the latest
@@ -552,6 +561,7 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
         "stage": infer_stage(events),
         "progression": stage_progression(events),
         "evidenceRequestCount": evidence_count,
+        "outstandingEvidenceCount": outstanding_evidence_count,
         "documentCount": document_count,
         "upcomingAppointment": upcoming,
         "lastActivity": last_activity,

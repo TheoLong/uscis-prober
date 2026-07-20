@@ -1293,13 +1293,13 @@ function renderOverview(panel, c) {
   const factCallouts = document.createElement("div");
   factCallouts.className = "callouts";
 
-  if (latest.actionRequired || (s.evidenceRequestCount ?? 0) > 0) {
+  if (latest.actionRequired || (s.outstandingEvidenceCount ?? 0) > 0) {
     factCallouts.appendChild(
       callout(
         "bad",
         "Action required",
-        (s.evidenceRequestCount ?? 0) > 0
-          ? `evidenceRequests has ${s.evidenceRequestCount} entr${s.evidenceRequestCount === 1 ? "y" : "ies"} — an Request for Evidence / Notice of Intent to Deny has been issued. Check the raw JSON.`
+        (s.outstandingEvidenceCount ?? 0) > 0
+          ? `evidenceRequests has ${s.outstandingEvidenceCount} outstanding entr${s.outstandingEvidenceCount === 1 ? "y" : "ies"} — a Request for Evidence / Notice of Intent to Deny is awaiting your response. Check the raw JSON.`
           : "USCIS set actionRequired — look for a Request for Evidence or similar in the notices."
       )
     );
