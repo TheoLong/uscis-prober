@@ -1235,6 +1235,54 @@ function renderPanel(article, c, tabId) {
 
 // ---------- overview ----------
 
+// Build the verbatim status body: title, paragraph, jurisdiction, and the
+// raw action-code fields. Shared by the current status and each historic
+// entry. Everything is exactly what USCIS returned; the only transform is
+// stripping HTML tags from statusText and converting the action-code
+// timestamp to local wall-clock for display.
+function buildStatusBody(st) {
+  const frag = document.createDocumentFragment();
+  if (st.statusTitle) {
+    const title = document.createElement("div");
+    title.className = "status-title";
+    title.textContent = st.statusTitle;
+    frag.appendChild(title);
+  }
+  if (st.statusText) {
+    const body = document.createElement("p");
+    body.className = "status-text";
+    body.textContent = stripTags(st.statusText);
+    frag.appendChild(body);
+  }
+  if (st.jurisdictionDescription) {
+    const office = document.createElement("div");
+    office.className = "status-office";
+    office.textContent = `Jurisdiction: ${st.jurisdictionDescription}`;
+    frag.appendChild(office);
+  }
+  const rawList = [
+    ["Current action code", st.currentActionCode],
+    // Action-code date is a UTC ISO timestamp; show it in local time.
+    ["Action code date", st.currentActionCodeDate
+      ? formatLocalDateTime(st.currentActionCodeDate, { withSeconds: true })
+      : null],
+  ].filter(([, v]) => v);
+  if (rawList.length) {
+    const dl = document.createElement("dl");
+    dl.className = "status-raw";
+    for (const [k, v] of rawList) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    }
+    frag.appendChild(dl);
+  }
+  return frag;
+}
+
 function renderOverview(panel, c) {
   const latest = c.latest || {};
   const s = c.summary || {};
@@ -1289,9 +1337,10 @@ function renderOverview(panel, c) {
 
   // --- Current Status: the plain-English statusTitle/statusText USCIS
   // shows on its public case-status tool, fetched from the dashboard
-  // status endpoint. Rendered strictly verbatim — only the exact title and
-  // paragraph USCIS returned, nothing composed or interpreted (tags in the
+  // status endpoint. Rendered strictly verbatim — only the exact fields
+  // USCIS returned, nothing composed or interpreted (tags in the
   // statusText are stripped to plain text — no raw HTML injection).
+  // Timestamps are converted to local wall-clock for display only.
   const st = c.status;
   if (st && (st.statusTitle || st.statusText)) {
     const block = document.createElement("div");
@@ -1302,44 +1351,29 @@ function renderOverview(panel, c) {
     head.textContent = "Current Status";
     block.appendChild(head);
 
-    if (st.statusTitle) {
-      const title = document.createElement("div");
-      title.className = "status-title";
-      title.textContent = st.statusTitle;
-      block.appendChild(title);
-    }
-    if (st.statusText) {
-      const body = document.createElement("p");
-      body.className = "status-text";
-      body.textContent = stripTags(st.statusText);
-      block.appendChild(body);
-    }
-    if (st.jurisdictionDescription) {
-      const office = document.createElement("div");
-      office.className = "status-office";
-      office.textContent = st.jurisdictionDescription;
-      block.appendChild(office);
-    }
+    block.appendChild(buildStatusBody(st));
 
-    // Additional raw fields USCIS returns, shown verbatim as label : value.
-    // Jurisdiction is already shown above on its own line, so the raw list
-    // covers the action code + its date.
-    const rawList = [
-      ["Current action code", st.currentActionCode],
-      ["Action code date", st.currentActionCodeDate],
-    ].filter(([, v]) => v);
-    if (rawList.length) {
-      const dl = document.createElement("dl");
-      dl.className = "status-raw";
-      for (const [k, v] of rawList) {
-        const dt = document.createElement("dt");
-        dt.textContent = k;
-        const dd = document.createElement("dd");
-        dd.textContent = v;
-        dl.appendChild(dt);
-        dl.appendChild(dd);
+    // Historic case status: a dropdown of every distinct status transition
+    // observed over time, newest first. Only rendered when there's more
+    // than the single current status to show.
+    const history = Array.isArray(st.history) ? st.history : [];
+    if (history.length > 1) {
+      const details = document.createElement("details");
+      details.className = "status-history";
+      const summary = document.createElement("summary");
+      summary.textContent = `Historic case status (${history.length})`;
+      details.appendChild(summary);
+      for (const h of history) {
+        const item = document.createElement("div");
+        item.className = "status-history-item";
+        const when = document.createElement("div");
+        when.className = "status-history-when";
+        when.textContent = formatLocalDateTime(h.capturedAt);
+        item.appendChild(when);
+        item.appendChild(buildStatusBody(h));
+        details.appendChild(item);
       }
-      block.appendChild(dl);
+      block.appendChild(details);
     }
 
     panel.appendChild(block);

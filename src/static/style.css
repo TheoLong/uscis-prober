@@ -1641,6 +1641,31 @@ body.redaction-latched [data-guard="redaction"]::after {
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
+.status-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+.status-history > summary {
+  cursor: pointer;
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+.status-history > summary:hover { color: var(--text); }
+.status-history-item {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-soft);
+}
+.status-history-when {
+  font-size: 0.72rem;
+  color: var(--accent-hot);
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---------- secondary facts ----------
  * Grid of equal-width cells so labels and values line up vertically

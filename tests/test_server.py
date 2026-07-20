@@ -2306,6 +2306,31 @@ def test_latest_status_info_returns_inner_object():
     assert out["currentActionCode"] == "HA"
 
 
+def test_status_history_collapses_repeats_and_is_newest_first():
+    # Three snapshots: two identical, then a transition. History keeps the
+    # first observation of each distinct status, newest first.
+    entries = [
+        {"capturedAt": "2026-03-01T00:00:00Z",
+         "data": {"data": {"statusTitle": "Received", "currentActionCode": "IAF",
+                            "currentActionCodeDate": "2026-02-20T05:00:00.000Z"}}},
+        {"capturedAt": "2026-03-05T00:00:00Z",
+         "data": {"data": {"statusTitle": "Received", "currentActionCode": "IAF",
+                            "currentActionCodeDate": "2026-02-20T05:00:00.000Z"}}},
+        {"capturedAt": "2026-07-20T00:00:00Z",
+         "data": {"data": {"statusTitle": "RFE received", "currentActionCode": "HA",
+                            "currentActionCodeDate": "2026-07-20T17:28:13.000Z"}}},
+    ]
+    hist = server._status_history(entries)
+    assert [h["statusTitle"] for h in hist] == ["RFE received", "Received"]
+    # newest first carries its first-observed capturedAt
+    assert hist[0]["capturedAt"] == "2026-07-20T00:00:00Z"
+    assert hist[1]["capturedAt"] == "2026-03-01T00:00:00Z"
+
+
+def test_status_history_empty_when_no_entries():
+    assert server._status_history([]) == []
+
+
 
 def test_api_full_trace_path_escape_blocked(client, tmp_path, monkeypatch):
     """Even when the outer `_is_safe_name_part` gate passes, an attempt
