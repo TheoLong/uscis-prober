@@ -1235,6 +1235,49 @@ function renderPanel(article, c, tabId) {
 
 // ---------- overview ----------
 
+// Build the verbatim status body: title, paragraph, jurisdiction, and the
+// raw action-code fields. Shared by the current status and each historic
+// entry. Everything is exactly what USCIS returned; the only transform is
+// stripping HTML tags from statusText and converting the action-code
+// timestamp to local wall-clock for display.
+function buildStatusBody(st) {
+  const frag = document.createDocumentFragment();
+  if (st.statusTitle) {
+    const title = document.createElement("div");
+    title.className = "status-title";
+    title.textContent = st.statusTitle;
+    frag.appendChild(title);
+  }
+  if (st.statusText) {
+    const body = document.createElement("p");
+    body.className = "status-text";
+    body.textContent = stripTags(st.statusText);
+    frag.appendChild(body);
+  }
+  const rawList = [
+    ["Jurisdiction", st.jurisdictionDescription],
+    ["Current action code", st.currentActionCode],
+    // Action-code date is a UTC ISO timestamp; show it in local time.
+    ["Action code date", st.currentActionCodeDate
+      ? formatLocalDateTime(st.currentActionCodeDate, { withSeconds: true })
+      : null],
+  ].filter(([, v]) => v);
+  if (rawList.length) {
+    const dl = document.createElement("dl");
+    dl.className = "status-raw";
+    for (const [k, v] of rawList) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    }
+    frag.appendChild(dl);
+  }
+  return frag;
+}
+
 function renderOverview(panel, c) {
   const latest = c.latest || {};
   const s = c.summary || {};
@@ -1286,6 +1329,59 @@ function renderOverview(panel, c) {
     metricRow.appendChild(box);
   }
   panel.appendChild(metricRow);
+
+  // --- Current Status: the plain-English statusTitle/statusText USCIS
+  // shows on its public case-status tool, fetched from the dashboard
+  // status endpoint. Rendered strictly verbatim — only the exact fields
+  // USCIS returned, nothing composed or interpreted (tags in the
+  // statusText are stripped to plain text — no raw HTML injection).
+  // Timestamps are converted to local wall-clock for display only.
+  const st = c.status;
+  if (st && (st.statusTitle || st.statusText)) {
+    const block = document.createElement("div");
+    block.className = "status-block";
+
+    const head = document.createElement("div");
+    head.className = "status-head";
+    head.textContent = "Current Status";
+    block.appendChild(head);
+
+    block.appendChild(buildStatusBody(st));
+
+    // Status history: the API's own historicalCaseStatuses array, shown
+    // verbatim in a dropdown. Each entry has only date / actionCode /
+    // statusTitle — exactly what USCIS returns, nothing more.
+    const history = Array.isArray(st.history) ? st.history : [];
+    if (history.length) {
+      const details = document.createElement("details");
+      details.className = "status-history";
+      const summary = document.createElement("summary");
+      summary.textContent = `Status history (${history.length})`;
+      details.appendChild(summary);
+      for (const h of history) {
+        const item = document.createElement("div");
+        item.className = "status-history-item";
+        const meta = document.createElement("div");
+        meta.className = "status-history-when";
+        // `date` is USCIS's own plain wall-clock string; the historical
+        // entries are always midnight (00:00:00), so strip the time and
+        // show just the date. Everything else stays verbatim.
+        const histDate = (h.date || "").replace(/\s+00:00:00$/, "");
+        meta.textContent = [histDate, h.actionCode].filter(Boolean).join(" · ");
+        item.appendChild(meta);
+        if (h.statusTitle) {
+          const title = document.createElement("div");
+          title.className = "status-history-title";
+          title.textContent = h.statusTitle;
+          item.appendChild(title);
+        }
+        details.appendChild(item);
+      }
+      block.appendChild(details);
+    }
+
+    panel.appendChild(block);
+  }
 
   // --- Factual callouts: ONLY things pulled verbatim from USCIS fields. ---
   // Anything derived or community-interpreted belongs in the Inferred block
@@ -3777,6 +3873,16 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
+}
+
+// Strip HTML tags to plain text. USCIS statusText embeds <a> links; we
+// render it as textContent, so tags must be removed first (collapsing the
+// surrounding whitespace the tags left behind).
+function stripTags(s) {
+  return String(s ?? "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ----------------------------------------------------------------------

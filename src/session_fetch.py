@@ -53,6 +53,7 @@ from uscis_api import (
     fetch_location,
     open_worker_tab,
 )
+from uscis_status import StatusFetchError, fetch_case_status
 from uscis_auth import (
     AuthError,
     STORAGE_STATE_PATH,
@@ -160,6 +161,19 @@ def location_log_file_for(form_type: str) -> Path:
     return DATA_DIR / f"{m.group(1)}_location.json"
 
 
+def status_log_file_for(form_type: str) -> Path:
+    """Path to the human-readable status snapshot log (I-485 → 485_status.json).
+
+    Sibling of the case and location logs. Holds the plain-English
+    `statusTitle`/`statusText` from the dashboard status endpoint, kept in
+    its own file so it stays independent of the rich API history.
+    """
+    m = _FORM_NUM_RE.search(form_type or "")
+    if not m:
+        raise ValueError(f"Unrecognized form type: {form_type!r}")
+    return DATA_DIR / f"{m.group(1)}_status.json"
+
+
 def _append_to_log_file(path: Path, entry: dict) -> Path:
     """Shared append-with-malformed-recovery used by both case and location logs."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,6 +243,25 @@ def append_location_snapshot(
         location_log_file_for(form_type),
         {"capturedAt": captured_at, "data": payload},
     )
+
+
+def write_status_latest(
+    form_type: str, payload: dict | None, captured_at: str
+) -> Path:
+    """Write the LATEST status response, overwriting any prior value.
+
+    Unlike the case and location logs, the status endpoint is NOT
+    snapshotted — we keep only the most recent response. The dashboard is a
+    separate process, so the current status still has to live on disk, but
+    the file holds a single `{capturedAt, data}` object that each pull
+    replaces. Case history comes from the API's own `historicalCaseStatuses`
+    array inside `data`, so no local history is needed.
+    """
+    path = status_log_file_for(form_type)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"capturedAt": captured_at, "data": payload}, f, indent=2)
+    return path
 
 
 def _extract_cases(
@@ -352,6 +385,44 @@ def _extract_cases(
                 except ValueError as e:
                     logger.warning("  ⚠ location log skipped: %s", e)
                     sys_log("location_snapshot_append_failed", level="warning",
+                            source="session_fetch", label=label or "?",
+                            receipt=receipt, error=str(e))
+
+            # Status endpoint is best-effort like location — a failure here
+            # must not count against the case-fetch run. It carries the
+            # plain-English statusTitle/statusText that translates the rich
+            # API's cryptic event codes.
+            try:
+                status_data = fetch_case_status(probe_tab, receipt)
+            except StatusFetchError as e:
+                logger.warning("  ⚠ status fetch failed for %s: %s", receipt, e)
+                sys_log("status_fetch_failed", level="warning",
+                        source="session_fetch", label=label or "?",
+                        receipt=receipt,
+                        error=f"{type(e).__name__}: {e}"[:200])
+            except Exception as e:  # noqa: BLE001 — never fail the pull on status
+                logger.warning("  ⚠ status fetch error for %s: %s", receipt, e)
+                sys_log("status_fetch_unexpected_error", level="warning",
+                        source="session_fetch", label=label or "?",
+                        receipt=receipt,
+                        error=f"{type(e).__name__}: {e}"[:200])
+            else:
+                try:
+                    spath = write_status_latest(
+                        form_type, status_data, captured_at
+                    )
+                    logger.info("  → %s", spath.relative_to(ROOT))
+                    inner = (
+                        status_data.get("data")
+                        if isinstance(status_data, dict) else None
+                    ) or {}
+                    sys_log("status_latest_written", source="session_fetch",
+                            label=label or "?", receipt=receipt,
+                            form_type=form_type, file=spath.name,
+                            current_action_code=inner.get("currentActionCode"))
+                except ValueError as e:
+                    logger.warning("  ⚠ status write skipped: %s", e)
+                    sys_log("status_write_failed", level="warning",
                             source="session_fetch", label=label or "?",
                             receipt=receipt, error=str(e))
 

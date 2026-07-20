@@ -491,6 +491,73 @@ def load_location_entries(form_label: str) -> list[dict]:
     return _load_json_list(_location_log_file_for(form_label))
 
 
+def _status_log_file_for(form_label: str) -> Path | None:
+    """Resolve the latest-status file path for a form label."""
+    return _log_path_for(form_label, suffix="_status.json")
+
+
+def load_status_latest(form_label: str) -> dict | None:
+    """Load the latest status response for a form label.
+
+    Unlike the case/location logs, the status endpoint is not snapshotted:
+    the file holds a single `{capturedAt, data}` object (overwritten each
+    pull), not a list. Returns that object, or None when absent/malformed.
+    """
+    path = _status_log_file_for(form_label)
+    if not path or not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        logger.warning("%s is not valid JSON; treating as empty.", path.name)
+        return None
+
+
+def _latest_status_info(record: dict | None) -> dict | None:
+    """Return the inner status object from the latest-status record.
+
+    Record shape is `{capturedAt, data: <payload>}` where the payload is
+    the full response envelope `{"data": {statusTitle, statusText,
+    currentActionCode, historicalCaseStatuses, ...}}`. Unwraps both levels
+    to the actual status fields, or None when nothing has been fetched yet.
+    """
+    if not isinstance(record, dict):
+        return None
+    payload = record.get("data")
+    if not isinstance(payload, dict):
+        return None
+    inner = payload.get("data")
+    return inner if isinstance(inner, dict) else None
+
+
+def _status_history(status_info: dict | None) -> list[dict]:
+    """Return the `historicalCaseStatuses` array from the status response.
+
+    USCIS returns the case history directly in the status payload. Each
+    entry is trimmed to what the API provides and we display — `date`,
+    `actionCode`, `statusTitle` — dropping the Spanish title. Order is left
+    exactly as USCIS returns it (newest first). Returns [] when the field is
+    absent.
+    """
+    if not isinstance(status_info, dict):
+        return []
+    raw = status_info.get("historicalCaseStatuses")
+    if not isinstance(raw, list):
+        return []
+    history: list[dict] = []
+    for e in raw:
+        if not isinstance(e, dict):
+            continue
+        history.append({
+            "date": e.get("date"),
+            "actionCode": e.get("actionCode"),
+            "statusTitle": e.get("statusTitle"),
+        })
+    return history
+
+
 def _latest_location_payload(entries: list[dict]) -> dict | None:
     """Return the most recent location API response body, or None.
 
@@ -1499,6 +1566,23 @@ def api_cases():
         location_info = _latest_location_info(location_entries)
         last_location_entry = location_entries[-1] if location_entries else None
 
+        status_record = load_status_latest(c["label"])
+        status_info = _latest_status_info(status_record)
+        status_block = None
+        if status_info:
+            # Strictly what USCIS returns, verbatim: the current title,
+            # paragraph, field-office jurisdiction, action code + date, and
+            # the API's own historicalCaseStatuses array (date/actionCode/
+            # statusTitle). Nothing composed or interpreted.
+            status_block = {
+                "statusTitle": status_info.get("statusTitle"),
+                "statusText": status_info.get("statusText"),
+                "jurisdictionDescription": status_info.get("jurisdictionDescription"),
+                "currentActionCode": status_info.get("currentActionCode"),
+                "currentActionCodeDate": status_info.get("currentActionCodeDate"),
+                "history": _status_history(status_info),
+            }
+
         cases.append(
             {
                 "id": c["id"],
@@ -1516,6 +1600,7 @@ def api_cases():
                 "notices": latest_data.get("notices", []),
                 "latest": latest_data,
                 "summary": summary,
+                "status": status_block,
                 "location": {
                     "info": location_info,            # populated inner data, or None
                     "captures": len(location_entries),
@@ -1664,6 +1749,23 @@ def api_export():
                     location_entries = []
                     location_arcname = None
 
+            # Latest-status file (single {capturedAt, data} object, not a
+            # list — the status endpoint is not snapshotted).
+            spath = _status_log_file_for(label)
+            status_arcname: str | None = None
+            status_present = False
+            if spath and spath.exists():
+                try:
+                    raw = spath.read_bytes()
+                    parsed = json.loads(raw) if raw else None
+                    if isinstance(parsed, dict):
+                        status_present = True
+                        status_arcname = spath.name
+                        z.writestr(status_arcname, raw)
+                except (OSError, json.JSONDecodeError):
+                    status_arcname = None
+                    status_present = False
+
             manifest["cases"].append({
                 "label": label,
                 "receiptNumber": receipt,
@@ -1671,6 +1773,8 @@ def api_export():
                 "entries": len(entries),
                 "locationFile": location_arcname,
                 "locationEntries": len(location_entries),
+                "statusFile": status_arcname,
+                "statusPresent": status_present,
             })
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
         # Note: the system event log is NOT included in this archive. It has

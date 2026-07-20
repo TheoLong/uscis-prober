@@ -88,6 +88,10 @@ def _seed_location_log(data_dir: Path, entries: list[dict]) -> None:
     (data_dir / "485_location.json").write_text(json.dumps(entries))
 
 
+def _seed_status_latest(data_dir: Path, record: dict) -> None:
+    (data_dir / "485_status.json").write_text(json.dumps(record))
+
+
 # -------- pure helpers ---------------------------------------------------
 
 def test_case_log_file_for_recognises_form_numbers(monkeypatch, tmp_path):
@@ -1638,6 +1642,25 @@ def test_api_export_includes_location_log(client, tmp_path):
         assert entry["locationEntries"] == 1
 
 
+def test_api_export_includes_status_log(client, tmp_path):
+    import io, zipfile
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_status_latest(data_dir, {
+        "capturedAt": "2026-04-22T18:00:00Z",
+        "data": {"data": {"statusTitle": "Case Was Received"}},
+    })
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        names = set(z.namelist())
+        assert "485_status.json" in names
+        manifest = json.loads(z.read("manifest.json"))
+        entry = manifest["cases"][0]
+        assert entry["statusFile"] == "485_status.json"
+        assert entry["statusPresent"] is True
+
+
 def test_api_case_history_returns_changes(client, tmp_path):
     data_dir = tmp_path / "data"
     _seed_log(data_dir, [
@@ -2261,6 +2284,59 @@ def test_latest_location_info_returns_unwrapped_when_known_field_present():
     entries = [{"data": {"data": {"form": "I-765"}}}]
     out = server._latest_location_info(entries)
     assert out == {"form": "I-765"}
+
+
+def test_latest_status_info_none_when_no_record():
+    assert server._latest_status_info(None) is None
+    assert server._latest_status_info({}) is None
+
+
+def test_latest_status_info_none_when_data_null():
+    # Record present but payload envelope's inner data is null.
+    record = {"capturedAt": "2026-07-20T00:00:00Z", "data": {"data": None}}
+    assert server._latest_status_info(record) is None
+
+
+def test_latest_status_info_returns_inner_object():
+    # Record wraps the full response envelope: {capturedAt, data: {data: {...}}}
+    record = {
+        "capturedAt": "2026-07-20T00:00:00Z",
+        "data": {"data": {"statusTitle": "New", "currentActionCode": "HA"}},
+    }
+    out = server._latest_status_info(record)
+    assert out["statusTitle"] == "New"
+    assert out["currentActionCode"] == "HA"
+
+
+def test_status_history_reads_historical_case_statuses_verbatim():
+    # History comes straight from the API's historicalCaseStatuses array,
+    # trimmed to date/actionCode/statusTitle (Spanish dropped), order as-is.
+    status_info = {
+        "statusTitle": "current",
+        "historicalCaseStatuses": [
+            {"date": "06-26-2026 00:00:00", "actionCode": "IK",
+             "statusTitle": "We sent a request for additional evidence.",
+             "statusTitleSpanish": "Le enviamos..."},
+            {"date": "02-20-2026 00:00:00", "actionCode": "IAF",
+             "statusTitle": "We received your Form I-485.",
+             "statusTitleSpanish": "Recibimos..."},
+        ],
+    }
+    hist = server._status_history(status_info)
+    assert hist == [
+        {"date": "06-26-2026 00:00:00", "actionCode": "IK",
+         "statusTitle": "We sent a request for additional evidence."},
+        {"date": "02-20-2026 00:00:00", "actionCode": "IAF",
+         "statusTitle": "We received your Form I-485."},
+    ]
+    # Spanish is dropped
+    assert all("statusTitleSpanish" not in h for h in hist)
+
+
+def test_status_history_empty_when_field_absent():
+    assert server._status_history({"statusTitle": "x"}) == []
+    assert server._status_history(None) == []
+
 
 
 def test_api_full_trace_path_escape_blocked(client, tmp_path, monkeypatch):

@@ -1590,6 +1590,83 @@ body.redaction-latched [data-guard="redaction"]::after {
 .callout-info .callout-title { color: var(--accent-hot); }
 .callout-body { color: var(--muted); font-size: 0.82rem; }
 
+/* ---------- current-status block ----------
+ * The plain-English USCIS status headline + paragraph, shown at the top of
+ * the overview so the human-readable status sits above the raw signals. */
+.status-block {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent-hot);
+  background: var(--bg-elev-2);
+}
+.status-head {
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.status-title {
+  font-weight: 600;
+  font-size: 0.98rem;
+  color: var(--text);
+  line-height: 1.3;
+}
+.status-text {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+.status-raw {
+  margin: 8px 0 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  font-size: 0.74rem;
+}
+.status-raw dt {
+  color: var(--muted);
+  opacity: 0.85;
+}
+.status-raw dd {
+  margin: 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.status-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+.status-history > summary {
+  cursor: pointer;
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+.status-history > summary:hover { color: var(--text); }
+.status-history-item {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-soft);
+}
+.status-history-when {
+  font-size: 0.72rem;
+  color: var(--accent-hot);
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.status-history-title {
+  font-size: 0.8rem;
+  color: var(--text);
+  line-height: 1.4;
+}
+
 /* ---------- secondary facts ----------
  * Grid of equal-width cells so labels and values line up vertically
  * regardless of individual content length. `auto-fit` plus a minmax
