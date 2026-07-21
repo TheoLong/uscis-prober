@@ -1998,6 +1998,17 @@ body.redaction-latched [data-guard="redaction"]::after {
 }
 .change-item-added-block .change-scalar .to,
 .change-item-removed-block .change-scalar .to { color: var(--text); }
+/* Long unbroken values (e.g. documentUri, cmsContentId) must wrap instead of
+ * overflowing the viewport on narrow screens. break-word keeps normal words
+ * intact but breaks a long token when it would otherwise blow past the edge. */
+.change-item-added-block .change-scalar .field,
+.change-item-removed-block .change-scalar .field,
+.change-item-added-block .change-scalar .to,
+.change-item-removed-block .change-scalar .to {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .dict-nested {
   margin: 2px 0 0; padding: 6px 8px; white-space: pre-wrap; word-break: break-word;
   background: var(--code-bg, rgba(127,127,127,0.10)); border-radius: 4px;
@@ -2231,7 +2242,9 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   .hero-metrics { grid-template-columns: 1fr 1fr; }
 
   .change-block-head { flex-wrap: wrap; }
-  .change-scalar {
+  .change-scalar,
+  .change-item-added-block .change-scalar,
+  .change-item-removed-block .change-scalar {
     grid-template-columns: 1fr;
     gap: 2px 0;
     padding: 6px 0;
