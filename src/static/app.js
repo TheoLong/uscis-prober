@@ -1389,14 +1389,12 @@ function renderOverview(panel, c) {
   const factCallouts = document.createElement("div");
   factCallouts.className = "callouts";
 
-  if (latest.actionRequired || (s.outstandingEvidenceCount ?? 0) > 0) {
+  if (latest.actionRequired === true) {
     factCallouts.appendChild(
       callout(
         "bad",
         "Action required",
-        (s.outstandingEvidenceCount ?? 0) > 0
-          ? `evidenceRequests has ${s.outstandingEvidenceCount} outstanding entr${s.outstandingEvidenceCount === 1 ? "y" : "ies"} — a Request for Evidence / Notice of Intent to Deny is awaiting your response. Check the raw JSON.`
-          : "USCIS set actionRequired — look for a Request for Evidence or similar in the notices."
+        "USCIS set actionRequired on this case — check the notices / evidence requests in the raw JSON for what's being asked."
       )
     );
   }
@@ -1612,6 +1610,8 @@ const KIND_INFO = {
   notice:      { label: "new notice",     tone: "warn" },
   appointment: { label: "appointment",    tone: "warn" },
   decision:    { label: "decision flag",  tone: "ok" },
+  evidence:    { label: "evidence request", tone: "warn",
+                 desc: "An evidence request (RFE / NOID) was added or changed in place (e.g. isRespondedTo flipped)." },
   status:      { label: "status change",  tone: "" },
   location_assigned: { label: "location assigned", tone: "ok",
                  desc: "USCIS assigned a service center to this case — location API flipped from null to populated." },
@@ -1667,15 +1667,18 @@ function renderChangeBlock(ch) {
     block.appendChild(sec);
   }
 
+  // Named collections rendered explicitly; any other list-of-dicts field the
+  // engine diffed lands under ch.collections and is rendered generically below.
   const collections = [
     ["events", "Events"],
     ["notices", "Notices"],
     ["documents", "Documents"],
     ["addendums", "Addendums"],
+    ["evidenceRequests", "Evidence requests"],
   ];
   for (const [key, title] of collections) {
     const c = ch[key] || {};
-    if (!(c.added?.length || c.removed?.length)) continue;
+    if (!(c.added?.length || c.removed?.length || c.changed?.length)) continue;
     const sec = document.createElement("div");
     sec.className = "change-section";
     sec.innerHTML = `<h5>${title}</h5>`;
@@ -1691,9 +1694,66 @@ function renderChangeBlock(ch) {
       chip.innerHTML = "− " + redactMaybe(describeItem(key, r));
       sec.appendChild(chip);
     }
+    for (const ce of c.changed || []) {
+      sec.appendChild(renderChangedItem(key, ce));
+    }
+    block.appendChild(sec);
+  }
+
+  // Generic bucket: any other list-of-dicts field (e.g. concurrentCases) the
+  // comprehensive diff caught. Keyed by field name.
+  const extra = ch.collections || {};
+  for (const key of Object.keys(extra)) {
+    const c = extra[key] || {};
+    if (!(c.added?.length || c.removed?.length || c.changed?.length)) continue;
+    const sec = document.createElement("div");
+    sec.className = "change-section";
+    sec.innerHTML = `<h5>${escapeHtml(key)}</h5>`;
+    for (const a of c.added || []) {
+      const chip = document.createElement("span");
+      chip.className = "change-item-added";
+      chip.innerHTML = "+ " + redactMaybe(escapeHtml(JSON.stringify(a)));
+      sec.appendChild(chip);
+    }
+    for (const r of c.removed || []) {
+      const chip = document.createElement("span");
+      chip.className = "change-item-removed";
+      chip.innerHTML = "− " + redactMaybe(escapeHtml(JSON.stringify(r)));
+      sec.appendChild(chip);
+    }
+    for (const ce of c.changed || []) {
+      sec.appendChild(renderChangedItem(key, ce));
+    }
     block.appendChild(sec);
   }
   return block;
+}
+
+// Render an in-place changed collection entry: show the field-level delta so
+// an operator sees exactly which properties flipped (e.g. an RFE's
+// isRespondedTo True→False), which the old membership-only diff missed.
+function renderChangedItem(kind, entry) {
+  const wrap = document.createElement("div");
+  wrap.className = "change-item-changed";
+  const label = kind === "evidenceRequests"
+    ? `${entry.actionType || "Evidence request"} — ${state.redacted ? REDACTION_MASK : (entry.noticeId || entry.letterId || "?")}`
+    : redactMaybe(describeItem(kind, entry));
+  wrap.innerHTML = `<div class="changed-head">~ ${label}</div>`;
+  const delta = entry._delta || {};
+  for (const [k, v] of Object.entries(delta)) {
+    if (k === "_delta") continue;
+    const mask = state.redacted && REDACT_KEYS.has(k);
+    const fromHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.from);
+    const toHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.to);
+    const row = document.createElement("div");
+    row.className = "change-scalar";
+    row.innerHTML =
+      `<span class="field">${escapeHtml(k)}</span>` +
+      `<span class="from">${fromHtml}</span>` +
+      `<span class="to">${toHtml}</span>`;
+    wrap.appendChild(row);
+  }
+  return wrap;
 }
 
 function describeItem(kind, obj) {

@@ -29,6 +29,7 @@ _KIND_HEADLINE = {
     "notice":      "new notice",
     "appointment": "appointment change",
     "decision":    "decision flag flipped",
+    "evidence":    "evidence request change",
     "status":      "status change",
 }
 
@@ -38,6 +39,7 @@ _KIND_LEAD = {
     "notice":      "USCIS issued a new notice (e.g. Request for Evidence, receipt).",
     "appointment": "A notice with an appointment date was added, removed, or changed. Usually a biometrics (biometrics) reschedule.",
     "decision":    "A decision-related boolean (closed, actionRequired, isPremiumProcessed) changed state — this is a high-signal event.",
+    "evidence":    "An evidence request (RFE / NOID) was added or changed in place — e.g. isRespondedTo flipped. Check the evidence requests / notices for what USCIS is asking.",
     "status":      "A tracked scalar changed on the record.",
 }
 

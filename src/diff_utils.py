@@ -202,54 +202,172 @@ def _key_document(d: dict) -> str:
     return d.get("id") or d.get("documentId") or repr(sorted(d.items()))[:64]
 
 
+def _key_evidence(er: dict) -> str:
+    # An evidence request (RFE / NOID) is identified by its notice id; fall
+    # back to a content hash so a keyless entry still diffs stably.
+    return er.get("noticeId") or er.get("letterId") or repr(sorted(er.items()))[:64]
+
+
+def _key_generic(x: dict) -> str:
+    """Best-effort stable identity for an arbitrary list-of-dicts entry.
+
+    Tries the common id-ish keys any USCIS sub-object might carry, then falls
+    back to a hash of the sorted items so two structurally-identical entries
+    collapse and any field change surfaces as a `changed` (not add+remove).
+    """
+    for k in ("id", "eventId", "letterId", "noticeId", "documentId", "noticeCode"):
+        v = x.get(k)
+        if v:
+            return f"{k}:{v}"
+    return "hash:" + repr(sorted((k, repr(v)) for k, v in x.items()))[:96]
+
+
+# Named collections get a purpose-built key function; every other list-of-dicts
+# field is diffed with the generic key so the feed stays comprehensive without
+# a hand-maintained allowlist.
+_COLLECTION_KEYS: dict[str, Any] = {
+    "events": _key_event,
+    "notices": _key_notice,
+    "documents": _key_document,
+    "addendums": _key_document,
+    "evidenceRequests": _key_evidence,
+}
+
+
+def _is_scalar(v: Any) -> bool:
+    return v is None or isinstance(v, (str, bool, int, float))
+
+
+def _flatten_scalars(data: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten every scalar leaf of `data` to a dotted-path → value map.
+
+    Recurses into nested dicts (e.g. `elisBeneficiaryAddendum.foo`). Lists are
+    NOT flattened here — list-of-dicts fields are diffed as collections, and a
+    list of scalars is compared as a whole under its own key so it still counts
+    toward reconstruction completeness. The result is exhaustive over the JSON's
+    scalar content, so `initial snapshot + every scalar diff` reproduces every
+    later snapshot's scalar fields with no allowlist.
+    """
+    out: dict[str, Any] = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            path = f"{prefix}{k}"
+            if isinstance(v, dict):
+                out.update(_flatten_scalars(v, prefix=f"{path}."))
+            elif isinstance(v, list):
+                if _is_list_of_dicts(v):
+                    continue  # handled by the collection diff
+                # list of scalars (or empty / mixed) — compare as a whole
+                out[path] = v
+            else:
+                out[path] = v
+    elif _is_scalar(data):
+        out[prefix.rstrip(".")] = data
+    return out
+
+
+def _is_list_of_dicts(v: Any) -> bool:
+    return isinstance(v, list) and any(isinstance(x, dict) for x in v)
+
+
+def _diff_scalar_map(prev: dict, curr: dict) -> dict[str, dict[str, Any]]:
+    """Diff two flattened scalar maps into {path: {from, to}}."""
+    scalars: dict[str, dict[str, Any]] = {}
+    for k in prev.keys() | curr.keys():
+        pv = prev.get(k)
+        cv = curr.get(k)
+        if pv != cv:
+            scalars[k] = {"from": pv, "to": cv}
+    return scalars
+
+
 def _diff_collection(
-    prev: list[dict], curr: list[dict], key_fn
+    prev: list[dict] | None, curr: list[dict] | None, key_fn
 ) -> dict[str, list[dict]]:
-    prev_map = {key_fn(x): x for x in (prev or [])}
-    curr_map = {key_fn(x): x for x in (curr or [])}
+    """Add / remove / change diff for a keyed list-of-dicts.
+
+    `added`   — entries whose key is only in curr.
+    `removed` — entries whose key is only in prev.
+    `changed` — entries present in BOTH whose contents differ; each carries the
+                current entry plus a `_delta` of {field: {from, to}} so an
+                in-place field flip (e.g. isRespondedTo True→False on a standing
+                RFE) is captured. This is what makes the feed reconstruction-
+                complete for collections, not just membership.
+    """
+    prev_map = {key_fn(x): x for x in (prev or []) if isinstance(x, dict)}
+    curr_map = {key_fn(x): x for x in (curr or []) if isinstance(x, dict)}
     added = [curr_map[k] for k in curr_map if k not in prev_map]
     removed = [prev_map[k] for k in prev_map if k not in curr_map]
-    return {"added": added, "removed": removed}
+    changed = []
+    for k in curr_map.keys() & prev_map.keys():
+        pe, ce = prev_map[k], curr_map[k]
+        if pe != ce:
+            delta = {
+                f: {"from": pe.get(f), "to": ce.get(f)}
+                for f in pe.keys() | ce.keys()
+                if pe.get(f) != ce.get(f)
+            }
+            entry = dict(ce)
+            entry["_delta"] = delta
+            changed.append(entry)
+    return {"added": added, "removed": removed, "changed": changed}
 
 
 def compute_change(prev: dict, curr: dict) -> dict:
     """Describe what's different from `prev` to `curr` (consecutive captures).
 
+    The diff is COMPREHENSIVE: it compares the entire `data` object, not a
+    hand-picked allowlist. Every scalar leaf (including nested-dict leaves) is
+    flattened and diffed, and every list-of-dicts field is diffed with
+    add/remove/change semantics. Together with an initial snapshot, the full
+    diff feed can reconstruct every later snapshot exactly — which the old
+    allowlist approach could not (it was blind to, e.g., `evidenceRequests`).
+
     Returns a dict with the shape the UI expects:
       {
         "from": capturedAt, "to": capturedAt,
-        "scalars": { field: {"from": ..., "to": ...}, ... },
-        "events":    {"added": [...], "removed": [...]},
-        "notices":   {"added": [...], "removed": [...]},
-        "documents": {"added": [...], "removed": [...]},
-        "addendums": {"added": [...], "removed": [...]},
+        "scalars": { path: {"from": ..., "to": ...}, ... },   # all scalar leaves
+        "events":    {"added": [...], "removed": [...], "changed": [...]},
+        "notices":   {"added": [...], "removed": [...], "changed": [...]},
+        "documents": {"added": [...], "removed": [...], "changed": [...]},
+        "addendums": {"added": [...], "removed": [...], "changed": [...]},
+        "evidenceRequests": {"added": [...], "removed": [...], "changed": [...]},
+        "collections": { <any other list-of-dicts field>: {...} },
       }
     """
     prev_d = prev.get("data") or {}
     curr_d = curr.get("data") or {}
 
-    scalars: dict[str, dict[str, Any]] = {}
-    for k in _WATCHED_SCALARS:
-        if prev_d.get(k) != curr_d.get(k) and (k in prev_d or k in curr_d):
-            scalars[k] = {"from": prev_d.get(k), "to": curr_d.get(k)}
+    scalars = _diff_scalar_map(_flatten_scalars(prev_d), _flatten_scalars(curr_d))
 
-    return {
+    result: dict[str, Any] = {
         "from": prev.get("capturedAt"),
         "to": curr.get("capturedAt"),
         "scalars": scalars,
-        "events": _diff_collection(
-            prev_d.get("events"), curr_d.get("events"), _key_event
-        ),
-        "notices": _diff_collection(
-            prev_d.get("notices"), curr_d.get("notices"), _key_notice
-        ),
-        "documents": _diff_collection(
-            prev_d.get("documents"), curr_d.get("documents"), _key_document
-        ),
-        "addendums": _diff_collection(
-            prev_d.get("addendums"), curr_d.get("addendums"), _key_document
-        ),
     }
+
+    # Named collections keep their dedicated top-level key + purpose-built key fn.
+    for name, key_fn in _COLLECTION_KEYS.items():
+        result[name] = _diff_collection(prev_d.get(name), curr_d.get(name), key_fn)
+
+    # Any OTHER list-of-dicts field on the record is diffed generically so the
+    # feed misses nothing. These land under `collections` to avoid colliding
+    # with the named keys the UI renders explicitly.
+    extra_keys = {
+        k
+        for k in (prev_d.keys() | curr_d.keys())
+        if k not in _COLLECTION_KEYS
+        and (_is_list_of_dicts(prev_d.get(k)) or _is_list_of_dicts(curr_d.get(k)))
+    }
+    extra: dict[str, dict] = {}
+    for k in extra_keys:
+        d = _diff_collection(prev_d.get(k), curr_d.get(k), _key_generic)
+        if d["added"] or d["removed"] or d["changed"]:
+            extra[k] = d
+    if extra:
+        result["collections"] = extra
+
+    return result
 
 
 # Fields inside a location receipt_details payload that we surface as
@@ -397,23 +515,30 @@ def snapshot_changes(entries: list[dict]) -> list[dict]:
     return feed
 
 
+def _any_collection_diff(change: dict) -> bool:
+    """True if any keyed collection (named or generic) has add/remove/change."""
+    for name in _COLLECTION_KEYS:
+        coll = change.get(name) or {}
+        if coll.get("added") or coll.get("removed") or coll.get("changed"):
+            return True
+    for coll in (change.get("collections") or {}).values():
+        if coll.get("added") or coll.get("removed") or coll.get("changed"):
+            return True
+    return False
+
+
 def _is_timestamp_only_change(change: dict) -> bool:
     """True when the only thing that moved is `updatedAt` / `updatedAtTimestamp`.
 
-    No event/notice/document was added or removed and the sole scalar diffs are
-    the case-level update timestamps. classify_change uses this to label the row
-    `silent_update`.
+    No collection (event/notice/document/evidenceRequest/…) was added, removed,
+    or changed, and the sole scalar diffs are the case-level update timestamps.
+    classify_change uses this to label the row `silent_update`.
     """
     scalars = change.get("scalars") or {}
-    events = change.get("events") or {}
-    notices = change.get("notices") or {}
     return (
         bool(scalars)
         and all(k in _TIMESTAMP_ONLY for k in scalars)
-        and not events.get("added") and not events.get("removed")
-        and not notices.get("added") and not notices.get("removed")
-        and not (change.get("documents") or {}).get("added")
-        and not (change.get("documents") or {}).get("removed")
+        and not _any_collection_diff(change)
     )
 
 
@@ -425,14 +550,18 @@ def classify_change(change: dict) -> str:
       event       — new case event appeared (FTA0, APR0, etc.)
       appointment — a notice with appointmentDateTime appeared or changed
       notice      — a non-appointment notice appeared
-      silent_update  — only the case update timestamp(s) advanced, no events/notices.
-      status      — fallback: tracked scalar changed that isn't covered above
+      evidence    — an evidence request (RFE / NOID) was added or changed in
+                    place (e.g. isRespondedTo flipped) — action-relevant
+      silent_update  — only the case update timestamp(s) advanced, no collections.
+      status      — fallback: some other tracked field changed
     """
     scalars = change.get("scalars") or {}
     events = change.get("events") or {}
     notices = change.get("notices") or {}
+    evidence = change.get("evidenceRequests") or {}
 
-    if any(k in _DECISION_FLAGS for k in scalars):
+    # Decision-flag scalars may now be dotted paths; match on the leaf name.
+    if any(k.split(".")[-1] in _DECISION_FLAGS for k in scalars):
         return "decision"
     if events.get("added"):
         return "event"
@@ -444,6 +573,9 @@ def classify_change(change: dict) -> str:
     if notices_added:
         return "notice"
 
+    if evidence.get("added") or evidence.get("changed") or evidence.get("removed"):
+        return "evidence"
+
     if _is_timestamp_only_change(change):
         return "silent_update"
 
@@ -453,11 +585,7 @@ def classify_change(change: dict) -> str:
 def _has_any_diff(change: dict) -> bool:
     if change.get("scalars"):
         return True
-    for key in ("events", "notices", "documents", "addendums"):
-        coll = change.get(key) or {}
-        if coll.get("added") or coll.get("removed"):
-            return True
-    return False
+    return _any_collection_diff(change)
 
 
 # ---------------------------------------------------------------------------
