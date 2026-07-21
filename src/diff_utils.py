@@ -255,9 +255,13 @@ def _flatten_scalars(data: Any, prefix: str = "") -> dict[str, Any]:
             if isinstance(v, dict):
                 out.update(_flatten_scalars(v, prefix=f"{path}."))
             elif isinstance(v, list):
-                if _is_list_of_dicts(v):
-                    continue  # handled by the collection diff
-                # list of scalars (or empty / mixed) — compare as a whole
+                if _is_pure_list_of_dicts(v):
+                    continue  # fully covered by the collection diff
+                # Any other list shape — pure scalars, empty, nested lists, or
+                # MIXED (dicts + scalars) — is compared as a whole under its key
+                # so no element change is ever dropped. (A mixed list also gets
+                # its dict entries diffed by the collection pass; the whole-list
+                # scalar is the backstop that catches the non-dict elements.)
                 out[path] = v
             else:
                 out[path] = v
@@ -267,7 +271,23 @@ def _flatten_scalars(data: Any, prefix: str = "") -> dict[str, Any]:
 
 
 def _is_list_of_dicts(v: Any) -> bool:
+    """True if the list contains at least one dict (may be mixed)."""
     return isinstance(v, list) and any(isinstance(x, dict) for x in v)
+
+
+def _is_pure_list_of_dicts(v: Any) -> bool:
+    """True only if the non-empty list contains dicts and NOTHING else.
+
+    A pure list-of-dicts is fully reconstructable from the collection diff, so
+    it's excluded from the whole-list scalar snapshot. A mixed list (dicts +
+    scalars) is NOT pure, so it also gets the whole-list scalar backstop — the
+    collection diff alone would silently drop its non-dict elements.
+    """
+    return (
+        isinstance(v, list)
+        and len(v) > 0
+        and all(isinstance(x, dict) for x in v)
+    )
 
 
 def _diff_scalar_map(prev: dict, curr: dict) -> dict[str, dict[str, Any]]:

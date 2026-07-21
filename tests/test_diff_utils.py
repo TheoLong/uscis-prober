@@ -788,6 +788,38 @@ def test_compute_change_generic_collection_for_unnamed_list():
     assert change["collections"]["concurrentCases"]["added"][0]["id"] == "c1"
 
 
+def test_compute_change_catches_mixed_list_scalar_element():
+    """A list mixing dicts and scalars is a collection (has dicts) AND carries
+    a non-dict element. The collection diff alone would drop the scalar element,
+    so the whole list is ALSO snapshotted as a scalar backstop — no change to
+    any element can be silently lost."""
+    prev = _entry("2026-03-09T00:00:00Z", mixed=[{"id": "1"}, "elem"])
+    curr = _entry("2026-03-10T00:00:00Z", mixed=[{"id": "1"}, "elem-changed"])
+    change = compute_change(prev, curr)
+    # The scalar element change is captured via the whole-list scalar snapshot.
+    assert "mixed" in change["scalars"]
+    assert change["scalars"]["mixed"]["to"] == [{"id": "1"}, "elem-changed"]
+
+
+def test_compute_change_pure_list_of_dicts_not_duplicated_as_scalar():
+    """A clean list-of-dicts is fully covered by the collection diff, so it must
+    NOT also appear as a whole-list scalar (would be redundant noise)."""
+    prev = _entry("2026-03-09T00:00:00Z", events=[{"eventCode": "IAF", "eventId": "a"}])
+    curr = _entry("2026-03-10T00:00:00Z",
+                  events=[{"eventCode": "IAF", "eventId": "a"},
+                          {"eventCode": "FTA0", "eventId": "b"}])
+    change = compute_change(prev, curr)
+    assert "events" not in change["scalars"]
+    assert change["events"]["added"][0]["eventCode"] == "FTA0"
+
+
+def test_compute_change_catches_list_of_lists():
+    prev = _entry("2026-03-09T00:00:00Z", matrix=[[1, 2]])
+    curr = _entry("2026-03-10T00:00:00Z", matrix=[[1, 2], [3]])
+    change = compute_change(prev, curr)
+    assert change["scalars"]["matrix"]["to"] == [[1, 2], [3]]
+
+
 def _apply_change(base_data: dict, change: dict) -> dict:
     """Reconstruct the NEXT snapshot's data from a base + one diff record.
 
