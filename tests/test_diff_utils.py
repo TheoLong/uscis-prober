@@ -68,12 +68,15 @@ def test_bin_by_day_preserves_chronological_order():
 
 # -------- classify_change --------------------------------------------------
 
-def test_classify_change_decision_takes_precedence():
+def test_classify_change_event_takes_precedence_over_decision():
+    # A new event on the same pull as a decision-flag flip classifies as
+    # `event` — the new event is the defining signal and must not be hidden
+    # behind a generic "decision flag" label (owner's rule).
     change = {
         "scalars": {"closed": {"from": False, "to": True}},
         "events": {"added": [{"eventCode": "APR0"}], "removed": []},
     }
-    assert classify_change(change) == "decision"
+    assert classify_change(change) == "event"
 
 
 def test_classify_change_event():
@@ -82,6 +85,16 @@ def test_classify_change_event():
         "events": {"added": [{"eventCode": "FTA0"}], "removed": []},
     }
     assert classify_change(change) == "event"
+
+
+def test_classify_change_decision_when_no_new_event():
+    # A decision-readiness boolean flips with NO new event → decision.
+    change = {
+        "scalars": {"actionRequired": {"from": False, "to": True}},
+        "events": {"added": [], "removed": []},
+        "notices": {"added": [], "removed": []},
+    }
+    assert classify_change(change) == "decision"
 
 
 def test_classify_change_appointment():

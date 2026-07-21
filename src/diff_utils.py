@@ -565,30 +565,34 @@ def _is_timestamp_only_change(change: dict) -> bool:
 def classify_change(change: dict) -> str:
     """Bucket a diff into the single most specific signal.
 
-    The governing rule (per the case owner): a change that does NOT carry a
-    new case *event* is a silent update. So only genuinely new timeline items
-    escape the silent bucket — a new event, a new notice, a new/changed
-    appointment, or a decision-flag flip. Everything else — scalar/timestamp
-    bumps, in-place evidenceRequests churn (e.g. isRespondedTo flipping),
-    generic collection changes — classifies as `silent_update`.
+    The governing rule (per the case owner): a NEW case event is the defining
+    signal. If a pull adds a new event to the record, the row is `event` — even
+    if a decision-readiness boolean (actionRequired/closed/…) flipped on the
+    same pull. Those flags almost always move *because* of the new event (e.g.
+    an RFE event lands and actionRequired goes true), so labelling such a row
+    "decision flag" would hide the actual event (IK, HA, APR0, …) that drove it.
 
     Priority order (most specific first):
-      decision    — ackedByAdjudicatorAndCms/closed/actionRequired/isPremiumProcessed flip
-      event       — new case event appeared (FTA0, APR0, etc.)
-      appointment — a notice with appointmentDateTime appeared or changed
-      notice      — a new non-appointment notice appeared
-      silent_update  — anything else (no new event): scalar bumps, in-place
-                       evidence-request changes, generic collection churn.
+      event       — a NEW case event appeared (FTA0, IK, HA, APR0, …). Wins even
+                    if a decision flag also flipped this pull.
+      decision    — a decision-readiness boolean flipped with NO new event
+                    (ackedByAdjudicatorAndCms/closed/actionRequired/isPremiumProcessed).
+      appointment — a notice with appointmentDateTime appeared or changed.
+      notice      — a new non-appointment notice appeared.
+      silent_update  — anything else (no new event): scalar/timestamp bumps,
+                       in-place evidenceRequests churn, generic collection churn.
     """
     scalars = change.get("scalars") or {}
     events = change.get("events") or {}
     notices = change.get("notices") or {}
 
-    # Decision-flag scalars may now be dotted paths; match on the leaf name.
-    if any(k.split(".")[-1] in _DECISION_FLAGS for k in scalars):
-        return "decision"
+    # A new event is the defining signal — it wins over a same-pull decision flag.
     if events.get("added"):
         return "event"
+
+    # Decision-readiness boolean flipped with no new event. Dotted-path safe.
+    if any(k.split(".")[-1] in _DECISION_FLAGS for k in scalars):
+        return "decision"
 
     notices_added = notices.get("added") or []
     notices_removed = notices.get("removed") or []
