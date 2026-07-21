@@ -68,10 +68,10 @@ def test_bin_by_day_preserves_chronological_order():
 
 # -------- classify_change --------------------------------------------------
 
-def test_classify_change_event_takes_precedence_over_decision():
-    # A new event on the same pull as a decision-flag flip classifies as
-    # `event` — the new event is the defining signal and must not be hidden
-    # behind a generic "decision flag" label (owner's rule).
+def test_classify_change_new_event_classifies_as_event():
+    # A new event — with or without a same-pull scalar flag flip — is "new
+    # event". We assert no meaning for the code, and a flag like actionRequired
+    # is just action, not a decision, so there is no "decision" kind.
     change = {
         "scalars": {"closed": {"from": False, "to": True}},
         "events": {"added": [{"eventCode": "APR0"}], "removed": []},
@@ -87,14 +87,16 @@ def test_classify_change_event():
     assert classify_change(change) == "event"
 
 
-def test_classify_change_decision_when_no_new_event():
-    # A decision-readiness boolean flips with NO new event → decision.
+def test_classify_change_flag_flip_without_event_is_silent():
+    # A scalar flag (actionRequired/closed/…) flips with NO new event → silent
+    # update. There is deliberately no "decision" kind — the flag is just an
+    # action indicator, not a decision, and carries no event.
     change = {
         "scalars": {"actionRequired": {"from": False, "to": True}},
         "events": {"added": [], "removed": []},
         "notices": {"added": [], "removed": []},
     }
-    assert classify_change(change) == "decision"
+    assert classify_change(change) == "silent_update"
 
 
 def test_classify_change_appointment():
@@ -157,11 +159,12 @@ def test_snapshot_changes_filters_out_unchanged_day_pairs():
     entries = [
         _entry("2026-03-09T00:00:00Z"),
         _entry("2026-03-10T00:00:00Z"),  # identical -> no diff
-        _entry("2026-03-11T00:00:00Z", closed=True),  # decision flip
+        _entry("2026-03-11T00:00:00Z", closed=True),  # scalar flag flip, no event
     ]
     changes = snapshot_changes(entries)
     assert len(changes) == 1
-    assert changes[0]["kind"] == "decision"
+    # A flag flip with no new event is a silent update (no "decision" kind).
+    assert changes[0]["kind"] == "silent_update"
 
 
 def test_snapshot_changes_does_not_collapse_same_day_transitions():

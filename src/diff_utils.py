@@ -566,33 +566,25 @@ def classify_change(change: dict) -> str:
     """Bucket a diff into the single most specific signal.
 
     The governing rule (per the case owner): a NEW case event is the defining
-    signal. If a pull adds a new event to the record, the row is `event` — even
-    if a decision-readiness boolean (actionRequired/closed/…) flipped on the
-    same pull. Those flags almost always move *because* of the new event (e.g.
-    an RFE event lands and actionRequired goes true), so labelling such a row
-    "decision flag" would hide the actual event (IK, HA, APR0, …) that drove it.
+    signal, and we do NOT assert what any event *means* — every new event is
+    simply a "new event". A scalar flag like `actionRequired` is just "action
+    needed", not a decision, so there is deliberately NO "decision" bucket:
+    a flag flip with no new event is a silent update like any other scalar bump.
 
     Priority order (most specific first):
-      event       — a NEW case event appeared (FTA0, IK, HA, APR0, …). Wins even
-                    if a decision flag also flipped this pull.
-      decision    — a decision-readiness boolean flipped with NO new event
-                    (ackedByAdjudicatorAndCms/closed/actionRequired/isPremiumProcessed).
+      event       — a NEW case event appeared (any code — no meaning asserted).
       appointment — a notice with appointmentDateTime appeared or changed.
       notice      — a new non-appointment notice appeared.
       silent_update  — anything else (no new event): scalar/timestamp bumps,
-                       in-place evidenceRequests churn, generic collection churn.
+                       actionRequired/closed/… flips, in-place evidenceRequests
+                       churn, generic collection churn.
     """
-    scalars = change.get("scalars") or {}
     events = change.get("events") or {}
     notices = change.get("notices") or {}
 
-    # A new event is the defining signal — it wins over a same-pull decision flag.
+    # A new event is the defining signal.
     if events.get("added"):
         return "event"
-
-    # Decision-readiness boolean flipped with no new event. Dotted-path safe.
-    if any(k.split(".")[-1] in _DECISION_FLAGS for k in scalars):
-        return "decision"
 
     notices_added = notices.get("added") or []
     notices_removed = notices.get("removed") or []
@@ -601,7 +593,7 @@ def classify_change(change: dict) -> str:
     if notices_added:
         return "notice"
 
-    # No new event/notice/appointment and no decision-flag flip → silent update.
+    # No new event/notice/appointment → silent update (incl. flag flips).
     return "silent_update"
 
 
