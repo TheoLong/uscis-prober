@@ -474,14 +474,16 @@ def test_classify_change_notice_without_appointment():
     assert classify_change(change) == "notice"
 
 
-def test_classify_change_status_fallback_for_non_timestamp_scalar():
-    # A tracked scalar changed but not a decision flag nor timestamp-only.
+def test_classify_change_status_scalar_without_event_is_silent():
+    # Owner's rule: no NEW event → silent update, even if a tracked scalar like
+    # statusTitle changed. Only new events/notices/appointments/decision flags
+    # escape the silent bucket.
     change = {
         "scalars": {"statusTitle": {"from": "Received", "to": "Processing"}},
         "events": {"added": [], "removed": []},
         "notices": {"added": [], "removed": []},
     }
-    assert classify_change(change) == "status"
+    assert classify_change(change) == "silent_update"
 
 
 def test_classify_change_appointment_wins_over_notice_when_removed():
@@ -722,7 +724,8 @@ def test_snapshot_changes_case_source_tagged():
 def test_compute_change_detects_in_place_evidence_request_flip():
     """An RFE that stays in the array but flips isRespondedTo True->False is a
     real change the OLD engine missed (evidenceRequests wasn't watched). The
-    comprehensive engine surfaces it as a `changed` entry with a field delta."""
+    comprehensive engine surfaces it as a `changed` entry with a field delta.
+    It classifies as silent_update — no NEW event fired (owner's rule)."""
     er_prev = {"noticeId": "n1", "isRespondedTo": True, "finalized": False,
                "actionType": "Request for Evidence"}
     er_curr = {"noticeId": "n1", "isRespondedTo": False, "finalized": False,
@@ -733,17 +736,22 @@ def test_compute_change_detects_in_place_evidence_request_flip():
     changed = change["evidenceRequests"]["changed"]
     assert len(changed) == 1
     assert changed[0]["_delta"]["isRespondedTo"] == {"from": True, "to": False}
-    assert classify_change(change) == "evidence"
+    # No new event → silent update, even though the RFE churned in place.
+    assert classify_change(change) == "silent_update"
 
 
-def test_snapshot_changes_surfaces_evidence_only_diff():
+def test_snapshot_changes_evidence_only_diff_is_silent_update():
+    """An in-place evidenceRequests change with no new event is a silent update
+    (still surfaced as its own row, still carries the field delta)."""
     er_prev = {"noticeId": "n1", "isRespondedTo": True}
     er_curr = {"noticeId": "n1", "isRespondedTo": False}
     e0 = _entry("2026-07-20T12:00:00Z", evidenceRequests=[er_prev])
     e1 = _entry("2026-07-21T12:00:00Z", evidenceRequests=[er_curr])
     changes = snapshot_changes([e0, e1])
     assert len(changes) == 1
-    assert changes[0]["kind"] == "evidence"
+    assert changes[0]["kind"] == "silent_update"
+    assert changes[0]["evidenceRequests"]["changed"][0]["_delta"]["isRespondedTo"] \
+        == {"from": True, "to": False}
 
 
 def test_compute_change_detects_brand_new_property():

@@ -1731,14 +1731,11 @@ function renderChangeBlock(ch) {
 
 // Render an in-place changed collection entry: show the field-level delta so
 // an operator sees exactly which properties flipped (e.g. an RFE's
-// isRespondedTo True→False), which the old membership-only diff missed.
+// isRespondedTo True→False). No header line — just the field deltas, styled
+// like the scalar "Field changes" rows.
 function renderChangedItem(kind, entry) {
   const wrap = document.createElement("div");
   wrap.className = "change-item-changed";
-  const label = kind === "evidenceRequests"
-    ? `${entry.actionType || "Evidence request"} — ${state.redacted ? REDACTION_MASK : (entry.noticeId || entry.letterId || "?")}`
-    : redactMaybe(describeItem(kind, entry));
-  wrap.innerHTML = `<div class="changed-head">~ ${label}</div>`;
   const delta = entry._delta || {};
   for (const [k, v] of Object.entries(delta)) {
     if (k === "_delta") continue;
