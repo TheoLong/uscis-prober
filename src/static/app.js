@@ -1682,17 +1682,19 @@ function renderChangeBlock(ch) {
     const sec = document.createElement("div");
     sec.className = "change-section";
     sec.innerHTML = `<h5>${title}</h5>`;
+    // events/notices have a compact one-line describer; evidenceRequests and
+    // documents/addendums are richer objects, so render them as pretty
+    // key/value rows instead of a JSON clump.
+    const pretty = key === "evidenceRequests";
     for (const a of c.added || []) {
-      const chip = document.createElement("span");
-      chip.className = "change-item-added";
-      chip.innerHTML = "+ " + redactMaybe(describeItem(key, a));
-      sec.appendChild(chip);
+      sec.appendChild(pretty
+        ? renderDictItem(a, "added")
+        : chipItem("change-item-added", "+ " + redactMaybe(describeItem(key, a))));
     }
     for (const r of c.removed || []) {
-      const chip = document.createElement("span");
-      chip.className = "change-item-removed";
-      chip.innerHTML = "− " + redactMaybe(describeItem(key, r));
-      sec.appendChild(chip);
+      sec.appendChild(pretty
+        ? renderDictItem(r, "removed")
+        : chipItem("change-item-removed", "− " + redactMaybe(describeItem(key, r))));
     }
     for (const ce of c.changed || []) {
       sec.appendChild(renderChangedItem(key, ce));
@@ -1701,7 +1703,8 @@ function renderChangeBlock(ch) {
   }
 
   // Generic bucket: any other list-of-dicts field (e.g. concurrentCases) the
-  // comprehensive diff caught. Keyed by field name.
+  // comprehensive diff caught. Keyed by field name. Added/removed entries are
+  // arbitrary objects, so always render them pretty (key/value rows).
   const extra = ch.collections || {};
   for (const key of Object.keys(extra)) {
     const c = extra[key] || {};
@@ -1710,16 +1713,10 @@ function renderChangeBlock(ch) {
     sec.className = "change-section";
     sec.innerHTML = `<h5>${escapeHtml(key)}</h5>`;
     for (const a of c.added || []) {
-      const chip = document.createElement("span");
-      chip.className = "change-item-added";
-      chip.innerHTML = "+ " + redactMaybe(escapeHtml(JSON.stringify(a)));
-      sec.appendChild(chip);
+      sec.appendChild(renderDictItem(a, "added"));
     }
     for (const r of c.removed || []) {
-      const chip = document.createElement("span");
-      chip.className = "change-item-removed";
-      chip.innerHTML = "− " + redactMaybe(escapeHtml(JSON.stringify(r)));
-      sec.appendChild(chip);
+      sec.appendChild(renderDictItem(r, "removed"));
     }
     for (const ce of c.changed || []) {
       sec.appendChild(renderChangedItem(key, ce));
@@ -1727,6 +1724,55 @@ function renderChangeBlock(ch) {
     block.appendChild(sec);
   }
   return block;
+}
+
+// A simple text chip (used for the compact event/notice describers).
+function chipItem(cls, html) {
+  const chip = document.createElement("span");
+  chip.className = cls;
+  chip.innerHTML = html;
+  return chip;
+}
+
+// Pretty-render a whole added/removed collection entry as key/value rows
+// instead of a one-line JSON clump. `mode` is "added" | "removed" and drives
+// the +/− marker and colour. Nested objects/arrays are shown as indented
+// JSON so a property that is itself a JSON blob stays readable.
+function renderDictItem(obj, mode) {
+  const wrap = document.createElement("div");
+  wrap.className = mode === "removed" ? "change-item-removed-block" : "change-item-added-block";
+  const marker = mode === "removed" ? "−" : "+";
+  const head = document.createElement("div");
+  head.className = "dict-item-head";
+  head.textContent = marker;
+  wrap.appendChild(head);
+  if (obj === null || typeof obj !== "object") {
+    const row = document.createElement("div");
+    row.className = "change-scalar";
+    row.innerHTML = `<span class="to">${redactMaybe(escapeHtml(String(obj)))}</span>`;
+    wrap.appendChild(row);
+    return wrap;
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === "_delta") continue;
+    const mask = state.redacted && REDACT_KEYS.has(k);
+    let valHtml;
+    if (mask) {
+      valHtml = escapeHtml(REDACTION_MASK);
+    } else if (v !== null && typeof v === "object") {
+      // Nested object/array — pretty-print indented so it stays readable.
+      valHtml = `<pre class="dict-nested">${escapeHtml(JSON.stringify(v, null, 2))}</pre>`;
+    } else {
+      valHtml = formatScalarValueHtml(v);
+    }
+    const row = document.createElement("div");
+    row.className = "change-scalar";
+    row.innerHTML =
+      `<span class="field">${escapeHtml(k)}</span>` +
+      `<span class="to${mask ? " redacted-text" : ""}">${valHtml}</span>`;
+    wrap.appendChild(row);
+  }
+  return wrap;
 }
 
 // Render an in-place changed collection entry: show the field-level delta so
