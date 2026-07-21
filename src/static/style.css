@@ -1973,6 +1973,47 @@ body.redaction-latched [data-guard="redaction"]::after {
 }
 .change-item-added { background: var(--ok-tint-soft); color: var(--ok); }
 .change-item-removed { background: var(--bad-tint-soft); color: var(--bad); }
+/* Pretty key/value block for an added/removed collection entry (e.g. a whole
+ * evidenceRequest object) — rendered as rows, not a one-line JSON clump. */
+.change-item-added-block, .change-item-removed-block {
+  border-radius: 5px; padding: 6px 10px; margin: 4px 0;
+  border-left: 3px solid var(--ok);
+  background: var(--ok-tint-soft);
+}
+.change-item-removed-block {
+  border-left-color: var(--bad);
+  background: var(--bad-tint-soft);
+}
+.change-item-added-block .dict-item-head,
+.change-item-removed-block .dict-item-head {
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem;
+  line-height: 1; margin-bottom: 4px;
+}
+.change-item-added-block .dict-item-head { color: var(--ok); }
+.change-item-removed-block .dict-item-head { color: var(--bad); }
+/* Within a pretty block, key/value rows are two-column (key + value). */
+.change-item-added-block .change-scalar,
+.change-item-removed-block .change-scalar {
+  grid-template-columns: 180px 1fr;
+}
+.change-item-added-block .change-scalar .to,
+.change-item-removed-block .change-scalar .to { color: var(--text); }
+/* Long unbroken values (e.g. documentUri, cmsContentId) must wrap instead of
+ * overflowing the viewport on narrow screens. break-word keeps normal words
+ * intact but breaks a long token when it would otherwise blow past the edge. */
+.change-item-added-block .change-scalar .field,
+.change-item-removed-block .change-scalar .field,
+.change-item-added-block .change-scalar .to,
+.change-item-removed-block .change-scalar .to {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.dict-nested {
+  margin: 2px 0 0; padding: 6px 8px; white-space: pre-wrap; word-break: break-word;
+  background: var(--code-bg, rgba(127,127,127,0.10)); border-radius: 4px;
+  font-family: var(--font-mono); font-size: 0.75rem; color: var(--text);
+}
 .no-changes {
   color: var(--muted);
   font-style: italic;
@@ -2201,7 +2242,9 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   .hero-metrics { grid-template-columns: 1fr 1fr; }
 
   .change-block-head { flex-wrap: wrap; }
-  .change-scalar {
+  .change-scalar,
+  .change-item-added-block .change-scalar,
+  .change-item-removed-block .change-scalar {
     grid-template-columns: 1fr;
     gap: 2px 0;
     padding: 6px 0;

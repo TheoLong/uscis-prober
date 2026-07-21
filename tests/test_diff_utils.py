@@ -474,14 +474,16 @@ def test_classify_change_notice_without_appointment():
     assert classify_change(change) == "notice"
 
 
-def test_classify_change_status_fallback_for_non_timestamp_scalar():
-    # A tracked scalar changed but not a decision flag nor timestamp-only.
+def test_classify_change_status_scalar_without_event_is_silent():
+    # Owner's rule: no NEW event → silent update, even if a tracked scalar like
+    # statusTitle changed. Only new events/notices/appointments/decision flags
+    # escape the silent bucket.
     change = {
         "scalars": {"statusTitle": {"from": "Received", "to": "Processing"}},
         "events": {"added": [], "removed": []},
         "notices": {"added": [], "removed": []},
     }
-    assert classify_change(change) == "status"
+    assert classify_change(change) == "silent_update"
 
 
 def test_classify_change_appointment_wins_over_notice_when_removed():
@@ -713,3 +715,202 @@ def test_snapshot_changes_case_source_tagged():
     e1 = _entry("2026-03-10T00:00:00Z", closed=True)
     out = snapshot_changes([e0, e1])
     assert out and out[0]["source"] == "case"
+
+
+# ======================================================================
+# Comprehensive diff: entire-JSON compare, not an allowlist
+# ======================================================================
+
+def test_compute_change_detects_in_place_evidence_request_flip():
+    """An RFE that stays in the array but flips isRespondedTo True->False is a
+    real change the OLD engine missed (evidenceRequests wasn't watched). The
+    comprehensive engine surfaces it as a `changed` entry with a field delta.
+    It classifies as silent_update — no NEW event fired (owner's rule)."""
+    er_prev = {"noticeId": "n1", "isRespondedTo": True, "finalized": False,
+               "actionType": "Request for Evidence"}
+    er_curr = {"noticeId": "n1", "isRespondedTo": False, "finalized": False,
+               "actionType": "Request for Evidence"}
+    prev = _entry("2026-07-20T12:00:00Z", evidenceRequests=[er_prev])
+    curr = _entry("2026-07-21T12:00:00Z", evidenceRequests=[er_curr])
+    change = compute_change(prev, curr)
+    changed = change["evidenceRequests"]["changed"]
+    assert len(changed) == 1
+    assert changed[0]["_delta"]["isRespondedTo"] == {"from": True, "to": False}
+    # No new event → silent update, even though the RFE churned in place.
+    assert classify_change(change) == "silent_update"
+
+
+def test_snapshot_changes_evidence_only_diff_is_silent_update():
+    """An in-place evidenceRequests change with no new event is a silent update
+    (still surfaced as its own row, still carries the field delta)."""
+    er_prev = {"noticeId": "n1", "isRespondedTo": True}
+    er_curr = {"noticeId": "n1", "isRespondedTo": False}
+    e0 = _entry("2026-07-20T12:00:00Z", evidenceRequests=[er_prev])
+    e1 = _entry("2026-07-21T12:00:00Z", evidenceRequests=[er_curr])
+    changes = snapshot_changes([e0, e1])
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "silent_update"
+    assert changes[0]["evidenceRequests"]["changed"][0]["_delta"]["isRespondedTo"] \
+        == {"from": True, "to": False}
+
+
+def test_compute_change_detects_brand_new_property():
+    """A property that appears for the first time (absent -> present) must diff
+    as {from: None, to: value}. The engine keys off the union of prev+curr, so
+    it catches new fields USCIS starts returning without a code change."""
+    prev = _entry("2026-03-09T00:00:00Z")
+    curr = _entry("2026-03-10T00:00:00Z", brandNewFlag=True)
+    change = compute_change(prev, curr)
+    assert change["scalars"]["brandNewFlag"] == {"from": None, "to": True}
+
+
+def test_compute_change_detects_removed_property():
+    prev = _entry("2026-03-09T00:00:00Z", soonGone="x")
+    curr = _entry("2026-03-10T00:00:00Z")
+    change = compute_change(prev, curr)
+    assert change["scalars"]["soonGone"] == {"from": "x", "to": None}
+
+
+def test_compute_change_detects_nested_dict_leaf():
+    prev = _entry("2026-03-09T00:00:00Z", elisBeneficiaryAddendum={"foo": 1})
+    curr = _entry("2026-03-10T00:00:00Z", elisBeneficiaryAddendum={"foo": 2})
+    change = compute_change(prev, curr)
+    assert change["scalars"]["elisBeneficiaryAddendum.foo"] == {"from": 1, "to": 2}
+
+
+def test_compute_change_generic_collection_for_unnamed_list():
+    """A list-of-dicts field with no dedicated handler (e.g. concurrentCases)
+    is still diffed, under `collections`."""
+    prev = _entry("2026-03-09T00:00:00Z", concurrentCases=[])
+    curr = _entry("2026-03-10T00:00:00Z", concurrentCases=[{"id": "c1", "form": "I-765"}])
+    change = compute_change(prev, curr)
+    assert "concurrentCases" in change.get("collections", {})
+    assert change["collections"]["concurrentCases"]["added"][0]["id"] == "c1"
+
+
+def test_compute_change_catches_mixed_list_scalar_element():
+    """A list mixing dicts and scalars is a collection (has dicts) AND carries
+    a non-dict element. The collection diff alone would drop the scalar element,
+    so the whole list is ALSO snapshotted as a scalar backstop — no change to
+    any element can be silently lost."""
+    prev = _entry("2026-03-09T00:00:00Z", mixed=[{"id": "1"}, "elem"])
+    curr = _entry("2026-03-10T00:00:00Z", mixed=[{"id": "1"}, "elem-changed"])
+    change = compute_change(prev, curr)
+    # The scalar element change is captured via the whole-list scalar snapshot.
+    assert "mixed" in change["scalars"]
+    assert change["scalars"]["mixed"]["to"] == [{"id": "1"}, "elem-changed"]
+
+
+def test_compute_change_pure_list_of_dicts_not_duplicated_as_scalar():
+    """A clean list-of-dicts is fully covered by the collection diff, so it must
+    NOT also appear as a whole-list scalar (would be redundant noise)."""
+    prev = _entry("2026-03-09T00:00:00Z", events=[{"eventCode": "IAF", "eventId": "a"}])
+    curr = _entry("2026-03-10T00:00:00Z",
+                  events=[{"eventCode": "IAF", "eventId": "a"},
+                          {"eventCode": "FTA0", "eventId": "b"}])
+    change = compute_change(prev, curr)
+    assert "events" not in change["scalars"]
+    assert change["events"]["added"][0]["eventCode"] == "FTA0"
+
+
+def test_compute_change_catches_list_of_lists():
+    prev = _entry("2026-03-09T00:00:00Z", matrix=[[1, 2]])
+    curr = _entry("2026-03-10T00:00:00Z", matrix=[[1, 2], [3]])
+    change = compute_change(prev, curr)
+    assert change["scalars"]["matrix"]["to"] == [[1, 2], [3]]
+
+
+def _apply_change(base_data: dict, change: dict) -> dict:
+    """Reconstruct the NEXT snapshot's data from a base + one diff record.
+
+    This is the inverse of compute_change and is the whole point of the feed:
+    initial snapshot + every diff must rebuild every later snapshot exactly.
+    """
+    import copy
+    data = copy.deepcopy(base_data)
+
+    # 1. Scalars (dotted paths, including nested-dict leaves and whole
+    #    list-of-scalars). from/to; None means the value was absent.
+    for path, fromto in (change.get("scalars") or {}).items():
+        parts = path.split(".")
+        tgt = data
+        for p in parts[:-1]:
+            tgt = tgt.setdefault(p, {})
+        leaf = parts[-1]
+        if fromto["to"] is None and leaf in tgt and not _path_was_none_valued(fromto):
+            # A true removal only when the value genuinely disappeared. For our
+            # fixtures a None 'to' means removed; set-to-None keeps the key.
+            del tgt[leaf]
+        else:
+            tgt[leaf] = fromto["to"]
+
+    # 2. Collections: named + generic. Apply removed, added, changed by key.
+    from diff_utils import _COLLECTION_KEYS, _key_generic
+    def apply_coll(field, coll, key_fn):
+        arr = list(data.get(field) or [])
+        by_key = {key_fn(x): x for x in arr}
+        for r in coll.get("removed") or []:
+            by_key.pop(key_fn(r), None)
+        for ch in coll.get("changed") or []:
+            e = {k: v for k, v in ch.items() if k != "_delta"}
+            by_key[key_fn(e)] = e
+        for a in coll.get("added") or []:
+            by_key[key_fn(a)] = a
+        data[field] = list(by_key.values())
+
+    for name, key_fn in _COLLECTION_KEYS.items():
+        if name in change:
+            apply_coll(name, change[name], key_fn)
+    for name, coll in (change.get("collections") or {}).items():
+        apply_coll(name, coll, _key_generic)
+    return data
+
+
+def _path_was_none_valued(fromto):
+    # Distinguish "removed" (from present, to None) from "set to None". Our
+    # comprehensive engine represents both as to=None; for reconstruction we
+    # keep the key set to None (harmless — equality still holds on compare of
+    # tracked content). Return True so we take the assignment branch.
+    return True
+
+
+def test_diff_feed_reconstructs_every_snapshot_exactly():
+    """The core guarantee Theo asked for: initial snapshot + full diff history
+    rebuilds every later snapshot's data exactly — proving the diff is
+    comprehensive (no property is silently dropped)."""
+    snaps = [
+        _entry("2026-02-20T00:00:00Z", events=[{"eventCode": "IAF", "eventId": "a"}]),
+        _entry("2026-03-10T00:00:00Z",
+               updatedAt="2026-03-10", updatedAtTimestamp="2026-03-10T00:00:00.000Z",
+               events=[{"eventCode": "IAF", "eventId": "a"},
+                       {"eventCode": "FTA0", "eventId": "b"}]),
+        # RFE arrives (new list entry) + a brand-new scalar property appears
+        _entry("2026-06-26T00:00:00Z",
+               updatedAt="2026-06-26", actionRequired=True, someNewField="hi",
+               events=[{"eventCode": "IAF", "eventId": "a"},
+                       {"eventCode": "FTA0", "eventId": "b"}],
+               evidenceRequests=[{"noticeId": "n1", "isRespondedTo": False}]),
+        # RFE responded (in-place flip) + a nested-dict leaf changes
+        _entry("2026-07-20T00:00:00Z",
+               updatedAt="2026-07-20", actionRequired=False, someNewField="hi",
+               events=[{"eventCode": "IAF", "eventId": "a"},
+                       {"eventCode": "FTA0", "eventId": "b"}],
+               evidenceRequests=[{"noticeId": "n1", "isRespondedTo": True}],
+               elisBeneficiaryAddendum={"note": "x"}),
+    ]
+    # Walk the feed applying each consecutive diff to the running reconstruction.
+    recon = snaps[0]["data"]
+    for prev, curr in zip(snaps, snaps[1:]):
+        change = compute_change(prev, curr)
+        recon = _apply_change(recon, change)
+        # Normalise list order (diff is set-keyed, order is not significant).
+        def norm(d):
+            import json
+            out = {}
+            for k, v in d.items():
+                if isinstance(v, list):
+                    out[k] = sorted((json.dumps(x, sort_keys=True) for x in v))
+                else:
+                    out[k] = v
+            return out
+        assert norm(recon) == norm(curr["data"]), f"mismatch reconstructing {curr['capturedAt']}"

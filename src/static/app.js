@@ -1389,14 +1389,12 @@ function renderOverview(panel, c) {
   const factCallouts = document.createElement("div");
   factCallouts.className = "callouts";
 
-  if (latest.actionRequired || (s.outstandingEvidenceCount ?? 0) > 0) {
+  if (latest.actionRequired === true) {
     factCallouts.appendChild(
       callout(
         "bad",
         "Action required",
-        (s.outstandingEvidenceCount ?? 0) > 0
-          ? `evidenceRequests has ${s.outstandingEvidenceCount} outstanding entr${s.outstandingEvidenceCount === 1 ? "y" : "ies"} — a Request for Evidence / Notice of Intent to Deny is awaiting your response. Check the raw JSON.`
-          : "USCIS set actionRequired — look for a Request for Evidence or similar in the notices."
+        "USCIS set actionRequired on this case — check the notices / evidence requests in the raw JSON for what's being asked."
       )
     );
   }
@@ -1612,6 +1610,8 @@ const KIND_INFO = {
   notice:      { label: "new notice",     tone: "warn" },
   appointment: { label: "appointment",    tone: "warn" },
   decision:    { label: "decision flag",  tone: "ok" },
+  evidence:    { label: "evidence request", tone: "warn",
+                 desc: "An evidence request (RFE / NOID) was added or changed in place (e.g. isRespondedTo flipped)." },
   status:      { label: "status change",  tone: "" },
   location_assigned: { label: "location assigned", tone: "ok",
                  desc: "USCIS assigned a service center to this case — location API flipped from null to populated." },
@@ -1667,33 +1667,136 @@ function renderChangeBlock(ch) {
     block.appendChild(sec);
   }
 
+  // Named collections rendered explicitly; any other list-of-dicts field the
+  // engine diffed lands under ch.collections and is rendered generically below.
   const collections = [
     ["events", "Events"],
     ["notices", "Notices"],
     ["documents", "Documents"],
     ["addendums", "Addendums"],
+    ["evidenceRequests", "Evidence requests"],
   ];
   for (const [key, title] of collections) {
     const c = ch[key] || {};
-    if (!(c.added?.length || c.removed?.length)) continue;
+    if (!(c.added?.length || c.removed?.length || c.changed?.length)) continue;
     const sec = document.createElement("div");
     sec.className = "change-section";
     sec.innerHTML = `<h5>${title}</h5>`;
+    // events/notices have a compact one-line describer; evidenceRequests and
+    // documents/addendums are richer objects, so render them as pretty
+    // key/value rows instead of a JSON clump.
+    const pretty = key === "evidenceRequests";
     for (const a of c.added || []) {
-      const chip = document.createElement("span");
-      chip.className = "change-item-added";
-      chip.innerHTML = "+ " + redactMaybe(describeItem(key, a));
-      sec.appendChild(chip);
+      sec.appendChild(pretty
+        ? renderDictItem(a, "added")
+        : chipItem("change-item-added", "+ " + redactMaybe(describeItem(key, a))));
     }
     for (const r of c.removed || []) {
-      const chip = document.createElement("span");
-      chip.className = "change-item-removed";
-      chip.innerHTML = "− " + redactMaybe(describeItem(key, r));
-      sec.appendChild(chip);
+      sec.appendChild(pretty
+        ? renderDictItem(r, "removed")
+        : chipItem("change-item-removed", "− " + redactMaybe(describeItem(key, r))));
+    }
+    for (const ce of c.changed || []) {
+      sec.appendChild(renderChangedItem(key, ce));
+    }
+    block.appendChild(sec);
+  }
+
+  // Generic bucket: any other list-of-dicts field (e.g. concurrentCases) the
+  // comprehensive diff caught. Keyed by field name. Added/removed entries are
+  // arbitrary objects, so always render them pretty (key/value rows).
+  const extra = ch.collections || {};
+  for (const key of Object.keys(extra)) {
+    const c = extra[key] || {};
+    if (!(c.added?.length || c.removed?.length || c.changed?.length)) continue;
+    const sec = document.createElement("div");
+    sec.className = "change-section";
+    sec.innerHTML = `<h5>${escapeHtml(key)}</h5>`;
+    for (const a of c.added || []) {
+      sec.appendChild(renderDictItem(a, "added"));
+    }
+    for (const r of c.removed || []) {
+      sec.appendChild(renderDictItem(r, "removed"));
+    }
+    for (const ce of c.changed || []) {
+      sec.appendChild(renderChangedItem(key, ce));
     }
     block.appendChild(sec);
   }
   return block;
+}
+
+// A simple text chip (used for the compact event/notice describers).
+function chipItem(cls, html) {
+  const chip = document.createElement("span");
+  chip.className = cls;
+  chip.innerHTML = html;
+  return chip;
+}
+
+// Pretty-render a whole added/removed collection entry as key/value rows
+// instead of a one-line JSON clump. `mode` is "added" | "removed" and drives
+// the +/− marker and colour. Nested objects/arrays are shown as indented
+// JSON so a property that is itself a JSON blob stays readable.
+function renderDictItem(obj, mode) {
+  const wrap = document.createElement("div");
+  wrap.className = mode === "removed" ? "change-item-removed-block" : "change-item-added-block";
+  const marker = mode === "removed" ? "−" : "+";
+  const head = document.createElement("div");
+  head.className = "dict-item-head";
+  head.textContent = marker;
+  wrap.appendChild(head);
+  if (obj === null || typeof obj !== "object") {
+    const row = document.createElement("div");
+    row.className = "change-scalar";
+    row.innerHTML = `<span class="to">${redactMaybe(escapeHtml(String(obj)))}</span>`;
+    wrap.appendChild(row);
+    return wrap;
+  }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === "_delta") continue;
+    const mask = state.redacted && REDACT_KEYS.has(k);
+    let valHtml;
+    if (mask) {
+      valHtml = escapeHtml(REDACTION_MASK);
+    } else if (v !== null && typeof v === "object") {
+      // Nested object/array — pretty-print indented so it stays readable.
+      valHtml = `<pre class="dict-nested">${escapeHtml(JSON.stringify(v, null, 2))}</pre>`;
+    } else {
+      valHtml = formatScalarValueHtml(v);
+    }
+    const row = document.createElement("div");
+    row.className = "change-scalar";
+    row.innerHTML =
+      `<span class="field">${escapeHtml(k)}</span>` +
+      `<span class="to${mask ? " redacted-text" : ""}">${valHtml}</span>`;
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+// Render an in-place changed collection entry: show the field-level delta so
+// an operator sees exactly which properties flipped (e.g. an RFE's
+// isRespondedTo True→False). No header line — just the field deltas, styled
+// like the scalar "Field changes" rows.
+function renderChangedItem(kind, entry) {
+  const wrap = document.createElement("div");
+  wrap.className = "change-item-changed";
+  const delta = entry._delta || {};
+  for (const [k, v] of Object.entries(delta)) {
+    if (k === "_delta") continue;
+    const mask = state.redacted && REDACT_KEYS.has(k);
+    const fromHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.from);
+    const toHtml = mask ? escapeHtml(REDACTION_MASK) : formatScalarValueHtml(v.to);
+    const row = document.createElement("div");
+    row.className = "change-scalar";
+    row.innerHTML =
+      `<span class="field">${escapeHtml(k)}</span>` +
+      `<span class="from">${fromHtml}</span>` +
+      `<span class="to">${toHtml}</span>`;
+    wrap.appendChild(row);
+  }
+  return wrap;
 }
 
 function describeItem(kind, obj) {
