@@ -1609,9 +1609,6 @@ const KIND_INFO = {
   event:       { label: "new event",      tone: "ok" },
   notice:      { label: "new notice",     tone: "warn" },
   appointment: { label: "appointment",    tone: "warn" },
-  decision:    { label: "decision flag",  tone: "ok" },
-  evidence:    { label: "evidence request", tone: "warn",
-                 desc: "An evidence request (RFE / NOID) was added or changed in place (e.g. isRespondedTo flipped)." },
   status:      { label: "status change",  tone: "" },
   location_assigned: { label: "location assigned", tone: "ok",
                  desc: "USCIS assigned a service center to this case — location API flipped from null to populated." },
@@ -3018,7 +3015,7 @@ function renderUpdates() {
       `<div class="updates-empty">` +
       `<h3>No updates yet.</h3>` +
       `<p>An update is created whenever a pull discovers something new: ` +
-      `a silent update, a new event code, an appointment change, a decision flag flip, ` +
+      `a silent update, a new event code, an appointment change, ` +
       `or a new notice. Records are computed directly from the capture history, so ` +
       `restarting the server never loses or duplicates them.</p>` +
       `</div>`;

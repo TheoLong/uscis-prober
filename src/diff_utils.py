@@ -565,28 +565,24 @@ def _is_timestamp_only_change(change: dict) -> bool:
 def classify_change(change: dict) -> str:
     """Bucket a diff into the single most specific signal.
 
-    The governing rule (per the case owner): a change that does NOT carry a
-    new case *event* is a silent update. So only genuinely new timeline items
-    escape the silent bucket — a new event, a new notice, a new/changed
-    appointment, or a decision-flag flip. Everything else — scalar/timestamp
-    bumps, in-place evidenceRequests churn (e.g. isRespondedTo flipping),
-    generic collection changes — classifies as `silent_update`.
+    The governing rule (per the case owner): a NEW case event is the defining
+    signal, and we do NOT assert what any event *means* — every new event is
+    simply a "new event". A scalar flag like `actionRequired` is just "action
+    needed", not a decision, so there is deliberately NO "decision" bucket:
+    a flag flip with no new event is a silent update like any other scalar bump.
 
     Priority order (most specific first):
-      decision    — ackedByAdjudicatorAndCms/closed/actionRequired/isPremiumProcessed flip
-      event       — new case event appeared (FTA0, APR0, etc.)
-      appointment — a notice with appointmentDateTime appeared or changed
-      notice      — a new non-appointment notice appeared
-      silent_update  — anything else (no new event): scalar bumps, in-place
-                       evidence-request changes, generic collection churn.
+      event       — a NEW case event appeared (any code — no meaning asserted).
+      appointment — a notice with appointmentDateTime appeared or changed.
+      notice      — a new non-appointment notice appeared.
+      silent_update  — anything else (no new event): scalar/timestamp bumps,
+                       actionRequired/closed/… flips, in-place evidenceRequests
+                       churn, generic collection churn.
     """
-    scalars = change.get("scalars") or {}
     events = change.get("events") or {}
     notices = change.get("notices") or {}
 
-    # Decision-flag scalars may now be dotted paths; match on the leaf name.
-    if any(k.split(".")[-1] in _DECISION_FLAGS for k in scalars):
-        return "decision"
+    # A new event is the defining signal.
     if events.get("added"):
         return "event"
 
@@ -597,7 +593,7 @@ def classify_change(change: dict) -> str:
     if notices_added:
         return "notice"
 
-    # No new event/notice/appointment and no decision-flag flip → silent update.
+    # No new event/notice/appointment → silent update (incl. flag flips).
     return "silent_update"
 
 
