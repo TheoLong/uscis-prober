@@ -42,7 +42,7 @@ const USCIS_API = {
 // resolves the true URL via /api/case-api-link, then opens it. Returns null
 // when there's nothing to link to.
 function apiLinkButton(receipt, kind, label) {
-  const TOOLTIP = "Link to USCIS API link with raw json response, USCIS account login required";
+  const TOOLTIP = "Link to USCIS API link with raw json response, login required at https://myaccount.uscis.gov/sign-in";
 
   if (state.redacted === true) {
     // Locked variant — the real receipt lives only on the server now.
