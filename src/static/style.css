@@ -935,6 +935,41 @@ main[hidden] { display: none; }
   text-transform: uppercase;
   color: var(--muted-2);
 }
+/* Heading row that carries an inline "API" link on its right edge
+   (Current Status, Timeline). Keeps the label left, the pill right. */
+.section-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+/* Small pill linking to the raw USCIS API endpoint a section is sourced
+   from. Neutral by default, accent on hover so it reads as actionable. */
+.api-link {
+  flex: none;
+  padding: 2px 9px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.api-link::before {
+  content: "↗ ";
+  opacity: 0.7;
+}
+.api-link:hover,
+.api-link:focus-visible {
+  color: var(--accent-hot);
+  border-color: var(--accent-hot);
+  background: var(--bg-elev-2);
+}
 .events-list {
   margin: 0;
   padding: 0;

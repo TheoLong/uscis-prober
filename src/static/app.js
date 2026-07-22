@@ -22,6 +22,34 @@ const state = {
   accessLockout: false,    // when true, the server gates the site behind the admin-password login
 };
 
+// USCIS API endpoints, mirroring the ones the backend pulls from
+// (uscis_status.py → case_status, uscis_api.py → cases). Each returns raw
+// JSON and requires an authenticated my.uscis.gov session in the browser.
+const USCIS_API = {
+  status: (receipt) =>
+    `https://my.uscis.gov/account/case-service/api/case_status/${encodeURIComponent(receipt)}`,
+  case: (receipt) =>
+    `https://my.uscis.gov/account/case-service/api/cases/${encodeURIComponent(receipt)}`,
+};
+
+// Small "API" pill that links to the raw USCIS endpoint a section is sourced
+// from. Opens in a new tab; tooltip explains login is required. `kind` is
+// "status" or "case". Returns null when there's no receipt to link to.
+function apiLinkButton(receipt, kind) {
+  if (!receipt) return null;
+  const href = (USCIS_API[kind] || USCIS_API.case)(receipt);
+  const a = document.createElement("a");
+  a.className = "api-link";
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = "API";
+  a.title = "Link to USCIS API link with raw json response, login required";
+  a.setAttribute("aria-label", a.title);
+  return a;
+}
+
+
 // ---------- redaction (share/screenshot privacy mode) ----------
 //
 // Client-side masking so the dashboard can be screenshotted or screen-shared
@@ -1332,8 +1360,12 @@ function renderOverview(panel, c) {
     block.className = "status-block";
 
     const head = document.createElement("div");
-    head.className = "status-head";
-    head.textContent = "Current Status";
+    head.className = "status-head section-head-row";
+    const headLabel = document.createElement("span");
+    headLabel.textContent = "Current Status";
+    head.appendChild(headLabel);
+    const statusApiBtn = apiLinkButton(c.receiptNumber, "status");
+    if (statusApiBtn) head.appendChild(statusApiBtn);
     block.appendChild(head);
 
     block.appendChild(buildStatusBody(st));
@@ -3058,8 +3090,12 @@ function renderObservedEventCodes(c) {
   section.className = "events-section";
 
   const heading = document.createElement("h4");
-  heading.className = "events-heading";
-  heading.textContent = "Timeline";
+  heading.className = "events-heading section-head-row";
+  const headingLabel = document.createElement("span");
+  headingLabel.textContent = "Timeline";
+  heading.appendChild(headingLabel);
+  const caseApiBtn = apiLinkButton(c.receiptNumber, "case");
+  if (caseApiBtn) heading.appendChild(caseApiBtn);
   section.appendChild(heading);
 
   const hist = state.histories[c.label];
