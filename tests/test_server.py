@@ -496,6 +496,56 @@ def test_redaction_unlatch_also_requires_password(admin_client):
                              headers=_pw()).status_code == 200
 
 
+def test_case_api_link_resolves_without_password_when_not_redacted(admin_client):
+    # Redaction OFF: the receipt isn't secret, so no password is required and
+    # the true URL comes straight back.
+    r = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "status"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["url"] == (
+        "https://my.uscis.gov/account/case-service/api/case_status/IOE1"
+    )
+    r2 = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"})
+    assert r2.get_json()["url"] == (
+        "https://my.uscis.gov/account/case-service/api/cases/IOE1"
+    )
+
+
+def test_case_api_link_password_gated_while_redacted(admin_client, tmp_path):
+    # Use a realistic receipt (matches the redactor's [A-Z]{3}\d{7,} pattern)
+    # so this test actually exercises the after-request masking path.
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["cases"] = [{"id": "IOE0935749409", "label": "I-485"}]
+    cfg_path.write_text(json.dumps(cfg))
+
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    # No / wrong password → locked, no URL leaks.
+    r = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"})
+    assert r.status_code == 401
+    assert "url" not in r.get_json()
+    r_bad = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"},
+                              headers=_pw("wrong"))
+    assert r_bad.status_code == 401
+    # Correct password → the real URL is returned, receipt UN-masked (the
+    # after-request redactor must exempt this authorized response).
+    r_ok = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"},
+                             headers=_pw())
+    assert r_ok.status_code == 200
+    url = r_ok.get_json()["url"]
+    assert url == "https://my.uscis.gov/account/case-service/api/cases/IOE0935749409"
+    assert "•" not in url and "IOE0935749409" in url, "receipt must not be masked in the URL"
+
+
+def test_case_api_link_rejects_bad_input(admin_client):
+    assert admin_client.post("/api/case-api-link", json={"kind": "case"}).status_code == 400
+    assert admin_client.post("/api/case-api-link",
+                             json={"label": "I-485", "kind": "bogus"}).status_code == 400
+    assert admin_client.post("/api/case-api-link",
+                             json={"label": "I-999", "kind": "case"}).status_code == 404
+
+
 def test_access_lockout_toggle_persists_and_requires_password(admin_client, tmp_path):
     assert admin_client.get("/api/access-lockout").get_json() == {"enabled": False}
     assert admin_client.post("/api/access-lockout", json={"enabled": True}).status_code == 401

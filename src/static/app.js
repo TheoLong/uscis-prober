@@ -32,10 +32,32 @@ const USCIS_API = {
     `https://my.uscis.gov/account/case-service/api/cases/${encodeURIComponent(receipt)}`,
 };
 
-// Small "API" pill that links to the raw USCIS endpoint a section is sourced
-// from. Opens in a new tab; tooltip explains login is required. `kind` is
-// "status" or "case". Returns null when there's no receipt to link to.
-function apiLinkButton(receipt, kind) {
+// Small "API" pill linking to the raw USCIS endpoint a section is sourced
+// from. `kind` is "status" or "case".
+//
+// Normal mode: a plain <a> to the endpoint (receipt is not secret), opens in
+// a new tab. Redaction mode: the receipt is masked server-side, so a client-
+// built URL would carry the masked number and be useless. Instead the pill
+// becomes a locked control that, on click, asks for the admin password and
+// resolves the true URL via /api/case-api-link, then opens it. Returns null
+// when there's nothing to link to.
+function apiLinkButton(receipt, kind, label) {
+  const TOOLTIP = "Link to USCIS API link with raw json response, login required";
+
+  if (state.redacted === true) {
+    // Locked variant — the real receipt lives only on the server now.
+    if (!label) return null;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "api-link api-link-locked";
+    btn.textContent = "API";
+    btn.title = TOOLTIP;
+    btn.setAttribute("aria-label", btn.title);
+    btn.dataset.guard = "redaction";
+    btn.addEventListener("click", () => resolveAndOpenApiLink(btn, kind, label));
+    return btn;
+  }
+
   if (!receipt) return null;
   const href = (USCIS_API[kind] || USCIS_API.case)(receipt);
   const a = document.createElement("a");
@@ -44,9 +66,33 @@ function apiLinkButton(receipt, kind) {
   a.target = "_blank";
   a.rel = "noopener noreferrer";
   a.textContent = "API";
-  a.title = "Link to USCIS API link with raw json response, login required";
+  a.title = TOOLTIP;
   a.setAttribute("aria-label", a.title);
   return a;
+}
+
+// Redaction-mode click handler for a locked API pill: prompt for the admin
+// password, ask the server for the true URL, and open it in a new tab. The
+// server only unmasks the receipt for a valid password (see /api/case-api-link).
+async function resolveAndOpenApiLink(btn, kind, label) {
+  const pw = await adminChallenge({ action: "open the USCIS API link" });
+  if (pw === null) return;  // cancelled
+  try {
+    const res = await fetch("/api/case-api-link", withAdminHeader({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label, kind }),
+    }, pw));
+    if (res.status === 401) { toast("Wrong password — link locked.", "bad"); return; }
+    if (res.status === 429) { toast("Too many attempts — try again shortly.", "bad"); return; }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.ok || !data.url) throw new Error(data.error || "no_url");
+    // Open in a new tab. window.open keeps us on the dashboard.
+    window.open(data.url, "_blank", "noopener,noreferrer");
+  } catch (e) {
+    toast(`Couldn't open API link: ${e.message}`, "bad");
+  }
 }
 
 
@@ -1364,7 +1410,7 @@ function renderOverview(panel, c) {
     const headLabel = document.createElement("span");
     headLabel.textContent = "Current Status";
     head.appendChild(headLabel);
-    const statusApiBtn = apiLinkButton(c.receiptNumber, "status");
+    const statusApiBtn = apiLinkButton(c.receiptNumber, "status", c.label);
     if (statusApiBtn) head.appendChild(statusApiBtn);
     block.appendChild(head);
 
@@ -3094,7 +3140,7 @@ function renderObservedEventCodes(c) {
   const headingLabel = document.createElement("span");
   headingLabel.textContent = "Timeline";
   heading.appendChild(headingLabel);
-  const caseApiBtn = apiLinkButton(c.receiptNumber, "case");
+  const caseApiBtn = apiLinkButton(c.receiptNumber, "case", c.label);
   if (caseApiBtn) heading.appendChild(caseApiBtn);
   section.appendChild(heading);
 

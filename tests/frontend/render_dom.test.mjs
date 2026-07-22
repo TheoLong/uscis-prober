@@ -187,6 +187,43 @@ if (!JSDOM) {
     assert.equal(T.apiLinkButton(undefined, "status"), null);
   });
 
+  test("apiLinkButton locks to a password-gated button while redacted", () => {
+    const { T } = freshApp();
+    T.state.redacted = true;
+    // Even with a (masked) receipt present, the redacted variant must NOT be a
+    // plain <a> carrying a URL — it's a locked <button> keyed by label.
+    const btn = T.apiLinkButton("MASKED", "case", "I-485");
+    assert.ok(btn, "locked button returned");
+    assert.equal(btn.tagName, "BUTTON");
+    assert.equal(btn.dataset.guard, "redaction");
+    assert.equal(btn.getAttribute("href"), null, "must not expose a URL attribute");
+    assert.ok(!btn.outerHTML.includes("MASKED"), "masked receipt must not leak into the DOM");
+    assert.equal(btn.getAttribute("title"),
+      "Link to USCIS API link with raw json response, login required");
+  });
+
+  test("apiLinkButton returns null while redacted without a label", () => {
+    const { T } = freshApp();
+    T.state.redacted = true;
+    assert.equal(T.apiLinkButton("MASKED", "case", ""), null);
+    assert.equal(T.apiLinkButton("MASKED", "status", undefined), null);
+  });
+
+  test("Timeline API link is a locked button (no URL) while redacted", () => {
+    const { doc, T } = freshApp();
+    T.state.cases = [caseFixture()];
+    T.state.activeTab[RECEIPT] = "overview";
+    T.state.histories["I-485"] = { entries: [], changes: [], links: [] };
+    T.state.redacted = true;
+    T.renderCases();
+    const el = doc.querySelector(".events-heading .api-link");
+    assert.ok(el, "Timeline heading still has an API pill");
+    assert.equal(el.tagName, "BUTTON");
+    assert.equal(el.getAttribute("href"), null);
+    assert.ok(!doc.getElementById("case-list").innerHTML.includes(RECEIPT),
+      "real receipt must not appear anywhere in the redacted card DOM");
+  });
+
   test("Timeline heading carries a case-API link with the receipt", () => {
     const { doc, T } = freshApp();
     T.state.cases = [caseFixture()];

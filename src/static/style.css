@@ -964,6 +964,12 @@ main[hidden] { display: none; }
   content: "↗ ";
   opacity: 0.7;
 }
+/* Locked variant shown while redaction is latched — a padlock signals the
+   receipt is masked and the real URL is behind the admin password. */
+.api-link-locked::before {
+  content: "🔒 ";
+  opacity: 0.85;
+}
 .api-link:hover,
 .api-link:focus-visible {
   color: var(--accent-hot);

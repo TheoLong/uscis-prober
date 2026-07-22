@@ -50,6 +50,8 @@ from diff_utils import (
 from event_links import event_links
 from mailer import notify_update
 from redaction import redact_obj as _redact_obj
+from uscis_api import CASE_ENDPOINT
+from uscis_status import STATUS_ENDPOINT
 from system_log import (
     JSONL_STDERR_ENV as _SYSLOG_JSONL_ENV,
     log as sys_log,
@@ -1409,12 +1411,20 @@ def _redact_json(resp):
     data is never sent, so it can't be recovered from the console, the network
     tab, or page source. Non-JSON responses (static assets, zip exports) are
     untouched here — exports are blocked separately at their endpoints.
+
+    One exemption: `/api/case-api-link` is itself password-gated while redaction
+    is latched (see `api_case_api_link`), and its whole job is to hand the real
+    receipt-bearing URL to an authenticated admin. Masking its response would
+    defeat that, so a successful (200) response from that route is passed
+    through unscrubbed. Error responses still fall through to masking.
     """
     try:
         ctype = resp.content_type or ""
         if resp.direct_passthrough or "application/json" not in ctype:
             return resp
         if not load_redaction_enabled():
+            return resp
+        if (request.path or "") == "/api/case-api-link" and resp.status_code == 200:
             return resp
         data = json.loads(resp.get_data(as_text=True))
     except Exception:
@@ -2018,6 +2028,58 @@ def _wipe_tree_contents(root: Path, errors: list[str]) -> int:
     except OSError as e:  # pragma: no cover
         errors.append(f"iter {root}: {e}")
     return removed
+
+
+@app.route("/api/case-api-link", methods=["POST"])
+def api_case_api_link():
+    """Resolve the raw USCIS API URL for a case section.
+
+    Body: {"label": "I-485", "kind": "status" | "case"}.
+
+    The URL embeds the real receipt number, which is masked in every other
+    response while redaction is latched. So when redaction is on this route is
+    password-gated: it returns the true URL only to a request carrying a valid
+    `X-Admin-Password`. When redaction is off (or no password is configured)
+    it resolves freely — the receipt isn't secret in that mode.
+
+    Returns {"ok": True, "url": "..."} or an error with the usual status codes
+    (401 admin_required, 429 rate_limited, 400 bad input, 404 unknown label).
+    """
+    body = request.get_json(silent=True) or {}
+    label = body.get("label")
+    kind = body.get("kind")
+    if not isinstance(label, str) or not label:
+        return jsonify({"ok": False, "error": "label_required"}), 400
+    if kind not in ("status", "case"):
+        return jsonify({"ok": False, "error": "kind_must_be_status_or_case"}), 400
+
+    # Password gate — only while redaction is latched (the receipt is masked
+    # then, so the URL is sensitive). Mirrors _redaction_action_gate but scoped
+    # to this one resolver so it can hand back the real URL on success.
+    if load_redaction_enabled() and admin_password():
+        ok, retry_after = _verify_admin_request()
+        if not ok:
+            if retry_after:
+                resp = jsonify({"ok": False, "error": "rate_limited", "retryAfter": retry_after})
+                resp.headers["Retry-After"] = str(retry_after)
+                return resp, 429
+            return jsonify({"ok": False, "error": "admin_required"}), 401
+
+    try:
+        cfg = load_config()
+    except Exception as e:  # pragma: no cover — defensive
+        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+
+    receipt = None
+    for c in cfg.get("cases", []):
+        if c.get("label") == label:
+            receipt = c.get("id")
+            break
+    if not receipt:
+        return jsonify({"ok": False, "error": "unknown_label"}), 404
+
+    endpoint = STATUS_ENDPOINT if kind == "status" else CASE_ENDPOINT
+    return jsonify({"ok": True, "url": endpoint.format(receipt=receipt)})
 
 
 @app.route("/api/redaction-mode", methods=["GET", "POST"])
