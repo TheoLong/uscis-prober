@@ -11,7 +11,7 @@ const state = {
   nextRun: null,
   pullRunning: false,
   eventCodeLabels: {},     // server sends {} — USCIS event codes are undocumented, shown raw
-  view: "cases",           // "cases" | "updates" | "systemlog"
+  view: "cases",           // "cases" | "systemlog"
   updates: [],             // flat diff feed
   systemLog: [],           // current page of the event log (oldest-first, as returned by server)
   systemLogTotal: 0,       // total entries on disk (all pages combined)
@@ -226,7 +226,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // right view paints on first frame instead of flickering through
   // the default "cases" view first.
   const savedView = persistState.get("view");
-  if (savedView && ["cases", "updates", "systemlog"].includes(savedView)) {
+  if (savedView && ["cases", "systemlog"].includes(savedView)) {
     setView(savedView);
   }
   // Sync redaction + lockout state before the first render so the masking and
@@ -461,8 +461,7 @@ function wireRedactionPill() {
       // repaint. refreshAll re-renders cases; the visible feed is repainted
       // below (a later tab switch re-renders the others via setView()).
       await refreshAll();
-      if (state.view === "updates") renderUpdates();
-      else if (state.view === "systemlog") renderSystemLog();
+      if (state.view === "systemlog") renderSystemLog();
       toast(
         state.redacted
           ? "Redaction ON — PII masked, actions locked behind the password"
@@ -633,7 +632,6 @@ function setView(view) {
     btn.classList.toggle("active", btn.dataset.view === view)
   );
   document.getElementById("case-list").hidden = view !== "cases";
-  document.getElementById("updates-feed").hidden = view !== "updates";
   document.getElementById("systemlog-feed").hidden = view !== "systemlog";
   if (view === "cases") {
     // Cards were hidden (zero-width) while another view was active, so any
@@ -641,7 +639,6 @@ function setView(view) {
     // Redraw from the stashed links now that the wraps have width again.
     redrawAllEventLinks();
   }
-  if (view === "updates") renderUpdates();
   if (view === "systemlog") {
     loadAndRenderSystemLog();
     // Force-refresh the storage bar the moment the tab opens so
@@ -860,8 +857,7 @@ async function refreshAll() {
 // pollPullStatus itself, and the manual caller has no pull to poll.
 async function refreshAfterRecompute() {
   await Promise.all([loadCases(), loadUpdates(), loadSystemLog(), updateStorageBar()]);
-  if (state.view === "updates") renderUpdates();
-  else if (state.view === "systemlog") renderSystemLog();
+  if (state.view === "systemlog") renderSystemLog();
 }
 
 async function loadSystemLog(page = state.systemLogPage) {
@@ -911,14 +907,8 @@ async function loadUpdates() {
     const j = await res.json();
     state.updates = j.updates || [];
     state.eventCodeLabels = { ...state.eventCodeLabels, ...(j.eventCodeLabels || {}) };
-    const countEl = document.getElementById("updates-count");
-    if (state.updates.length) {
-      countEl.hidden = false;
-      countEl.textContent = String(state.updates.length);
-    } else {
-      countEl.hidden = true;
-    }
-    if (state.view === "updates") renderUpdates();
+    // The global Updates tab was removed — no updates-count badge to maintain.
+    // We still load the feed so state.eventCodeLabels stays current.
   } catch (e) {
     console.warn("loadUpdates failed:", e);
   }
