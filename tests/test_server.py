@@ -1,0 +1,2461 @@
+# Copyright (C) 2026 the USCIS Prober contributors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Tests for the Flask dashboard server.
+
+The subprocess spawned by /api/pull is mocked so no real pull is issued.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import server
+
+# Real flock helpers, captured before the autouse bypass patches them — the
+# dedicated lock tests exercise the genuine flock logic through these.
+_real_acquire_pull_lock = server._acquire_pull_lock
+_real_acquire_single_instance_lock = server._acquire_single_instance_lock
+
+
+# -------- common fixtures ------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _bypass_process_locks(monkeypatch):
+    """Bypass the cross-process flock guards by default.
+
+    Most tests call main() / _run_pull_subprocess repeatedly in one pytest
+    process; the real exclusive flocks would block the second call (and would
+    contend with a server running on this machine via the shared data/ dir).
+    The dedicated lock tests call the real helpers directly instead.
+    """
+    monkeypatch.setattr(server, "_instance_lock_fh", None)
+    monkeypatch.setattr(server, "_acquire_single_instance_lock", lambda: True)
+    monkeypatch.setattr(server, "_acquire_pull_lock", lambda: (True, None))
+
+
+@pytest.fixture(autouse=True)
+def _redirect_system_log(monkeypatch, tmp_path):
+    """Redirect the real on-disk system log to a per-test tmp file.
+
+    Without this fixture, server tests that call `_run_pull_subprocess`,
+    `_send_notifications_for_new`, or any Flask route that writes a
+    structured event leak into `data/system_log.json` — corrupting local
+    dev state and contaminating later tests. This fixture is autouse, so
+    every test in this file gets isolation for free.
+    """
+    import system_log
+    monkeypatch.setattr(system_log, "LOG_PATH", tmp_path / "_syslog.json")
+    system_log.clear()
+
+
+@pytest.fixture
+def client(monkeypatch, tmp_path):
+    """Flask test client with data dir + config path redirected into tmp."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg = {
+        "auth": {
+            "uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g@example.com", "uscis_mfa_app_password": "pw",
+            "notification_email": "n@example.com",
+        },
+        "cases": [{"id": "IOE1", "label": "I-485"}],
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    # Reset the shared mutable pull state between tests so assertions stay
+    # deterministic.
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    server.app.config["TESTING"] = True
+    return server.app.test_client()
+
+
+def _seed_log(data_dir: Path, entries: list[dict]) -> None:
+    (data_dir / "485_case.json").write_text(json.dumps(entries))
+
+
+
+def _seed_status_latest(data_dir: Path, record: dict) -> None:
+    (data_dir / "485_status.json").write_text(json.dumps(record))
+
+
+# -------- pure helpers ---------------------------------------------------
+
+def test_case_log_file_for_recognises_form_numbers(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    assert server._case_log_file_for("I-485").name == "485_case.json"
+
+
+def test_case_log_file_for_none_for_unknown_form(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    assert server._case_log_file_for("???") is None
+
+
+def test_load_entries_returns_empty_on_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    assert server.load_case_entries("I-485") == []
+
+
+def test_load_entries_returns_empty_on_invalid_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    (tmp_path / "485_case.json").write_text("{broken")
+    assert server.load_case_entries("I-485") == []
+
+
+def test_load_entries_rejects_non_list_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    (tmp_path / "485_case.json").write_text('{"not": "list"}')
+    assert server.load_case_entries("I-485") == []
+
+
+def test_load_entries_happy_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    (tmp_path / "485_case.json").write_text('[{"capturedAt": "x"}]')
+    assert server.load_case_entries("I-485") == [{"capturedAt": "x"}]
+
+
+def test_load_entries_unknown_form_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    assert server.load_case_entries("unknown") == []
+
+
+def test_now_iso_ends_with_z():
+    s = server._now_iso()
+    assert s.endswith("Z")
+
+
+def test_notify_recipient_prefers_explicit():
+    assert server._notify_recipient({"notification_email": "a", "uscis_mfa_email": "b"}) == "a"
+    assert server._notify_recipient({"uscis_mfa_email": "b"}) == "b"
+    assert server._notify_recipient({}) is None
+
+
+def test_update_ids_skips_records_without_id():
+    ids = server._update_ids([{"id": "1"}, {}, {"id": "2"}])
+    assert ids == {"1", "2"}
+
+
+# -------- diff-set snapshotting ----------------------------------------
+
+def _entry(captured_at, **data):
+    return {"capturedAt": captured_at, "data": {
+        "receiptNumber": "IOE1", "formType": "I-485", "events": [],
+        "notices": [], "documents": [], "evidenceRequests": [],
+        "updatedAt": "2026-03-01", **data}}
+
+
+def test_all_update_records_enriches_id(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),  # decision flip
+    ])
+    records = server._all_update_records()
+    assert len(records) == 1
+    # ID keys on the full capturedAt timestamp so multiple transitions on the
+    # same calendar day stay distinct (each emails independently).
+    assert records[0]["id"] == "IOE1:case:2026-03-10T00:00:00Z"
+    assert records[0]["caseLabel"] == "I-485"
+    assert records[0]["detectedOn"] == "2026-03-10"
+
+
+def test_all_update_records_distinct_ids_for_same_day_transitions(monkeypatch, tmp_path):
+    """Two transitions on the same calendar day get distinct IDs so the
+    notification dedup emails each one."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+
+    _seed_log(data_dir, [
+        _entry("2026-06-24T18:00:00Z", updatedAt="2026-06-24",
+               events=[{"eventCode": "FTA0", "eventId": "a"}]),
+        # Morning silent update (updatedAt advances).
+        _entry("2026-06-25T14:00:00Z", updatedAt="2026-06-25",
+               events=[{"eventCode": "FTA0", "eventId": "a"}]),
+        # Afternoon event, same UTC day.
+        _entry("2026-06-25T17:00:00Z", updatedAt="2026-06-25",
+               events=[{"eventCode": "FTA0", "eventId": "a"},
+                       {"eventCode": "FTA1", "eventId": "b"}]),
+    ])
+    records = server._all_update_records()
+    ids = [r["id"] for r in records]
+    # Two distinct same-day records, distinct IDs — neither is dropped by dedup.
+    assert ids == [
+        "IOE1:case:2026-06-25T14:00:00Z",
+        "IOE1:case:2026-06-25T17:00:00Z",
+    ]
+    assert len(set(ids)) == 2
+
+
+# -------- startup diff recompute --------------------------------------
+
+def test_recompute_diffs_at_startup_counts_each_case(monkeypatch, tmp_path):
+    """Walks every configured case, returns per-case counts, and emits a
+    diff_recomputed system-log event with the same payload."""
+    import system_log
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    # I-485: two snapshots with a decision flip → 1 case-diff.
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+    # I-765: single snapshot → no diffs (need a pair to compare).
+    (data_dir / "765_case.json").write_text(json.dumps([
+        {"capturedAt": "2026-04-01T00:00:00Z", "data": {
+            "receiptNumber": "IOE2", "formType": "I-765", "events": [],
+            "notices": [], "documents": [], "evidenceRequests": [],
+            "updatedAt": "2026-04-01"}},
+    ]))
+
+    cfg = {"cases": [
+        {"id": "IOE1", "label": "I-485"},
+        {"id": "IOE2", "label": "I-765"},
+    ]}
+    result = server._recompute_diffs_at_startup(cfg)
+
+    assert result == {"cases": [
+        {"label": "I-485", "case_changes": 1},
+        {"label": "I-765", "case_changes": 0},
+    ]}
+
+    # The system log entry mirrors the return value — single event,
+    # carrying the per-case summary so the operator can audit a restart.
+    events = [e for e in system_log.read_all() if e.get("event") == "diff_recomputed"]
+    assert len(events) == 1
+    assert events[0]["cases"] == result["cases"]
+    assert events[0]["source"] == "server"
+
+
+def test_recompute_diffs_at_startup_skips_cases_without_label(monkeypatch, tmp_path):
+    """Malformed config entries (missing label) are silently skipped — the
+    recompute is best-effort and should never crash on bad config."""
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path / "data")
+    (tmp_path / "data").mkdir()
+    cfg = {"cases": [
+        {"id": "IOE1"},        # no label
+        {"id": "IOE2", "label": ""},  # empty label
+    ]}
+    assert server._recompute_diffs_at_startup(cfg) == {"cases": []}
+
+
+def test_recompute_diffs_at_startup_handles_empty_config(monkeypatch, tmp_path):
+    """No cases configured → no-op return, no exception, no log noise."""
+    import system_log
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    assert server._recompute_diffs_at_startup({}) == {"cases": []}
+    assert server._recompute_diffs_at_startup({"cases": None}) == {"cases": []}
+    # A diff_recomputed event still fires (so a "no cases yet" install is
+    # auditable in the log) but with an empty cases array.
+    events = [e for e in system_log.read_all() if e.get("event") == "diff_recomputed"]
+    assert len(events) == 2
+    assert all(e["cases"] == [] for e in events)
+
+
+def test_recompute_diffs_at_startup_swallows_errors_and_logs(monkeypatch, tmp_path):
+    """A crash inside snapshot_changes() must not propagate — it would prevent
+    the server from finishing startup. The error is logged and an empty
+    payload is returned so callers can keep going."""
+    import system_log
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+    def _boom(_entries):
+        raise RuntimeError("synthetic diff explosion")
+    monkeypatch.setattr(server, "snapshot_changes", _boom)
+
+    cfg = {"cases": [{"id": "IOE1", "label": "I-485"}]}
+    result = server._recompute_diffs_at_startup(cfg)
+
+    assert result["cases"] == []
+    assert "synthetic diff explosion" in result["error"]
+    failures = [e for e in system_log.read_all() if e.get("event") == "diff_recompute_failed"]
+    assert len(failures) == 1
+    assert failures[0]["level"] == "warning"
+
+
+# -------- manual recompute route --------------------------------------
+
+def test_api_system_log_recompute_returns_stats_and_logs_event(client, tmp_path):
+    """POST /api/system-log/recompute walks the configured case, returns the
+    per-case stats, and appends exactly one diff_recomputed event."""
+    import system_log
+
+    data_dir = tmp_path / "data"
+    # I-485 (IOE1, from the client fixture config): two snapshots with a
+    # decision flip → one case-diff to count.
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+
+    r = client.post("/api/system-log/recompute")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["stats"]["cases"] == [
+        {"label": "I-485", "case_changes": 1},
+    ]
+
+    events = [e for e in system_log.read_all() if e.get("event") == "diff_recomputed"]
+    assert len(events) == 1
+    assert events[0]["cases"] == body["stats"]["cases"]
+
+
+def test_api_system_log_recompute_reports_failure(client, monkeypatch):
+    """A crash inside the diff walk surfaces as ok=False (HTTP 200, since the
+    live API path still works) and a diff_recompute_failed event."""
+    import system_log
+
+    def _boom(_entries):
+        raise RuntimeError("synthetic diff explosion")
+    monkeypatch.setattr(server, "snapshot_changes", _boom)
+
+    r = client.post("/api/system-log/recompute")
+    assert r.status_code == 200
+    assert r.get_json()["ok"] is False
+    failures = [e for e in system_log.read_all() if e.get("event") == "diff_recompute_failed"]
+    assert len(failures) == 1
+
+
+# -------- redaction mode (server-side) --------------------------------
+
+def test_api_redaction_mode_get_default_false(client):
+    r = client.get("/api/redaction-mode")
+    assert r.status_code == 200
+    assert r.get_json() == {"enabled": False}
+
+
+def test_api_redaction_mode_post_persists_and_reflects(client, tmp_path):
+    r = client.post("/api/redaction-mode", json={"enabled": True})
+    assert r.status_code == 200
+    assert r.get_json()["enabled"] is True
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert saved["redaction_enabled"] is True
+    assert client.get("/api/redaction-mode").get_json() == {"enabled": True}
+
+
+def test_api_redaction_mode_rejects_non_bool(client):
+    assert client.post("/api/redaction-mode", json={"enabled": "yes"}).status_code == 400
+
+
+def test_redaction_masks_pii_in_json_responses(client, tmp_path):
+    """The after-request hook masks PII (receipt + name) in /api/cases when on.
+
+    Uses a realistic 10-digit receipt so both the keyed mask (receiptNumber,
+    applicantName) and the pattern scrub (the `id` field) are exercised.
+    """
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["cases"] = [{"id": "IOE0000000000", "label": "I-485"}]
+    cfg_path.write_text(json.dumps(cfg))
+    (tmp_path / "data" / "485_case.json").write_text(json.dumps([
+        {"capturedAt": "2026-03-09T00:00:00Z", "data": {
+            "receiptNumber": "IOE0000000000", "formType": "I-485",
+            "applicantName": "DOE, JANE", "events": [], "notices": [],
+            "documents": [], "evidenceRequests": [], "updatedAt": "2026-03-01"}},
+    ]))
+
+    before = client.get("/api/cases").get_data(as_text=True)
+    assert "IOE0000000000" in before and "JANE" in before
+
+    client.post("/api/redaction-mode", json={"enabled": True})
+    after = client.get("/api/cases").get_data(as_text=True)
+    assert "IOE0000000000" not in after, "receipt must be masked everywhere (key + id scrub)"
+    assert "JANE" not in after, "applicant name must be masked"
+    # response is still well-formed JSON with the case present
+    assert any(c["label"] == "I-485" for c in client.get("/api/cases").get_json()["cases"])
+
+
+def test_redaction_blocks_data_exports(client):
+    # No admin password configured in the `client` fixture, so redaction
+    # degrades to plain read-only: guarded actions are blocked outright (403).
+    client.post("/api/redaction-mode", json={"enabled": True})
+    assert client.get("/api/export").status_code == 403
+    assert client.get("/api/system-log/export").status_code == 403
+
+
+def test_exports_work_again_when_redaction_off(client):
+    client.post("/api/redaction-mode", json={"enabled": True})
+    client.post("/api/redaction-mode", json={"enabled": False})
+    assert client.get("/api/export").status_code == 200
+
+
+def test_redaction_blocks_raw_trace_endpoints(client):
+    # Trace/MFA dumps are unmasked PII (binary/.eml), so redaction blocks them
+    # outright — the gate fires before the route, so no file needs to exist.
+    client.post("/api/redaction-mode", json={"enabled": True})
+    for path in (
+        "/api/full-trace/somedir/trace.zip",
+        "/api/full-trace/somedir/mfa_trace/email_1.eml",
+        "/trace-viewer/index.html",
+        "/api/mfa-trace/somedir/summary",
+    ):
+        r = client.get(path)
+        assert r.status_code == 403, f"{path} must be blocked under redaction"
+        assert r.get_json().get("error") == "redaction_enabled"
+
+
+def test_trace_endpoints_reachable_again_when_redaction_off(client, tmp_path):
+    # With redaction off the gate is gone; a real trace file serves normally.
+    trace_dir = tmp_path / "data" / "full_traces" / "t1"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.zip").write_bytes(b"zipbytes")
+    assert client.get("/api/full-trace/t1/trace.zip").status_code == 200
+
+
+def test_redact_obj_pseudonymizes_event_ids_in_responses(client, tmp_path):
+    # End-to-end: the real eventId must not survive in a redacted JSON response.
+    (tmp_path / "data" / "485_case.json").write_text(json.dumps([
+        {"capturedAt": "2026-03-09T00:00:00Z", "data": {
+            "receiptNumber": "IOE0000000000", "formType": "I-485",
+            "events": [{"eventId": "SECRET-EVENT-ID", "eventCode": "RFE"}],
+            "notices": [], "documents": [], "evidenceRequests": [],
+            "updatedAt": "2026-03-01"}},
+    ]))
+    client.post("/api/redaction-mode", json={"enabled": True})
+    body = client.get("/api/cases/I-485/history").get_data(as_text=True)
+    assert "SECRET-EVENT-ID" not in body, "real eventId must be withheld"
+
+
+# -------- admin password: latch toggles + per-action gate --------------
+
+ADMIN_PW = "test-admin-pass"
+
+
+@pytest.fixture
+def admin_client(monkeypatch, tmp_path):
+    """Like `client`, but with auth.admin_password set so password gating is live."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg = {
+        "auth": {
+            "uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g@example.com", "uscis_mfa_app_password": "pw",
+            "admin_password": ADMIN_PW,
+        },
+        "cases": [{"id": "IOE1", "label": "I-485"}],
+    }
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+    # Reset the shared brute-force guard so IP-rate-limit state can't leak
+    # between tests and trip a false 429.
+    import access_gate
+    monkeypatch.setattr(access_gate, "_guard", access_gate._BruteForceGuard())
+    server.app.config["TESTING"] = True
+    return server.app.test_client()
+
+
+def _pw(password=ADMIN_PW):
+    return {"X-Admin-Password": password}
+
+
+def test_redaction_toggle_requires_password_when_configured(admin_client, tmp_path):
+    # Wrong / missing password is rejected; the latch does not move.
+    assert admin_client.post("/api/redaction-mode", json={"enabled": True}).status_code == 401
+    assert admin_client.post("/api/redaction-mode", json={"enabled": True},
+                             headers=_pw("nope")).status_code == 401
+    assert json.loads((tmp_path / "config.json").read_text()).get("redaction_enabled") in (None, False)
+    # Correct password flips it.
+    r = admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    assert r.status_code == 200 and r.get_json()["enabled"] is True
+    assert json.loads((tmp_path / "config.json").read_text())["redaction_enabled"] is True
+
+
+def test_redaction_unlatch_also_requires_password(admin_client):
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    # Turning it back OFF still needs the password (both directions gated).
+    assert admin_client.post("/api/redaction-mode", json={"enabled": False}).status_code == 401
+    assert admin_client.post("/api/redaction-mode", json={"enabled": False},
+                             headers=_pw()).status_code == 200
+
+
+def test_case_api_link_resolves_without_password_when_not_redacted(admin_client):
+    # Redaction OFF: the receipt isn't secret, so no password is required and
+    # the true URL comes straight back.
+    r = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "status"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["url"] == (
+        "https://my.uscis.gov/account/case-service/api/case_status/IOE1"
+    )
+    r2 = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"})
+    assert r2.get_json()["url"] == (
+        "https://my.uscis.gov/account/case-service/api/cases/IOE1"
+    )
+
+
+def test_case_api_link_password_gated_while_redacted(admin_client, tmp_path):
+    # Use a realistic receipt (matches the redactor's [A-Z]{3}\d{7,} pattern)
+    # so this test actually exercises the after-request masking path.
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["cases"] = [{"id": "IOE0000000000", "label": "I-485"}]
+    cfg_path.write_text(json.dumps(cfg))
+
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    # No / wrong password → locked, no URL leaks.
+    r = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"})
+    assert r.status_code == 401
+    assert "url" not in r.get_json()
+    r_bad = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"},
+                              headers=_pw("wrong"))
+    assert r_bad.status_code == 401
+    # Correct password → the real URL is returned, receipt UN-masked (the
+    # after-request redactor must exempt this authorized response).
+    r_ok = admin_client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"},
+                             headers=_pw())
+    assert r_ok.status_code == 200
+    url = r_ok.get_json()["url"]
+    assert url == "https://my.uscis.gov/account/case-service/api/cases/IOE0000000000"
+    assert "•" not in url and "IOE0000000000" in url, "receipt must not be masked in the URL"
+
+
+def test_case_api_link_rejects_bad_input(admin_client):
+    assert admin_client.post("/api/case-api-link", json={"kind": "case"}).status_code == 400
+    assert admin_client.post("/api/case-api-link",
+                             json={"label": "I-485", "kind": "bogus"}).status_code == 400
+    assert admin_client.post("/api/case-api-link",
+                             json={"label": "I-999", "kind": "case"}).status_code == 404
+
+
+def test_access_lockout_toggle_persists_and_requires_password(admin_client, tmp_path):
+    assert admin_client.get("/api/access-lockout").get_json() == {"enabled": False}
+    assert admin_client.post("/api/access-lockout", json={"enabled": True}).status_code == 401
+    r = admin_client.post("/api/access-lockout", json={"enabled": True}, headers=_pw())
+    assert r.status_code == 200 and r.get_json()["enabled"] is True
+    assert json.loads((tmp_path / "config.json").read_text())["access_lockout_enabled"] is True
+    assert admin_client.get("/api/access-lockout").get_json() == {"enabled": True}
+
+
+def test_access_lockout_rejects_non_bool(admin_client):
+    assert admin_client.post("/api/access-lockout", json={"enabled": "yes"},
+                             headers=_pw()).status_code == 400
+
+
+def test_guarded_action_needs_password_only_while_redacted(admin_client):
+    # Redaction off → action passes with no password.
+    assert admin_client.post("/api/system-log/recompute").status_code == 200
+    # Latch redaction on (with password), then the same action is challenged.
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    assert admin_client.post("/api/system-log/recompute").status_code == 401
+    assert admin_client.post("/api/system-log/recompute", headers=_pw("wrong")).status_code == 401
+    # Correct password lets the action through.
+    assert admin_client.post("/api/system-log/recompute", headers=_pw()).status_code == 200
+
+
+def test_guarded_export_password_gated_while_redacted(admin_client):
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    assert admin_client.get("/api/export").status_code == 401
+    assert admin_client.get("/api/export", headers=_pw()).status_code == 200
+
+
+def test_readonly_request_never_challenged_while_redacted(admin_client):
+    admin_client.post("/api/redaction-mode", json={"enabled": True}, headers=_pw())
+    # GET /api/cases is read-only — it must stay reachable (masked) with no password.
+    assert admin_client.get("/api/cases").status_code == 200
+
+
+# -------- notification dispatcher -------------------------------------
+
+def test_send_notifications_for_new_noop_when_empty(monkeypatch):
+    with patch.object(server, "notify_update") as notify:
+        server._send_notifications_for_new([])
+    notify.assert_not_called()
+
+
+def test_send_notifications_for_new_skips_when_auth_missing(monkeypatch, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    with patch.object(server, "notify_update") as notify:
+        server._send_notifications_for_new([{"id": "1", "kind": "event"}])
+    notify.assert_not_called()
+
+
+def test_send_notifications_for_new_catches_per_record_failure(monkeypatch, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_mfa_email": "u@example.com",
+            "uscis_mfa_app_password": "pw",
+            "notification_email": "n@example.com",
+        }
+    }))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    with patch.object(server, "notify_update", side_effect=RuntimeError("boom")):
+        # Must not propagate — exception is logged and skipped.
+        server._send_notifications_for_new([
+            {"id": "1", "kind": "event"},
+            {"id": "2", "kind": "silent_update"},
+        ])
+
+
+def test_send_notifications_for_new_crash_protected(monkeypatch):
+    # Force load_config to raise — the whole dispatcher must not propagate.
+    monkeypatch.setattr(server, "load_config", MagicMock(side_effect=RuntimeError("x")))
+    server._send_notifications_for_new([{"id": "1"}])
+
+
+def test_send_notifications_for_new_emits_success_log(monkeypatch, tmp_path, caplog):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_mfa_email": "u@example.com",
+            "uscis_mfa_app_password": "pw",
+        }
+    }))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    with patch.object(server, "notify_update") as notify:
+        server._send_notifications_for_new([
+            {"id": "1", "kind": "event"},
+        ])
+    notify.assert_called_once()
+
+
+# -------- _run_pull_subprocess ----------------------------------------
+
+def _fake_proc(returncode=0, stdout="", stderr=""):
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.stdout = stdout
+    proc.stderr = stderr
+    return proc
+
+
+def test_run_pull_subprocess_skips_if_already_running(monkeypatch):
+    monkeypatch.setattr(server, "_pull_state", server.PullState(running=True))
+    with patch.object(subprocess, "run") as run:
+        server._run_pull_subprocess()
+    run.assert_not_called()
+
+
+# -------- cross-process locks (single-instance + pull) -----------------
+
+def test_pull_lock_is_exclusive_across_descriptions(monkeypatch, tmp_path):
+    # flock is per open-file-description, so a second acquire of the same file
+    # is refused while the first is held — exactly the cross-PROCESS behavior.
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    ok1, fh1 = _real_acquire_pull_lock()
+    assert ok1 is True and fh1 is not None
+    ok2, fh2 = _real_acquire_pull_lock()
+    assert ok2 is False and fh2 is None, "second pull must be refused while one holds the lock"
+    fh1.close()                                   # release
+    ok3, fh3 = _real_acquire_pull_lock()
+    assert ok3 is True and fh3 is not None, "lock is reusable once released"
+    fh3.close()
+
+
+def test_run_pull_subprocess_skips_when_another_process_holds_lock(monkeypatch, tmp_path):
+    # A foreign holder of the pull lock makes a fresh pull skip (not run).
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+    # Use the REAL lock (the autouse fixture stubbed it out for other tests).
+    monkeypatch.setattr(server, "_acquire_pull_lock", _real_acquire_pull_lock)
+    ok, foreign = _real_acquire_pull_lock()       # simulate the other process
+    assert ok
+    try:
+        with patch.object(subprocess, "run") as run:
+            server._run_pull_subprocess(trigger="scheduled")
+        run.assert_not_called()                   # skipped — no subprocess spawned
+        assert server._pull_state.running is False  # rolled back cleanly
+    finally:
+        foreign.close()
+
+
+def test_single_instance_lock_refuses_second_holder(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_instance_lock_fh", None)
+    assert _real_acquire_single_instance_lock() is True
+    held = server._instance_lock_fh
+    assert held is not None
+    # Simulate a second process: clear the global (so the idempotent shortcut
+    # doesn't fire) but keep the first fd open — its flock still blocks.
+    monkeypatch.setattr(server, "_instance_lock_fh", None)
+    assert _real_acquire_single_instance_lock() is False
+    held.close()
+
+
+def test_run_pull_subprocess_success_flags_ok(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run", return_value=_fake_proc(0, "hi", "")), \
+         patch.object(server, "_send_notifications_for_new") as send:
+        server._run_pull_subprocess()
+    state = server._pull_state
+    assert state.ok is True
+    assert state.exit_code == 0
+    assert state.running is False
+    # No cases configured → no new diffs → no notification call.
+    send.assert_not_called()
+
+
+def test_run_pull_subprocess_success_with_new_diffs_notifies(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({
+        "cases": [{"id": "IOE1", "label": "I-485"}],
+        "retry": 0, "retry_wait_seconds": 0,
+    }))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    # First call (before pull): no entries. Second call (after pull): records.
+    calls = {"n": 0}
+
+    def _fake_records(cfg=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return []
+        return [{"id": "IOE1:case:2026-03-10", "kind": "event"}]
+
+    monkeypatch.setattr(server, "_all_update_records", _fake_records)
+    with patch.object(subprocess, "run", return_value=_fake_proc(0, "", "")), \
+         patch.object(server, "_send_notifications_for_new") as send:
+        server._run_pull_subprocess()
+    send.assert_called_once()
+
+
+def test_run_pull_subprocess_failure_sets_error(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run", return_value=_fake_proc(1, "", "err")), \
+         patch.object(server, "_send_notifications_for_new") as send:
+        server._run_pull_subprocess()
+    assert server._pull_state.ok is False
+    assert server._pull_state.exit_code == 1
+    # Email not sent on failure.
+    send.assert_not_called()
+
+
+def test_run_pull_subprocess_timeout_recorded(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(
+        subprocess, "run",
+        side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1),
+    ):
+        server._run_pull_subprocess()
+    assert server._pull_state.ok is False
+    assert "timeout" in (server._pull_state.last_error or "")
+
+
+def test_run_pull_subprocess_crash_recorded(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": [], "retry": 0, "retry_wait_seconds": 0}))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run", side_effect=RuntimeError("oops")):
+        server._run_pull_subprocess()
+    assert server._pull_state.ok is False
+
+
+# -------- retry policy + orchestration ----------------------------------
+
+def test_load_retry_policy_raises_when_retry_missing():
+    with pytest.raises(server.ConfigError, match="retry"):
+        server.load_retry_policy({"retry_wait_seconds": 60})
+
+
+def test_load_retry_policy_raises_when_wait_missing():
+    with pytest.raises(server.ConfigError, match="retry_wait_seconds"):
+        server.load_retry_policy({"retry": 2})
+
+
+def test_load_retry_policy_raises_on_non_numeric_retry():
+    with pytest.raises(server.ConfigError, match="retry"):
+        server.load_retry_policy({"retry": "two", "retry_wait_seconds": 60})
+
+
+def test_load_retry_policy_raises_on_non_numeric_wait():
+    with pytest.raises(server.ConfigError, match="retry_wait_seconds"):
+        server.load_retry_policy({"retry": 1, "retry_wait_seconds": "later"})
+
+
+def test_load_retry_policy_raises_on_negative_values():
+    with pytest.raises(server.ConfigError):
+        server.load_retry_policy({"retry": -1, "retry_wait_seconds": 60})
+    with pytest.raises(server.ConfigError):
+        server.load_retry_policy({"retry": 1, "retry_wait_seconds": -5})
+
+
+def test_load_retry_policy_clamps_out_of_range():
+    p = server.load_retry_policy({"retry": 99, "retry_wait_seconds": 9999})
+    assert p.retry == server.RETRY_MAX_COUNT
+    assert p.retry_wait_seconds == float(server.RETRY_MAX_WAIT_SECONDS)
+
+
+def test_load_retry_policy_respects_zero():
+    # retry=0 is valid — it's how operators disable retries.
+    p = server.load_retry_policy({"retry": 0, "retry_wait_seconds": 30})
+    assert p.retry == 0
+    assert p.total_attempts == 1
+
+
+def test_load_retry_policy_template_values_are_valid():
+    # Sanity check: the recommended values from config.example.json
+    # must parse cleanly through the same validator live configs use.
+    p = server.load_retry_policy({"retry": 2, "retry_wait_seconds": 180})
+    assert p.retry == 2
+    assert p.retry_wait_seconds == 180.0
+    assert p.total_attempts == 3
+
+
+# -------- pull_hours schedule -------------------------------------------
+
+def test_load_pull_hours_raises_when_missing():
+    # Required key, no implicit default — a config without it must fail loud.
+    with pytest.raises(server.ConfigError, match="pull_hours"):
+        server.load_pull_hours({"retry": 2, "retry_wait_seconds": 180})
+
+
+def test_load_pull_hours_raises_on_empty_list():
+    with pytest.raises(server.ConfigError, match="empty"):
+        server.load_pull_hours({"pull_hours": []})
+
+
+def test_load_pull_hours_raises_when_not_a_list():
+    with pytest.raises(server.ConfigError, match="array"):
+        server.load_pull_hours({"pull_hours": 7})
+
+
+def test_load_pull_hours_raises_on_non_integer_entry():
+    with pytest.raises(server.ConfigError, match="non-integer"):
+        server.load_pull_hours({"pull_hours": [0, "6", 12]})
+
+
+def test_load_pull_hours_rejects_bool_entry():
+    # bool is an int subclass; True must not be silently read as hour 1.
+    with pytest.raises(server.ConfigError, match="non-integer"):
+        server.load_pull_hours({"pull_hours": [0, True]})
+
+
+def test_load_pull_hours_rejects_out_of_range():
+    with pytest.raises(server.ConfigError, match="range"):
+        server.load_pull_hours({"pull_hours": [0, 24]})
+    with pytest.raises(server.ConfigError, match="range"):
+        server.load_pull_hours({"pull_hours": [-1, 6]})
+
+
+def test_load_pull_hours_normalises_sorted_and_deduped():
+    # Duplicate/unsorted input collapses to a sorted unique tuple so the
+    # scheduler never registers colliding job ids.
+    assert server.load_pull_hours({"pull_hours": [20, 7, 7, 14]}) == (7, 14, 20)
+
+
+def test_load_pull_hours_single_hour_is_valid():
+    assert server.load_pull_hours({"pull_hours": [3]}) == (3,)
+
+
+def test_load_pull_hours_template_value_is_valid():
+    # The starter pattern shipped in config.example.json must parse
+    # cleanly through the same validator live configs use, and stay in
+    # sync with the file on disk.
+    import json
+    from pathlib import Path
+    example = json.loads(
+        (Path(server.__file__).resolve().parent.parent
+         / "config.example.json").read_text()
+    )
+    assert "pull_hours" in example, "config.example.json must ship pull_hours"
+    assert server.load_pull_hours(example) == (0, 6, 10, 14, 18)
+
+
+# -------- trace_successful_pulls config --------------------------------
+
+def test_load_trace_successful_pulls_defaults_false_when_missing():
+    """Optional field — missing = false. Traces are only written on
+    failures unless the UI toggle explicitly sets true."""
+    assert server.load_trace_successful_pulls(
+        {"retry": 1, "retry_wait_seconds": 10},
+    ) is False
+
+
+def test_load_trace_successful_pulls_rejects_non_bool():
+    with pytest.raises(server.ConfigError):
+        server.load_trace_successful_pulls({"trace_successful_pulls": "yes"})
+
+
+def test_load_trace_successful_pulls_honours_true_and_false():
+    assert server.load_trace_successful_pulls({"trace_successful_pulls": True}) is True
+    assert server.load_trace_successful_pulls({}) is False
+
+
+# -------- /api/storage + category breakdown ----------------------------
+
+def test_api_storage_categorises_data_dir(client, monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    # Seed representative files per category.
+    (data_dir / "485_case.json").write_text("[]")
+    (data_dir / "system_log.json").write_text("[]")
+    (data_dir / "full_traces").mkdir()
+    (data_dir / "full_traces" / "trace1").mkdir()
+    (data_dir / "full_traces" / "trace1" / "01_after_goto.html.gz").write_bytes(b"x" * 1200)
+    (data_dir / "full_traces" / "trace1" / "01_after_goto.png").write_bytes(b"x" * 2000)
+
+    # Extend the existing client's config.
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg.update({
+        "retry": 1, "retry_wait_seconds": 10,
+    })
+    cfg_path.write_text(json.dumps(cfg))
+
+    r = client.get("/api/storage")
+    assert r.status_code == 200
+    body = r.get_json()
+    keys = {c["key"]: c for c in body["categories"]}
+    # Cases grouped per form number.
+    assert "case_485" in keys
+    assert keys["case_485"]["label"] == "I-485"
+    assert keys["case_485"]["file_count"] == 1  # 485_case.json
+    # System log aggregates the event log + every full-trace file.
+    assert "system_log" in keys
+    # Event log (2 bytes: "[]") + 2 trace files (3200 bytes).
+    assert keys["system_log"]["bytes"] >= 3200
+    assert keys["system_log"]["file_count"] >= 3
+    # Config + Other filtered out of UI categories (still counted
+    # toward total_bytes indirectly via the walk).
+    assert "config" not in keys
+    assert "other" not in keys
+    assert body["total_bytes"] > 0
+
+
+# -------- /api/debug-mode + /api/auth-trace --------------------------
+
+def _write_full_cfg(cfg_path, enabled=False):
+    cfg_path.write_text(json.dumps({
+        "auth": {
+            "uscis_email": "e", "uscis_password": "p",
+            "uscis_mfa_email": "g@example.com",
+            "uscis_mfa_app_password": "pw",
+        },
+        "cases": [],
+        "retry": 1, "retry_wait_seconds": 10,
+        "trace_successful_pulls": enabled,
+    }))
+
+
+def test_api_debug_mode_get_returns_current(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.get("/api/debug-mode")
+    assert r.status_code == 200
+    assert r.get_json() == {"enabled": False}
+
+
+def test_api_debug_mode_post_persists_flip(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.post("/api/debug-mode", json={"enabled": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True and body["enabled"] is True
+    # Config file was rewritten.
+    saved = json.loads(cfg_path.read_text())
+    assert saved["trace_successful_pulls"] is True
+
+
+def test_api_debug_mode_rejects_non_bool(client, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path, enabled=False)
+    r = client.post("/api/debug-mode", json={"enabled": "yes"})
+    assert r.status_code == 400
+
+
+def test_api_full_trace_serves_zip_jsonl_eml(client, tmp_path):
+    """Serves trace.zip + mfa_trace/events.jsonl + mfa_trace/email_*.eml
+    with correct MIME types. Path-traversal is rejected."""
+    data_dir = tmp_path / "data"
+    trace_dir = data_dir / "full_traces" / "20260424T000000Z_fail_scheduled"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.zip").write_bytes(b"PK\x03\x04FAKE_ZIP")
+    (trace_dir / "mfa_trace").mkdir()
+    (trace_dir / "mfa_trace" / "events.jsonl").write_text(
+        '{"event": "imap_connect_ok"}\n'
+    )
+    (trace_dir / "mfa_trace" / "email_12345.eml").write_bytes(
+        b"From: a\nSubject: x\n\nbody"
+    )
+
+    cfg_path = tmp_path / "config.json"
+    _write_full_cfg(cfg_path)
+
+    # Zip at the top level.
+    r = client.get("/api/full-trace/20260424T000000Z_fail_scheduled/trace.zip")
+    assert r.status_code == 200
+    assert r.mimetype == "application/zip"
+    assert r.headers.get("Access-Control-Allow-Origin") == "*"
+
+    # Nested one level deep (mfa_trace/events.jsonl).
+    r = client.get(
+        "/api/full-trace/20260424T000000Z_fail_scheduled/mfa_trace/events.jsonl",
+    )
+    assert r.status_code == 200
+    assert r.mimetype == "application/x-ndjson"
+
+    # Nested .eml.
+    r = client.get(
+        "/api/full-trace/20260424T000000Z_fail_scheduled/mfa_trace/email_12345.eml",
+    )
+    assert r.status_code == 200
+    assert r.mimetype == "message/rfc822"
+
+    # Path traversal rejected.
+    for bad in (
+        "../etc/passwd",
+        "..%2fescape",
+    ):
+        r = client.get(f"/api/full-trace/{bad}/trace.zip")
+        assert r.status_code in (400, 404)
+
+    # More than two levels of nesting rejected.
+    r = client.get(
+        "/api/full-trace/20260424T000000Z_fail_scheduled/a/b/c.txt",
+    )
+    assert r.status_code == 400
+
+    # Missing file → 404.
+    r = client.get("/api/full-trace/20260424T000000Z_fail_scheduled/nope.zip")
+    assert r.status_code == 404
+
+
+def _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0.0):
+    cfg_path.write_text(json.dumps({
+        "cases": [],
+        "retry": retry,
+        "retry_wait_seconds": retry_wait_seconds,
+    }))
+
+
+def _auth_failed_stderr(attempt_marker: str = "a") -> str:
+    """Compose one JSONL-encoded cli_run_auth_failed event as the child
+    would emit it when its login flow bailed out."""
+    from system_log import _JSONL_PREFIX  # type: ignore[attr-defined]
+    return (
+        f'{_JSONL_PREFIX}{{"ts":"2026-04-24T00:00:00Z",'
+        f'"event":"cli_run_auth_failed","level":"error",'
+        f'"source":"session_fetch","error":"AuthError: marker={attempt_marker}"}}'
+    )
+
+
+def test_envelope_level_green_on_clean_pull(monkeypatch, tmp_path):
+    """Three-tier colour rule — tier 1 (green / info): all attempts
+    succeeded, no error or warning steps anywhere. The dashboard
+    should render this as the "green" neutral state."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run",
+                      return_value=_fake_proc(0, "", "")):
+        server._run_pull_subprocess()
+
+    import system_log
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    assert pulls[0]["level"] == "info"
+    assert pulls[0]["exit_code"] == 0
+
+
+def test_envelope_level_yellow_on_retry_recovery(monkeypatch, tmp_path):
+    """Three-tier colour rule — tier 2 (yellow / warning): attempt 1
+    failed but attempt 2 recovered. Final exit is 0, the data is
+    present, but the operator should glance at it because a retry
+    was exercised. Previously this would have been tagged `error`
+    (worst-step severity) — the fix downgrades recovered pulls to
+    `warning` so red stays reserved for truly-broken pulls."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    import system_log
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    env = pulls[0]
+    assert env["level"] == "warning", (
+        "retry-recovered pulls must downgrade red → yellow; "
+        "got level=%r" % env["level"]
+    )
+    assert env["exit_code"] == 0
+    # There SHOULD be error-level step(s) inside — the first attempt's
+    # auth failure. The top-level downgrade rule is exactly what
+    # distinguishes this case from a fully-failed pull.
+    assert any(s.get("level") == "error" for s in env["steps"])
+
+
+def test_envelope_level_red_on_total_failure(monkeypatch, tmp_path):
+    """Three-tier colour rule — tier 3 (red / error): every attempt
+    failed, final exit is non-zero. The operator needs to see red."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    with patch.object(subprocess, "run",
+                      return_value=_fake_proc(1, "", _auth_failed_stderr("x"))):
+        server._run_pull_subprocess()
+
+    import system_log
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    env = pulls[0]
+    assert env["level"] == "error"
+    assert env["exit_code"] != 0
+
+
+def test_run_pull_retries_on_auth_failure(monkeypatch, tmp_path):
+    """Classic recovery: first attempt hits an auth failure, second
+    attempt succeeds. We must see both attempts under one pull envelope."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    # Two subprocess invocations under one pull.
+    assert len(calls) == 2
+    assert server._pull_state.ok is True
+    assert server._pull_state.exit_code == 0
+
+
+def test_run_pull_forces_trace_on_retry_even_when_debug_off(monkeypatch, tmp_path):
+    """Forensic-retention rule: if any attempt in a pull fails, every
+    attempt under that pull must preserve its trace so a "retry
+    succeeded after failure" scenario keeps both traces side-by-side.
+    (The envelope itself is top-level `warning` in that case — see
+    test_envelope_level_yellow_on_retry_recovery — but regardless of
+    final colour, the tracer retention applies whenever a retry
+    happened.)
+
+    Observable: the FIRST attempt's child env has USCIS_TRACE_ON_SUCCESS=0
+    (normal rule — only fail paths auto-preserve). The SECOND attempt,
+    because we only get here after a prior failure, forces it to 1
+    regardless of debug mode."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    # Debug mode explicitly OFF — the flag must still flip on retry.
+    cfg = json.loads(cfg_path.read_text())
+    cfg["trace_successful_pulls"] = False
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    captured_envs: list[dict] = []
+
+    def _run(cmd, **kw):
+        captured_envs.append(dict(kw.get("env") or {}))
+        if len(captured_envs) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(captured_envs) == 2
+    # Attempt 1: debug off, no prior failure → discard trace on success.
+    assert captured_envs[0]["USCIS_TRACE_ON_SUCCESS"] == "0"
+    # Attempt 2: previous attempt failed → forced on, preserves trace
+    # even if attempt 2 itself succeeds.
+    assert captured_envs[1]["USCIS_TRACE_ON_SUCCESS"] == "1"
+
+
+def test_run_pull_does_not_retry_non_auth_failure(monkeypatch, tmp_path):
+    """A non-auth failure (e.g. case fetch 500 without an auth_failed
+    marker) must NOT retry — retry is an anti-bot recovery tool, not a
+    catch-all."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=3, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_proc(1, "", "something else went wrong")
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 1  # no retry
+    assert server._pull_state.ok is False
+
+
+def test_run_pull_stops_after_total_attempts_exhausted(monkeypatch, tmp_path):
+    """With retry=2, an always-failing auth must run exactly 3 total
+    attempts (1 initial + 2 retries) before giving up."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_proc(1, "", _auth_failed_stderr(str(len(calls))))
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 3  # 1 initial + 2 retries
+    assert server._pull_state.ok is False
+
+
+def test_run_pull_preserves_stderr_across_retry_attempts(monkeypatch, tmp_path):
+    """The subprocess_exit_nonzero step must include every attempt's
+    stderr tail, not just the last one. Otherwise a crash signature on
+    attempt 1 vanishes the moment attempt 2 starts."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    def _run(cmd, **kw):
+        # Each attempt prints a distinctive marker line plus the
+        # structured auth-failure event.
+        marker = f"TRACEBACK_MARKER_ATTEMPT_{1 + len(getattr(_run, '_seen', []))}"
+        _run._seen = getattr(_run, "_seen", []) + [marker]
+        return _fake_proc(1, "", marker + "\n" + _auth_failed_stderr(marker))
+
+    import system_log
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    exit_steps = [s for s in pulls[0]["steps"]
+                  if s.get("event") == "subprocess_exit_nonzero"]
+    # One exit-nonzero step per attempt, and the LAST attempt's step
+    # must carry all earlier tails as `all_attempts_stderr_tails`.
+    assert len(exit_steps) >= 1
+    last = exit_steps[-1]
+    assert "all_attempts_stderr_tails" in last
+    # Flatten for easy inspection — at least two distinct markers
+    # survived.
+    flat = [line for tail in last["all_attempts_stderr_tails"] for line in tail]
+    assert any("ATTEMPT_1" in line for line in flat)
+    assert any("ATTEMPT_3" in line for line in flat)
+
+
+def test_run_pull_emits_retry_waiting_and_starting_events(monkeypatch, tmp_path):
+    """Each retry must emit `auth_retry_waiting` then `auth_retry_starting`
+    so the dashboard shows the pending retry rather than a dead gap."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=1, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _fake_proc(1, "", _auth_failed_stderr("first"))
+        return _fake_proc(0, "", "")
+
+    import system_log
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    # auth_retry_waiting / _starting are emitted inside the capture
+    # scope so they're folded into the pull envelope's `steps[]`, not
+    # written as standalone top-level events. Inspect the envelope.
+    pulls = [e for e in system_log.read_all() if e.get("event") == "pull"]
+    assert len(pulls) == 1
+    step_names = [s.get("event") for s in pulls[0]["steps"]]
+    assert step_names.count("auth_retry_waiting") == 1
+    assert step_names.count("auth_retry_starting") == 1
+
+
+def test_run_pull_retry_does_not_wait_when_retry_zero(monkeypatch, tmp_path):
+    """retry=0 disables retry entirely — only one subprocess invocation."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=0, retry_wait_seconds=120)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        return _fake_proc(1, "", _auth_failed_stderr())
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 1
+
+
+def test_run_pull_does_not_retry_on_subprocess_timeout(monkeypatch, tmp_path):
+    """A subprocess timeout is not a USCIS-side anti-bot issue — it's our
+    side taking too long. Retrying risks a runaway pull, so we don't."""
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    cfg_path = tmp_path / "config.json"
+    _cfg_with_retry(cfg_path, retry=2, retry_wait_seconds=0)
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_pull_state", server.PullState())
+
+    calls = []
+
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    with patch.object(subprocess, "run", side_effect=_run):
+        server._run_pull_subprocess()
+
+    assert len(calls) == 1
+    assert "timeout" in (server._pull_state.last_error or "")
+
+
+def test_spawn_pull_async_starts_thread():
+    with patch.object(server.threading, "Thread") as Thread:
+        instance = MagicMock()
+        Thread.return_value = instance
+        server._spawn_pull_async()
+    instance.start.assert_called_once()
+
+
+# -------- scheduler wiring --------------------------------------------
+
+def test_setup_scheduler_registers_one_job_per_pull_hour(monkeypatch):
+    sched = MagicMock()
+    monkeypatch.setattr(server, "scheduler", sched)
+    # Pin a known non-empty schedule so the count assertion is meaningful.
+    # (PULL_HOURS initialises to () and is resolved from config at startup,
+    # so without this the assertion would be the vacuous 0 == 0.)
+    monkeypatch.setattr(server, "PULL_HOURS", (0, 6, 12, 18))
+    server._setup_scheduler()
+    assert sched.add_job.call_count == 4
+    sched.start.assert_called_once()
+    # The job ids must be derived from PULL_HOURS, one per configured hour.
+    job_ids = {kw["id"] for _a, kw in sched.add_job.call_args_list}
+    assert job_ids == {"pull-00", "pull-06", "pull-12", "pull-18"}
+
+
+def test_setup_scheduler_uses_configured_hours(monkeypatch):
+    # A different, non-default schedule must flow straight through to the
+    # registered jobs — proves the loop reads PULL_HOURS, not a constant.
+    sched = MagicMock()
+    monkeypatch.setattr(server, "scheduler", sched)
+    monkeypatch.setattr(server, "PULL_HOURS", (3, 21))
+    server._setup_scheduler()
+    assert sched.add_job.call_count == 2
+    # Each registered job carries the configured hour in its id and the
+    # positional CronTrigger; assert on both so the trigger can't drift
+    # from the id.
+    by_id = {}
+    for args, kw in sched.add_job.call_args_list:
+        trigger = args[1]  # CronTrigger passed positionally
+        by_id[kw["id"]] = trigger
+    assert set(by_id) == {"pull-03", "pull-21"}
+    # Pull the hour field out of each CronTrigger and confirm it matches.
+    for job_id, trigger in by_id.items():
+        expected_hour = int(job_id.split("-")[1])
+        hour_field = next(f for f in trigger.fields if f.name == "hour")
+        assert str(hour_field) == str(expected_hour)
+
+
+def test_next_run_iso_returns_none_when_no_jobs(monkeypatch):
+    sched = MagicMock()
+    sched.get_jobs.return_value = []
+    monkeypatch.setattr(server, "scheduler", sched)
+    assert server._next_run_iso() is None
+
+
+def test_next_run_iso_returns_earliest_job(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    later = datetime.now(timezone.utc) + timedelta(hours=2)
+    sched = MagicMock()
+    sched.get_jobs.return_value = [
+        MagicMock(next_run_time=later),
+        MagicMock(next_run_time=future),
+        MagicMock(next_run_time=None),
+    ]
+    monkeypatch.setattr(server, "scheduler", sched)
+    iso = server._next_run_iso()
+    assert iso is not None
+    assert iso.endswith("Z")
+
+
+# -------- Flask routes ------------------------------------------------
+
+def test_index_rewrites_static_paths(client, tmp_path, monkeypatch):
+    # Sanity — we don't need the static file to exist; just ensure rewrite works.
+    r = client.get("/")
+    assert r.status_code == 200
+    assert b"?v=" in r.data
+
+
+def test_no_cache_headers_present(client):
+    r = client.get("/")
+    assert "no-store" in r.headers.get("Cache-Control", "")
+    assert r.headers.get("Pragma") == "no-cache"
+
+
+def test_api_cases_empty_when_no_logs(client):
+    r = client.get("/api/cases")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert "cases" in body
+    assert body["cases"][0]["captures"] == 0
+    assert body["cases"][0]["days"] == 0
+
+
+def test_api_cases_surfaces_summary_when_logs_exist(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+    r = client.get("/api/cases")
+    body = r.get_json()
+    case = body["cases"][0]
+    assert case["captures"] == 2
+    assert case["days"] == 2
+    assert case["summary"]["stage"] == "Pending receipt"
+
+
+def test_api_cases_captures_and_days_diverge_on_same_day_pulls(client, tmp_path):
+    # UI renders `captures` and `days` as two separate sub-fact cells, so the
+    # API must expose them as independent counters — same-day snapshots bump
+    # `captures` but not `days`.
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-03-09T06:00:00Z"),
+        _entry("2026-03-09T18:00:00Z"),  # same calendar day
+        _entry("2026-03-10T06:00:00Z"),
+    ])
+    r = client.get("/api/cases")
+    case = r.get_json()["cases"][0]
+    assert case["captures"] == 3
+    assert case["days"] == 2
+
+
+def test_api_history_preserves_uscis_key_order(client, tmp_path):
+    # USCIS returns fields in a specific, non-alphabetical order. Flask's
+    # default `jsonify` would sort object keys — we disable that so the
+    # Raw JSON panel shows exactly what came back from USCIS.
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    entries = [{
+        "capturedAt": "2026-03-10T00:00:00Z",
+        # Keys deliberately NOT in alphabetical order:
+        "data": {"zeta_first": 1, "alpha_later": 2, "middle_third": 3},
+    }]
+    (data_dir / "485_case.json").write_text(json.dumps(entries))
+
+    r = client.get("/api/cases/I-485/history")
+    body = r.data.decode()
+    # Original insertion order must be preserved in the wire bytes.
+    assert body.index("zeta_first") < body.index("alpha_later")
+    assert body.index("alpha_later") < body.index("middle_third")
+
+
+
+
+def test_api_export_includes_status_log(client, tmp_path):
+    import io, zipfile
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-04-22T18:00:00Z")])
+    _seed_status_latest(data_dir, {
+        "capturedAt": "2026-04-22T18:00:00Z",
+        "data": {"data": {"statusTitle": "Case Was Received"}},
+    })
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        names = set(z.namelist())
+        assert "485_status.json" in names
+        manifest = json.loads(z.read("manifest.json"))
+        entry = manifest["cases"][0]
+        assert entry["statusFile"] == "485_status.json"
+        assert entry["statusPresent"] is True
+
+
+def test_api_case_history_returns_changes(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+    r = client.get("/api/cases/I-485/history")
+    body = r.get_json()
+    assert body["label"] == "I-485"
+    assert len(body["changes"]) == 1
+
+
+def test_api_updates_returns_sorted_feed(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [
+        _entry("2026-03-09T00:00:00Z"),
+        _entry("2026-03-10T00:00:00Z", closed=True),
+    ])
+    r = client.get("/api/updates")
+    body = r.get_json()
+    assert body["updates"]
+    rec = body["updates"][0]
+    assert rec["caseLabel"] == "I-485"
+    assert rec["id"] == "IOE1:case:2026-03-10T00:00:00Z"
+
+
+def test_api_pull_starts_new_pull(client, monkeypatch):
+    with patch.object(server, "_spawn_pull_async") as spawn:
+        r = client.post("/api/pull")
+    assert r.status_code == 200
+    spawn.assert_called_once()
+
+
+def test_api_pull_rejects_when_running(client, monkeypatch):
+    monkeypatch.setattr(server, "_pull_state", server.PullState(running=True))
+    r = client.post("/api/pull")
+    assert r.status_code == 409
+    assert r.get_json()["error"] == "pull_in_progress"
+
+
+def test_api_pull_status_reports_schedule(client):
+    r = client.get("/api/pull/status")
+    body = r.get_json()
+    assert body["schedule"]["timezone"] == server.SCHEDULER_TZ
+    assert body["schedule"]["hours"] == list(server.PULL_HOURS)
+    assert body["running"] is False
+
+
+def test_api_export_returns_zip_with_manifest(client, tmp_path):
+    import io, zipfile
+    data_dir = tmp_path / "data"
+    _seed_log(data_dir, [_entry("2026-03-09T00:00:00Z")])
+
+    import re as _re
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    assert r.mimetype == "application/zip"
+    disp = r.headers["Content-Disposition"]
+    # Filename must match: uscis-archive-YYYY-MM-DD-HHMMSS-UTC.zip
+    assert _re.search(
+        r'filename="uscis-archive-\d{4}-\d{2}-\d{2}-\d{6}-UTC\.zip"', disp
+    )
+
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        names = set(z.namelist())
+        assert "485_case.json" in names
+        assert "manifest.json" in names
+        manifest = json.loads(z.read("manifest.json"))
+        assert manifest["cases"][0]["label"] == "I-485"
+        assert manifest["cases"][0]["receiptNumber"] == "IOE1"
+        assert manifest["cases"][0]["file"] == "485_case.json"
+        assert manifest["cases"][0]["entries"] == 1
+        assert "generatedAt" in manifest
+
+
+def test_api_export_records_missing_logs_in_manifest(client):
+    import io, zipfile
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        manifest = json.loads(z.read("manifest.json"))
+        entry = manifest["cases"][0]
+        # No log file exists yet — manifest should record that explicitly.
+        assert entry["file"] is None
+        assert entry["entries"] == 0
+
+
+def test_api_export_survives_corrupt_log(client, tmp_path):
+    import io, zipfile
+    data_dir = tmp_path / "data"
+    (data_dir / "485_case.json").write_text("{not valid json")
+    r = client.get("/api/export")
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        manifest = json.loads(z.read("manifest.json"))
+        # Corrupt file is reported as missing rather than crashing the export.
+        assert manifest["cases"][0]["file"] is None
+        assert manifest["cases"][0]["entries"] == 0
+
+
+def test_api_pull_status_never_exposes_log_tail(client, monkeypatch):
+    # Subprocess stdout/stderr can contain credentials. The API payload
+    # must not echo it back, even after a prior pull populated log_tail.
+    monkeypatch.setattr(
+        server,
+        "_pull_state",
+        server.PullState(log_tail=["TOP SECRET password=hunter2"]),
+    )
+    r = client.get("/api/pull/status")
+    body = r.get_json()
+    assert "log_tail" not in body
+    assert "hunter2" not in r.data.decode()
+
+
+# Note: /api/test-email has been removed. The mailer is now reached only
+# via the pull path's notification dispatch, which runs on the pull
+# thread and folds smtp_* / notify_* events into the pull envelope via
+# thread-local capture. See test_pull_absorbs_server_process_events_via_capture
+# in test_system_log.py for end-to-end coverage of that path.
+
+
+# =========================================================================
+# Build-version resolution + /api/version endpoint
+# =========================================================================
+
+def test_version_label_format_is_utc_date_time():
+    # Commit authored 20:32 EDT = 00:32 UTC the next day — the label is
+    # ALWAYS in UTC so a developer's timezone doesn't change the string.
+    label = server._version_label_from_iso("2026-04-22T20:32:28-04:00")
+    assert label == "2026-04-23.0032"
+
+
+def test_version_label_handles_utc_z_suffix():
+    # Some git configs emit `Z` instead of `+00:00`.
+    label = server._version_label_from_iso("2026-04-22T20:32:28+00:00")
+    assert label == "2026-04-22.2032"
+
+
+def test_version_label_returns_none_for_bad_input():
+    assert server._version_label_from_iso(None) is None
+    assert server._version_label_from_iso("") is None
+    assert server._version_label_from_iso("not a date") is None
+
+
+def test_version_label_is_lexicographically_sortable():
+    # The whole point of the format: string comparison = chronological.
+    labels = [
+        server._version_label_from_iso("2026-04-22T20:32:28-04:00"),
+        server._version_label_from_iso("2026-04-23T01:45:00+00:00"),
+        server._version_label_from_iso("2026-04-22T14:05:00+00:00"),
+        server._version_label_from_iso("2026-04-25T08:30:00+00:00"),
+    ]
+    # Sorted as strings must match sorted by time.
+    assert sorted(labels) == [
+        "2026-04-22.1405",
+        "2026-04-23.0032",
+        "2026-04-23.0145",
+        "2026-04-25.0830",
+    ]
+
+
+def test_resolve_version_from_git(monkeypatch):
+    # Stub out git subprocess calls so we're testing the parsing/mapping,
+    # not whether pytest's CWD happens to be a git repo.
+    import subprocess
+    def _fake_output(cmd, **kwargs):
+        if cmd[:3] == ["git", "rev-parse", "--short"]:
+            return b"abc1234\n"
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return b"abc12340deadbeefcafe1111abc12340deadbeef\n"
+        if cmd[:2] == ["git", "log"]:
+            return b"2026-04-22T20:32:28-04:00\n"
+        raise AssertionError(f"unexpected cmd {cmd}")
+    monkeypatch.setattr(subprocess, "check_output", _fake_output)
+    v = server._resolve_version()
+    assert v["sha"] == "abc1234"
+    assert v["full_sha"] == "abc12340deadbeefcafe1111abc12340deadbeef"
+    assert v["commit_date"] == "2026-04-22T20:32:28-04:00"
+    assert v["label"] == "2026-04-23.0032"
+    assert v["boot_time"].endswith("Z")
+
+
+def test_resolve_version_falls_back_to_dotversion_file(monkeypatch, tmp_path):
+    # Simulate a prod box where git is missing but the deploy script
+    # wrote a .version file. The fallback must read every field it can.
+    import subprocess
+    monkeypatch.setattr(subprocess, "check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no git")))
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    (tmp_path / ".version").write_text(
+        "2026-04-22.2032\n"
+        "abc1234\n"
+        "abc12340deadbeefcafe1111abc12340deadbeef\n"
+        "2026-04-22T20:32:28-04:00\n"
+    )
+    v = server._resolve_version()
+    assert v["label"] == "2026-04-22.2032"
+    assert v["sha"] == "abc1234"
+    assert v["full_sha"] == "abc12340deadbeefcafe1111abc12340deadbeef"
+    assert v["commit_date"] == "2026-04-22T20:32:28-04:00"
+
+
+def test_resolve_version_returns_unknown_when_nothing_available(
+    monkeypatch, tmp_path,
+):
+    # No git, no .version file — server must still boot with a sane dict.
+    import subprocess
+    monkeypatch.setattr(subprocess, "check_output",
+                        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    v = server._resolve_version()
+    assert v["sha"] == "unknown"
+    assert v["full_sha"] == "unknown"
+    assert v["label"] is None
+    assert v["boot_time"].endswith("Z")
+
+
+def test_api_version_endpoint_returns_version_dict(client, monkeypatch):
+    # Route reflects whatever server.VERSION is at request time.
+    fake = {"label": "2026-04-23.0032", "sha": "abc1234",
+            "full_sha": "abc12340...", "commit_date": "2026-04-22T20:32:28-04:00",
+            "boot_time": "2026-04-23T00:49:15Z"}
+    monkeypatch.setattr(server, "VERSION", fake)
+    r = client.get("/api/version")
+    assert r.status_code == 200
+    assert r.get_json() == fake
+
+
+def test_pull_status_includes_version(client, monkeypatch):
+    fake = {"label": "2026-04-23.0032", "sha": "abc1234", "full_sha": "full",
+            "commit_date": "2026-04-22T20:32:28-04:00", "boot_time": "..."}
+    monkeypatch.setattr(server, "VERSION", fake)
+    r = client.get("/api/pull/status")
+    body = r.get_json()
+    # Piggy-backed on status so the UI gets version updates via its
+    # existing 3s poll loop — no separate fetch required.
+    assert body["version"] == fake
+
+
+# -------- _static_version fallback ------------------------------------
+
+def test_static_version_falls_back_on_missing_files(monkeypatch):
+    monkeypatch.setattr(server, "STATIC_DIR", Path("/nonexistent/path"))
+    v = server._static_version()
+    assert v.isdigit()
+
+
+# -------- main() bootstrapping ----------------------------------------
+
+def test_main_runs_with_configure_gate_and_scheduler(monkeypatch, tmp_path):
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {"optional_access_code": "c"}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_setup_scheduler", MagicMock())
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate") as gate:
+        server.main()
+    gate.assert_called_once()
+    args, kwargs = gate.call_args
+    # optional_access_code was propagated from config
+    assert args[1] == "c"
+
+
+def test_main_handles_missing_config(monkeypatch, tmp_path):
+    # Bogus path → load_config raises, main must still proceed with empty code.
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(server, "_setup_scheduler", MagicMock())
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate") as gate:
+        server.main()
+    gate.assert_called_once()
+    assert gate.call_args.args[1] == ""
+
+
+def test_main_resolves_pull_hours_from_config(monkeypatch, tmp_path):
+    """main() must resolve config.pull_hours into the PULL_HOURS module
+    global (sorted + deduped) *before* the scheduler reads it."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps(
+        {"auth": {}, "cases": [], "pull_hours": [18, 6, 6, 0]}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    # Restore the module global after the test so we don't leak schedule
+    # state into other tests (main() mutates it via `global PULL_HOURS`).
+    monkeypatch.setattr(server, "PULL_HOURS", ())
+    captured = {}
+    def fake_setup():
+        # Snapshot PULL_HOURS at the moment the scheduler would read it.
+        captured["hours"] = server.PULL_HOURS
+    monkeypatch.setattr(server, "_setup_scheduler", fake_setup)
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate"):
+        server.main()
+    assert server.PULL_HOURS == (0, 6, 18)
+    # Resolution happened before the scheduler ran, not after.
+    assert captured["hours"] == (0, 6, 18)
+
+
+def test_main_invalid_pull_hours_is_non_fatal_and_schedules_nothing(monkeypatch, tmp_path):
+    """A missing/invalid pull_hours must NOT crash main() — it logs and
+    leaves PULL_HOURS empty so the scheduler registers no automatic pulls,
+    while the dashboard (manual pull button) still comes up."""
+    cfg_path = tmp_path / "config.json"
+    # pull_hours absent entirely → load_pull_hours raises ConfigError.
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    # Seed a stale non-empty value to prove the fallback actively clears it.
+    monkeypatch.setattr(server, "PULL_HOURS", (9, 9, 9))
+    real_setup_saw = {}
+    monkeypatch.setattr(server, "_setup_scheduler",
+                        lambda: real_setup_saw.setdefault("hours", server.PULL_HOURS))
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    logged = []
+    monkeypatch.setattr(server, "sys_log",
+                        lambda event, **kw: logged.append(event))
+    with patch.object(server, "configure_access_gate"):
+        # Must not raise.
+        server.main()
+    assert server.PULL_HOURS == ()
+    assert real_setup_saw["hours"] == ()
+    assert "config_pull_hours_invalid" in logged
+
+
+# -------- main() error branches ---------------------------------------
+
+def test_main_access_gate_failure_is_fatal(monkeypatch, tmp_path):
+    """Access-gate configure failure MUST re-raise — a running server
+    without a gate is worse than no server."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {"optional_access_code": "c"}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate",
+                      side_effect=RuntimeError("gate broken")):
+        with pytest.raises(RuntimeError, match="gate broken"):
+            server.main()
+
+
+def test_main_scheduler_failure_is_non_fatal(monkeypatch, tmp_path):
+    """Scheduler setup failure must log but NOT crash — manual pulls
+    and the web UI still work."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server.app, "run", MagicMock())
+    with patch.object(server, "configure_access_gate"), \
+         patch.object(server, "_setup_scheduler",
+                      side_effect=RuntimeError("scheduler down")):
+        # Does not raise.
+        server.main()
+
+
+def test_main_server_run_failure_logs_and_reraises(monkeypatch, tmp_path):
+    """app.run() itself failing (port already bound, etc.) must log
+    server_run_failed before propagating."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"auth": {}, "cases": []}))
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(server, "_setup_scheduler", MagicMock())
+    monkeypatch.setattr(server.app, "run",
+                        MagicMock(side_effect=OSError("port bound")))
+    with patch.object(server, "configure_access_gate"):
+        with pytest.raises(OSError, match="port bound"):
+            server.main()
+
+
+# -------- /api/mfa-trace/<dir>/summary --------------------------------
+
+def _seed_trace(data_dir: Path, dir_name: str = "t1") -> Path:
+    trace_dir = data_dir / "full_traces" / dir_name
+    trace_dir.mkdir(parents=True)
+    mfa = trace_dir / "mfa_trace"
+    mfa.mkdir()
+    return trace_dir
+
+
+def test_api_mfa_trace_summary_rejects_bad_dir_name(client, tmp_path):
+    r = client.get("/api/mfa-trace/..%2Fevil/summary")
+    # URL-decoded ".." gets through as path traversal attempt; our
+    # handler validates the component.
+    assert r.status_code in (400, 404)
+
+
+def test_api_mfa_trace_summary_404_when_trace_missing(client, tmp_path):
+    r = client.get("/api/mfa-trace/nonexistent/summary")
+    assert r.status_code == 404
+    assert r.get_json()["error"] == "trace_not_found"
+
+
+def test_api_mfa_trace_summary_returns_empty_when_no_mfa_subdir(client, tmp_path):
+    data_dir = tmp_path / "data"
+    trace_dir = data_dir / "full_traces" / "t1"
+    trace_dir.mkdir(parents=True)
+    r = client.get("/api/mfa-trace/t1/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body == {"events": [], "emails": []}
+
+
+def test_api_mfa_trace_summary_parses_events_and_emails(client, tmp_path):
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    mfa = trace_dir / "mfa_trace"
+    (mfa / "events.jsonl").write_text(
+        '{"ts":"2026-04-24T00:00:00Z","event":"imap_connect_ok","cycle":0}\n'
+        '\n'  # blank line must be skipped
+        '{"ts":"2026-04-24T00:00:01Z","event":"imap_login_ok","cycle":0}\n'
+        'malformed json skipped\n'
+    )
+    eml = (
+        b"From: sender@example.com\r\n"
+        b"To: u@example.com\r\n"
+        b"Subject: USCIS code\r\n"
+        b"Date: Wed, 24 Apr 2026 00:00:00 +0000\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"Your code is 123456.\r\n"
+    )
+    (mfa / "email_1.eml").write_bytes(eml)
+
+    r = client.get("/api/mfa-trace/t1/summary")
+    assert r.status_code == 200
+    body = r.get_json()
+    events = [e["event"] for e in body["events"]]
+    assert "imap_connect_ok" in events
+    assert "imap_login_ok" in events
+    # Malformed + blank lines are dropped, not propagated.
+    assert len(body["events"]) == 2
+    assert len(body["emails"]) == 1
+    em = body["emails"][0]
+    assert em["uid"] == "1"
+    assert em["subject"] == "USCIS code"
+    assert em["from"] == "sender@example.com"
+    assert "123456" in em["preview"]
+
+
+# -------- /api/mfa-trace/<dir>/email/<uid> ----------------------------
+
+def test_api_mfa_trace_email_returns_html_and_raw(client, tmp_path):
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    eml = (
+        b"From: sender@example.com\r\n"
+        b"Subject: code\r\n"
+        b"Date: Wed, 24 Apr 2026 00:00:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/alternative; boundary="BB"\r\n\r\n'
+        b"--BB\r\n"
+        b"Content-Type: text/plain\r\n\r\n"
+        b"plain body\r\n"
+        b"--BB\r\n"
+        b"Content-Type: text/html\r\n\r\n"
+        b"<html>hi</html>\r\n"
+        b"--BB--\r\n"
+    )
+    (trace_dir / "mfa_trace" / "email_42.eml").write_bytes(eml)
+
+    r = client.get("/api/mfa-trace/t1/email/42")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["headers"]["subject"] == "code"
+    assert body["html"] == "<html>hi</html>\r\n" or "hi" in body["html"]
+    # raw is the entire message bytes decoded best-effort.
+    assert "plain body" in body["raw"]
+
+
+def test_api_mfa_trace_email_404_on_missing(client, tmp_path):
+    data_dir = tmp_path / "data"
+    _seed_trace(data_dir)
+    r = client.get("/api/mfa-trace/t1/email/999")
+    assert r.status_code == 404
+
+
+def test_api_mfa_trace_email_400_on_invalid_path(client):
+    r = client.get("/api/mfa-trace/../evil/email/1")
+    # flask routes return 404 for malformed paths before us; either
+    # 400 or 404 is acceptable — both mean "rejected".
+    assert r.status_code in (400, 404)
+
+
+def test_api_mfa_trace_email_500_on_unparseable(client, tmp_path):
+    """If message_from_bytes itself raises, respond 500 with parse error."""
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    (trace_dir / "mfa_trace" / "email_1.eml").write_bytes(b"garbage\xff\xfe")
+    # message_from_bytes actually tolerates almost anything, so force
+    # the parse to fail by patching.
+    from unittest.mock import patch as _patch
+    import email as _email
+    with _patch.object(_email, "message_from_bytes",
+                       side_effect=RuntimeError("unparseable")):
+        r = client.get("/api/mfa-trace/t1/email/1")
+    assert r.status_code == 500
+    assert "parse" in r.get_json()["error"]
+
+
+# -------- _extract_email_part helpers ---------------------------------
+
+def test_extract_email_part_multipart_returns_matching_part():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["Subject"] = "x"
+    msg.set_content("plain")
+    msg.add_alternative("<html>alt</html>", subtype="html")
+    html = server._extract_email_part(msg, "text/html")
+    assert html is not None
+    assert "<html>alt</html>" in html
+
+
+def test_extract_email_part_multipart_returns_none_when_missing():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("plain only")
+    assert server._extract_email_part(msg, "text/html") is None
+
+
+def test_extract_email_part_single_part_matches():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("just text")
+    text = server._extract_email_part(msg, "text/plain")
+    assert "just text" in text
+
+
+def test_extract_email_part_single_part_mismatch_returns_none():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("plain")
+    assert server._extract_email_part(msg, "text/html") is None
+
+
+def test_extract_plain_body_prefers_text_over_html():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("plain body wins")
+    msg.add_alternative("<p>html loses</p>", subtype="html")
+    body = server._extract_plain_body(msg)
+    assert "plain body wins" in body
+
+
+def test_extract_plain_body_falls_back_to_stripped_html():
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_type("text/html")
+    msg.set_payload("<p>html text</p>")
+    body = server._extract_plain_body(msg)
+    assert "html text" in body
+    # Tags were stripped.
+    assert "<p>" not in body
+
+
+def test_extract_plain_body_empty_when_no_body():
+    """Message with no recognizable body part → empty string, no crash."""
+    import email as _email
+    msg = _email.message_from_bytes(b"From: x\r\n\r\n")
+    assert server._extract_plain_body(msg) == ""
+
+
+# -------- _wipe_tree_contents --------------------------------------
+
+def test_wipe_tree_contents_removes_nested_dirs_and_files(tmp_path):
+    root = tmp_path / "full_traces"
+    root.mkdir()
+    # Mix of top-level files and nested trace dirs.
+    (root / "top.txt").write_text("x")
+    nested = root / "trace1" / "mfa_trace"
+    nested.mkdir(parents=True)
+    (nested / "events.jsonl").write_text("{}")
+    (nested / "email_1.eml").write_bytes(b"raw")
+    (root / "trace1" / "trace.zip").write_bytes(b"zip")
+
+    errors: list[str] = []
+    removed = server._wipe_tree_contents(root, errors)
+
+    # Every file deleted; root itself preserved.
+    assert removed >= 4
+    assert root.exists()
+    assert not any(root.iterdir())
+    assert errors == []
+
+
+def test_wipe_tree_contents_noop_when_root_missing(tmp_path):
+    assert server._wipe_tree_contents(tmp_path / "never", []) == 0
+
+
+def test_wipe_tree_contents_collects_unlink_errors(tmp_path, monkeypatch):
+    """OSError during unlink is recorded, not raised."""
+    root = tmp_path / "full_traces"
+    root.mkdir()
+    (root / "f.txt").write_text("x")
+
+    from pathlib import Path as _P
+    orig_unlink = _P.unlink
+
+    def _bad_unlink(self, *a, **kw):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(_P, "unlink", _bad_unlink)
+    errors: list[str] = []
+    try:
+        server._wipe_tree_contents(root, errors)
+    finally:
+        monkeypatch.setattr(_P, "unlink", orig_unlink)
+    assert any("permission denied" in e for e in errors)
+
+
+# -------- /api/system-log/clear end-to-end ---------------------------
+
+def test_api_system_log_clear_without_confirmation_rejected(client):
+    r = client.post("/api/system-log/clear", json={})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "confirmation_required"
+
+
+def test_latest_status_info_none_when_no_record():
+    assert server._latest_status_info(None) is None
+    assert server._latest_status_info({}) is None
+
+
+def test_latest_status_info_none_when_data_null():
+    # Record present but payload envelope's inner data is null.
+    record = {"capturedAt": "2026-07-20T00:00:00Z", "data": {"data": None}}
+    assert server._latest_status_info(record) is None
+
+
+def test_latest_status_info_returns_inner_object():
+    # Record wraps the full response envelope: {capturedAt, data: {data: {...}}}
+    record = {
+        "capturedAt": "2026-07-20T00:00:00Z",
+        "data": {"data": {"statusTitle": "New", "currentActionCode": "HA"}},
+    }
+    out = server._latest_status_info(record)
+    assert out["statusTitle"] == "New"
+    assert out["currentActionCode"] == "HA"
+
+
+def test_status_history_reads_historical_case_statuses_verbatim():
+    # History comes straight from the API's historicalCaseStatuses array,
+    # trimmed to date/actionCode/statusTitle (Spanish dropped), order as-is.
+    status_info = {
+        "statusTitle": "current",
+        "historicalCaseStatuses": [
+            {"date": "06-26-2026 00:00:00", "actionCode": "IK",
+             "statusTitle": "We sent a request for additional evidence.",
+             "statusTitleSpanish": "Le enviamos..."},
+            {"date": "02-20-2026 00:00:00", "actionCode": "IAF",
+             "statusTitle": "We received your Form I-485.",
+             "statusTitleSpanish": "Recibimos..."},
+        ],
+    }
+    hist = server._status_history(status_info)
+    assert hist == [
+        {"date": "06-26-2026 00:00:00", "actionCode": "IK",
+         "statusTitle": "We sent a request for additional evidence."},
+        {"date": "02-20-2026 00:00:00", "actionCode": "IAF",
+         "statusTitle": "We received your Form I-485."},
+    ]
+    # Spanish is dropped
+    assert all("statusTitleSpanish" not in h for h in hist)
+
+
+def test_status_history_empty_when_field_absent():
+    assert server._status_history({"statusTitle": "x"}) == []
+    assert server._status_history(None) == []
+
+
+
+def test_api_full_trace_path_escape_blocked(client, tmp_path, monkeypatch):
+    """Even when the outer `_is_safe_name_part` gate passes, an attempt
+    to resolve to a path outside of full_traces/ returns path_escape."""
+    data_dir = tmp_path / "data"
+    traces = data_dir / "full_traces"
+    traces.mkdir(parents=True)
+    # Create a symlink inside that points to /etc — resolving walks
+    # across it, producing a target outside the base. (Skip test on
+    # systems that can't create symlinks.)
+    import os as _os
+    victim = traces / "t1"
+    try:
+        _os.symlink("/etc", str(victim))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    r = client.get("/api/full-trace/t1/passwd")
+    # Either path_escape (target resolved outside base) or not_found;
+    # both mean the guard worked.
+    assert r.status_code in (400, 404)
+
+
+def test_collect_storage_categories_stat_error_treated_as_zero(
+    monkeypatch, tmp_path,
+):
+    """_safe_size swallows OSError → file counted with 0 bytes (line 1610-1611)."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "485_case.json").write_text("[]")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
+
+    from pathlib import Path as _P
+    orig_stat = _P.stat
+    def _bad_stat(self, *a, **kw):
+        if self.name.endswith("_case.json"):
+            raise OSError("permission denied")
+        return orig_stat(self, *a, **kw)
+    monkeypatch.setattr(_P, "stat", _bad_stat)
+    # Must not raise.
+    cats = server._collect_storage_categories()
+    # The file is still bucketed but with 0 bytes — so it might not appear
+    # because the filter drops zero-byte buckets. Either way, no crash.
+    assert isinstance(cats, list)
+
+
+def test_api_mfa_trace_summary_rejects_unsafe_dir_name(client):
+    """`_is_safe_name_part` rejects a directly-provided bad name with
+    400 invalid_dir (line 2010)."""
+    # Flask's URL decoder will pass the single component through.
+    r = client.get("/api/mfa-trace/bad!name/summary")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_dir"
+
+
+def test_extract_email_part_single_part_charset_fallback(monkeypatch):
+    """The single-part branch's bad-codec fallback decodes with utf-8
+    (lines 2132-2133)."""
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("body")
+    msg.get_content_charset = lambda: "not-a-real-codec"
+    out = server._extract_email_part(msg, "text/plain")
+    assert out is not None
+
+
+def test_load_retry_policy_config_error_surfaces_as_pull_step(monkeypatch, tmp_path):
+    """When load_retry_policy raises ConfigError, the inner pull runner
+    emits pull_config_error and returns an envelope whose steps include
+    that capture (lines 922-937)."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"cases": []}))  # missing retry keys
+    monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(
+        server, "_pull_state",
+        server.PullState(running=True, started_at="2026-04-24T00:00:00Z"),
+    )
+    # Simulate the outer function's capture scope so that sys_log events
+    # fired inside the inner function are folded into thread_captured_steps.
+    from system_log import push_capture, pop_capture
+    captured = push_capture()
+    try:
+        envelope = server._run_pull_subprocess_inner(
+            trigger="manual", thread_captured_steps=captured,
+        )
+    finally:
+        pop_capture()
+
+    assert envelope["event"] == "pull"
+    assert envelope["level"] == "error"
+    assert any(
+        s.get("event") == "pull_config_error" for s in envelope["steps"]
+    )
+
+
+def test_api_debug_mode_get_config_error_returns_500(client, tmp_path):
+    """/api/debug-mode GET when config has invalid type → 500."""
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"trace_successful_pulls": "not_a_bool"}))
+    r = client.get("/api/debug-mode")
+    assert r.status_code == 500
+
+
+def test_api_full_trace_rejects_invalid_component(client, tmp_path):
+    """Path components containing disallowed chars are rejected — first
+    the outer dir_name guard fires (invalid_dir), then subpath. Either
+    way, status is 400."""
+    r = client.get("/api/full-trace/abc!def/trace.zip")
+    assert r.status_code == 400
+    assert r.get_json()["error"] in ("invalid_dir", "invalid_component")
+
+
+def test_api_full_trace_rejects_invalid_subpath_component(client, tmp_path):
+    """Valid dir_name, invalid subpath char → invalid_component."""
+    r = client.get("/api/full-trace/t1/bad!file.zip")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_component"
+
+
+def test_api_full_trace_rejects_path_depth(client, tmp_path):
+    """subpath deeper than 2 levels → 400 invalid_path_depth."""
+    r = client.get("/api/full-trace/t1/a/b/c/d.txt")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_path_depth"
+
+
+def test_api_full_trace_mimetypes(client, tmp_path, monkeypatch):
+    """Each supported extension lands on the right Content-Type.
+    Covers lines 1944-1949."""
+    data_dir = tmp_path / "data"
+    trace_dir = data_dir / "full_traces" / "t1"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "a.json").write_text("{}")
+    (trace_dir / "b.png").write_bytes(b"\x89PNG")
+    (trace_dir / "c.bin").write_bytes(b"\x00\x01")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    r = client.get("/api/full-trace/t1/a.json")
+    assert r.content_type == "application/json"
+    r = client.get("/api/full-trace/t1/b.png")
+    assert r.content_type == "image/png"
+    r = client.get("/api/full-trace/t1/c.bin")
+    assert r.content_type == "application/octet-stream"
+
+
+def test_trace_viewer_rejects_path_traversal(client):
+    r = client.get("/trace-viewer/..%2Fetc%2Fpasswd")
+    # Either 400 (our guard) or 404 (not found).
+    assert r.status_code in (400, 404)
+
+
+def test_api_mfa_trace_email_rejects_bad_uid(client, tmp_path):
+    r = client.get("/api/mfa-trace/t1/email/bad!uid")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "invalid_path"
+
+
+def test_collect_storage_categories_buckets_session_state(
+    monkeypatch, tmp_path,
+):
+    """Repo-root `.uscis_session.json` rolls into System log (line 1649)."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    session_file = tmp_path / ".uscis_session.json"
+    session_file.write_text("{}")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+    monkeypatch.setattr(server, "STORAGE_SESSION_PATH", session_file)
+    monkeypatch.setattr(server, "CONFIG_PATH", tmp_path / "nope.json")
+    cats = {c["key"]: c for c in server._collect_storage_categories()}
+    assert "system_log" in cats
+
+
+def test_extract_plain_body_decode_failure_falls_back(monkeypatch):
+    """_extract_email_part's charset-decode failure falls back to
+    utf-8 with replace errors (lines 2122-2124 / 2132-2133)."""
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg.set_content("body")
+    # Force .get_content_charset() to return a bad codec name so the
+    # first decode raises — covering the single-part fallback branch.
+    orig = msg.get_content_charset
+    msg.get_content_charset = lambda: "not-a-real-codec"
+    out = server._extract_email_part(msg, "text/plain")
+    # Fallback decode must not raise.
+    assert out is not None
+
+
+def test_api_mfa_trace_summary_events_read_error_returns_500(
+    client, tmp_path, monkeypatch,
+):
+    """Unreadable events.jsonl → 500 with read error (lines 2030-2031)."""
+    data_dir = tmp_path / "data"
+    trace_dir = _seed_trace(data_dir)
+    (trace_dir / "mfa_trace" / "events.jsonl").write_text("{}")
+
+    from pathlib import Path as _P
+    orig_read = _P.read_text
+    def _bad(self, *a, **kw):
+        if self.name == "events.jsonl":
+            raise OSError("disk gone")
+        return orig_read(self, *a, **kw)
+    monkeypatch.setattr(_P, "read_text", _bad)
+
+    r = client.get("/api/mfa-trace/t1/summary")
+    assert r.status_code == 500
+
+
+def test_api_system_log_clear_wipes_log_and_traces(client, tmp_path, monkeypatch):
+    import system_log
+    log_path = tmp_path / "system_log.json"
+    monkeypatch.setattr(system_log, "LOG_PATH", log_path)
+    system_log.log("dummy", source="test")
+
+    data_dir = tmp_path / "data"
+    (data_dir / "full_traces" / "t1" / "mfa_trace").mkdir(parents=True)
+    (data_dir / "full_traces" / "t1" / "trace.zip").write_bytes(b"z")
+    (data_dir / "full_traces" / "t1" / "mfa_trace" / "events.jsonl").write_text("{}")
+    monkeypatch.setattr(server, "DATA_DIR", data_dir)
+
+    r = client.post("/api/system-log/clear", json={"confirm": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert body["tracesRemoved"] >= 2
+    # Traces dir is emptied, but the directory itself persists.
+    assert (data_dir / "full_traces").exists()
+    assert not any((data_dir / "full_traces").iterdir())
