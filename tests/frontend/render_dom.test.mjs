@@ -168,7 +168,7 @@ if (!JSDOM) {
     assert.equal(a.getAttribute("rel"), "noopener noreferrer");
     assert.equal(
       a.getAttribute("title"),
-      "Link to USCIS API link with raw json response, login required",
+      "Link to USCIS API link with raw json response, USCIS account login required",
     );
   });
 
@@ -199,7 +199,7 @@ if (!JSDOM) {
     assert.equal(btn.getAttribute("href"), null, "must not expose a URL attribute");
     assert.ok(!btn.outerHTML.includes("MASKED"), "masked receipt must not leak into the DOM");
     assert.equal(btn.getAttribute("title"),
-      "Link to USCIS API link with raw json response, login required");
+      "Link to USCIS API link with raw json response, USCIS account login required");
   });
 
   test("apiLinkButton returns null while redacted without a label", () => {
