@@ -22,6 +22,80 @@ const state = {
   accessLockout: false,    // when true, the server gates the site behind the admin-password login
 };
 
+// USCIS API endpoints, mirroring the ones the backend pulls from
+// (uscis_status.py → case_status, uscis_api.py → cases). Each returns raw
+// JSON and requires an authenticated my.uscis.gov session in the browser.
+const USCIS_API = {
+  status: (receipt) =>
+    `https://my.uscis.gov/account/case-service/api/case_status/${encodeURIComponent(receipt)}`,
+  case: (receipt) =>
+    `https://my.uscis.gov/account/case-service/api/cases/${encodeURIComponent(receipt)}`,
+};
+
+// Small "API" pill linking to the raw USCIS endpoint a section is sourced
+// from. `kind` is "status" or "case".
+//
+// Normal mode: a plain <a> to the endpoint (receipt is not secret), opens in
+// a new tab. Redaction mode: the receipt is masked server-side, so a client-
+// built URL would carry the masked number and be useless. Instead the pill
+// becomes a locked control that, on click, asks for the admin password and
+// resolves the true URL via /api/case-api-link, then opens it. Returns null
+// when there's nothing to link to.
+function apiLinkButton(receipt, kind, label) {
+  const TOOLTIP = "Link to USCIS API link with raw json response, login required";
+
+  if (state.redacted === true) {
+    // Locked variant — the real receipt lives only on the server now.
+    if (!label) return null;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "api-link api-link-locked";
+    btn.textContent = "API";
+    btn.title = TOOLTIP;
+    btn.setAttribute("aria-label", btn.title);
+    btn.dataset.guard = "redaction";
+    btn.addEventListener("click", () => resolveAndOpenApiLink(btn, kind, label));
+    return btn;
+  }
+
+  if (!receipt) return null;
+  const href = (USCIS_API[kind] || USCIS_API.case)(receipt);
+  const a = document.createElement("a");
+  a.className = "api-link";
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = "API";
+  a.title = TOOLTIP;
+  a.setAttribute("aria-label", a.title);
+  return a;
+}
+
+// Redaction-mode click handler for a locked API pill: prompt for the admin
+// password, ask the server for the true URL, and open it in a new tab. The
+// server only unmasks the receipt for a valid password (see /api/case-api-link).
+async function resolveAndOpenApiLink(btn, kind, label) {
+  const pw = await adminChallenge({ action: "open the USCIS API link" });
+  if (pw === null) return;  // cancelled
+  try {
+    const res = await fetch("/api/case-api-link", withAdminHeader({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label, kind }),
+    }, pw));
+    if (res.status === 401) { toast("Wrong password — link locked.", "bad"); return; }
+    if (res.status === 429) { toast("Too many attempts — try again shortly.", "bad"); return; }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.ok || !data.url) throw new Error(data.error || "no_url");
+    // Open in a new tab. window.open keeps us on the dashboard.
+    window.open(data.url, "_blank", "noopener,noreferrer");
+  } catch (e) {
+    toast(`Couldn't open API link: ${e.message}`, "bad");
+  }
+}
+
+
 // ---------- redaction (share/screenshot privacy mode) ----------
 //
 // Client-side masking so the dashboard can be screenshotted or screen-shared
@@ -1332,8 +1406,12 @@ function renderOverview(panel, c) {
     block.className = "status-block";
 
     const head = document.createElement("div");
-    head.className = "status-head";
-    head.textContent = "Current Status";
+    head.className = "status-head section-head-row";
+    const headLabel = document.createElement("span");
+    headLabel.textContent = "Current Status";
+    head.appendChild(headLabel);
+    const statusApiBtn = apiLinkButton(c.receiptNumber, "status", c.label);
+    if (statusApiBtn) head.appendChild(statusApiBtn);
     block.appendChild(head);
 
     block.appendChild(buildStatusBody(st));
@@ -3058,8 +3136,12 @@ function renderObservedEventCodes(c) {
   section.className = "events-section";
 
   const heading = document.createElement("h4");
-  heading.className = "events-heading";
-  heading.textContent = "Timeline";
+  heading.className = "events-heading section-head-row";
+  const headingLabel = document.createElement("span");
+  headingLabel.textContent = "Timeline";
+  heading.appendChild(headingLabel);
+  const caseApiBtn = apiLinkButton(c.receiptNumber, "case", c.label);
+  if (caseApiBtn) heading.appendChild(caseApiBtn);
   section.appendChild(heading);
 
   const hist = state.histories[c.label];

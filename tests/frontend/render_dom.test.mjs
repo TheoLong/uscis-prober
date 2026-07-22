@@ -39,7 +39,7 @@ if (!JSDOM) {
     window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
     const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8") +
       "\n;window.__T = { state, REDACTION_MASK, renderCases, renderChanges, renderRaw," +
-      " _renderSubFacts };";
+      " _renderSubFacts, apiLinkButton, USCIS_API };";
     window.eval(src);
     return { window, doc: window.document, T: window.__T };
   }
@@ -150,5 +150,92 @@ if (!JSDOM) {
     T.renderRaw(panel2, caseFixture());
     assert.ok(panel2.querySelector("pre.raw").textContent.includes(RECEIPT));
     assert.ok([...panel2.querySelectorAll(".raw-actions .raw-btn")].every(b => !b.disabled));
+  });
+
+  // ---------- USCIS API link buttons ----------
+
+  test("apiLinkButton builds the case_status endpoint for the 'status' kind", () => {
+    const { T } = freshApp();
+    const a = T.apiLinkButton(RECEIPT, "status");
+    assert.ok(a, "button element returned");
+    assert.equal(a.tagName, "A");
+    assert.equal(a.textContent, "API");
+    assert.equal(
+      a.getAttribute("href"),
+      `https://my.uscis.gov/account/case-service/api/case_status/${RECEIPT}`,
+    );
+    assert.equal(a.getAttribute("target"), "_blank");
+    assert.equal(a.getAttribute("rel"), "noopener noreferrer");
+    assert.equal(
+      a.getAttribute("title"),
+      "Link to USCIS API link with raw json response, login required",
+    );
+  });
+
+  test("apiLinkButton builds the cases endpoint for the 'case' kind", () => {
+    const { T } = freshApp();
+    const a = T.apiLinkButton(RECEIPT, "case");
+    assert.equal(
+      a.getAttribute("href"),
+      `https://my.uscis.gov/account/case-service/api/cases/${RECEIPT}`,
+    );
+  });
+
+  test("apiLinkButton returns null without a receipt", () => {
+    const { T } = freshApp();
+    assert.equal(T.apiLinkButton("", "case"), null);
+    assert.equal(T.apiLinkButton(undefined, "status"), null);
+  });
+
+  test("apiLinkButton locks to a password-gated button while redacted", () => {
+    const { T } = freshApp();
+    T.state.redacted = true;
+    // Even with a (masked) receipt present, the redacted variant must NOT be a
+    // plain <a> carrying a URL — it's a locked <button> keyed by label.
+    const btn = T.apiLinkButton("MASKED", "case", "I-485");
+    assert.ok(btn, "locked button returned");
+    assert.equal(btn.tagName, "BUTTON");
+    assert.equal(btn.dataset.guard, "redaction");
+    assert.equal(btn.getAttribute("href"), null, "must not expose a URL attribute");
+    assert.ok(!btn.outerHTML.includes("MASKED"), "masked receipt must not leak into the DOM");
+    assert.equal(btn.getAttribute("title"),
+      "Link to USCIS API link with raw json response, login required");
+  });
+
+  test("apiLinkButton returns null while redacted without a label", () => {
+    const { T } = freshApp();
+    T.state.redacted = true;
+    assert.equal(T.apiLinkButton("MASKED", "case", ""), null);
+    assert.equal(T.apiLinkButton("MASKED", "status", undefined), null);
+  });
+
+  test("Timeline API link is a locked button (no URL) while redacted", () => {
+    const { doc, T } = freshApp();
+    T.state.cases = [caseFixture()];
+    T.state.activeTab[RECEIPT] = "overview";
+    T.state.histories["I-485"] = { entries: [], changes: [], links: [] };
+    T.state.redacted = true;
+    T.renderCases();
+    const el = doc.querySelector(".events-heading .api-link");
+    assert.ok(el, "Timeline heading still has an API pill");
+    assert.equal(el.tagName, "BUTTON");
+    assert.equal(el.getAttribute("href"), null);
+    assert.ok(!doc.getElementById("case-list").innerHTML.includes(RECEIPT),
+      "real receipt must not appear anywhere in the redacted card DOM");
+  });
+
+  test("Timeline heading carries a case-API link with the receipt", () => {
+    const { doc, T } = freshApp();
+    T.state.cases = [caseFixture()];
+    T.state.activeTab[RECEIPT] = "overview";
+    T.state.histories["I-485"] = { entries: [], changes: [], links: [] };
+    T.state.redacted = false;
+    T.renderCases();
+    const link = [...doc.querySelectorAll(".events-heading .api-link")][0];
+    assert.ok(link, "Timeline heading has an API link");
+    assert.equal(
+      link.getAttribute("href"),
+      `https://my.uscis.gov/account/case-service/api/cases/${RECEIPT}`,
+    );
   });
 }
