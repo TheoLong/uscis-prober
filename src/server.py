@@ -44,7 +44,6 @@ from access_gate import verify_code as _verify_code
 from diff_utils import (
     EVENT_CODE_LABELS,
     bin_by_day,
-    location_snapshot_changes,
     snapshot_changes,
     summarize_case,
 )
@@ -454,11 +453,6 @@ def _case_log_file_for(form_label: str) -> Path | None:
     return _log_path_for(form_label, suffix="_case.json")
 
 
-def _location_log_file_for(form_label: str) -> Path | None:
-    """Resolve the location-API snapshot-log path for a form label."""
-    return _log_path_for(form_label, suffix="_location.json")
-
-
 def _log_path_for(form_label: str, *, suffix: str) -> Path | None:
     m = _FORM_NUM_RE.search(form_label or "")
     if not m:
@@ -486,11 +480,6 @@ def load_case_entries(form_label: str) -> list[dict]:
     return _load_json_list(_case_log_file_for(form_label))
 
 
-def load_location_entries(form_label: str) -> list[dict]:
-    """Location-API snapshot history for a form label (oldest → newest)."""
-    return _load_json_list(_location_log_file_for(form_label))
-
-
 def _status_log_file_for(form_label: str) -> Path | None:
     """Resolve the latest-status file path for a form label."""
     return _log_path_for(form_label, suffix="_status.json")
@@ -499,7 +488,7 @@ def _status_log_file_for(form_label: str) -> Path | None:
 def load_status_latest(form_label: str) -> dict | None:
     """Load the latest status response for a form label.
 
-    Unlike the case/location logs, the status endpoint is not snapshotted:
+    Unlike the case log, the status endpoint is not snapshotted:
     the file holds a single `{capturedAt, data}` object (overwritten each
     pull), not a list. Returns that object, or None when absent/malformed.
     """
@@ -556,44 +545,6 @@ def _status_history(status_info: dict | None) -> list[dict]:
             "statusTitle": e.get("statusTitle"),
         })
     return history
-
-
-def _latest_location_payload(entries: list[dict]) -> dict | None:
-    """Return the most recent location API response body, or None.
-
-    Response envelope is `{"data": null}` or `{"data": {...}}`. We return
-    the full envelope (not the unwrapped `.data`) so the UI can
-    distinguish "USCIS returned null" from "we never fetched".
-    """
-    if not entries:
-        return None
-    return entries[-1].get("data")
-
-
-def _latest_location_info(entries: list[dict]) -> dict | None:
-    """Return the populated `receipt_details` object from the most recent
-    location snapshot, or None when USCIS is still returning null.
-
-    Live envelope shape from `/receipt_info/{receipt}`:
-      - unassigned: `{"data": null}`
-      - assigned:   `{"data": {"receipt_details": {form, location, subtype,
-                    receipt_date, ...}, "message": "..."}}`
-    """
-    payload = _latest_location_payload(entries)
-    if not isinstance(payload, dict):
-        return None
-    inner = payload.get("data")
-    if not isinstance(inner, dict) or not inner:
-        return None
-    details = inner.get("receipt_details")
-    if isinstance(details, dict) and details:
-        return details
-    # Fallback: some snapshots may already be unwrapped. Return `inner`
-    # as-is if it looks like a details record (has at least one of the
-    # known fields). This keeps older test fixtures working.
-    if any(k in inner for k in ("form", "location", "subtype")):
-        return inner
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -717,10 +668,8 @@ def _now_iso() -> str:
 def _all_update_records(config: dict | None = None) -> list[dict]:
     """Every diff across every configured case, same shape as /api/updates.
 
-    Includes both case-API diffs and location-API diffs (tagged via
-    `source`). IDs embed the source and the full capture timestamp so case
-    and location diffs — and multiple transitions on one case — produce
-    distinct records, critical for the "new since last pull"
+    IDs embed the full capture timestamp so multiple transitions on one case
+    produce distinct records, critical for the "new since last pull"
     email-notification snapshot set.
     """
     config = config or load_config()
@@ -728,11 +677,7 @@ def _all_update_records(config: dict | None = None) -> list[dict]:
     for c in config.get("cases", []):
         label = c["label"]
         receipt = c["id"]
-        merged = _merge_changes(
-            snapshot_changes(load_case_entries(label)),
-            location_snapshot_changes(load_location_entries(label)),
-        )
-        for change in merged:
+        for change in snapshot_changes(load_case_entries(label)):
             detected_on = (change.get("to") or "")[:10]
             source = change.get("source") or "case"
             real_update_date = (change.get("scalars") or {}).get("updatedAt", {}).get("to")
@@ -831,9 +776,7 @@ def _pull_summary_from_steps(steps: list[dict]) -> dict:
 
     return {
         "case_snapshots": _count("case_snapshot_appended"),
-        "location_snapshots": _count("location_snapshot_appended"),
         "case_fetch_failures": _count("case_fetch_api_error"),
-        "location_fetch_failures": _count("location_fetch_failed"),
         "new_diffs_emailed": _count("notify_sent"),
         "notify_failures": _count("notify_failed"),
         "session_expired_retries": _count("cli_run_session_expired_retry"),
@@ -1014,8 +957,8 @@ def _run_pull_subprocess_inner(
             "timed_out": False,
             "attempts": 0,
             "summary": {
-                "case_snapshots": 0, "location_snapshots": 0,
-                "case_fetch_failures": 0, "location_fetch_failures": 0,
+                "case_snapshots": 0,
+                "case_fetch_failures": 0,
                 "new_diffs_emailed": 0, "notify_failures": 0,
                 "session_expired_retries": 0, "attempts": 0,
             },
@@ -1562,10 +1505,6 @@ def api_cases():
         latest_data = (latest or {}).get("data") or {}
         summary = summarize_case(entries, today_iso=today) if entries else {}
 
-        location_entries = load_location_entries(c["label"])
-        location_info = _latest_location_info(location_entries)
-        last_location_entry = location_entries[-1] if location_entries else None
-
         status_record = load_status_latest(c["label"])
         status_info = _latest_status_info(status_record)
         status_block = None
@@ -1601,37 +1540,16 @@ def api_cases():
                 "latest": latest_data,
                 "summary": summary,
                 "status": status_block,
-                "location": {
-                    "info": location_info,            # populated inner data, or None
-                    "captures": len(location_entries),
-                    "capturedAt": (last_location_entry or {}).get("capturedAt"),
-                },
             }
         )
     return jsonify({"cases": cases, "eventCodeLabels": EVENT_CODE_LABELS})
-
-
-def _merge_changes(case_changes: list[dict], loc_changes: list[dict]) -> list[dict]:
-    """Interleave case and location change records in chronological order.
-
-    Both feeds already carry a `source` tag (`case` / `location`) so the
-    UI can style them distinctively. Sort key is the `to` timestamp —
-    the moment the diff was observed — newest last so callers that need
-    newest-first can `reversed()` once.
-    """
-    merged = list(case_changes) + list(loc_changes)
-    merged.sort(key=lambda c: c.get("to") or "")
-    return merged
 
 
 @app.route("/api/cases/<label>/history")
 def api_case_history(label: str):
     entries = load_case_entries(label)
     days = bin_by_day(entries)
-    location_entries = load_location_entries(label)
-    changes = _merge_changes(
-        snapshot_changes(entries), location_snapshot_changes(location_entries)
-    )
+    changes = snapshot_changes(entries)
     latest_events = (days[-1].get("data") or {}).get("events") if days else None
     links = _FAKE_LINKS_OVERRIDE.get(label)
     if links is None:
@@ -1641,9 +1559,8 @@ def api_case_history(label: str):
             "label": label,
             "entries": entries,         # all raw case-API captures
             "days": days,               # one entry per UTC day (latest of day)
-            "changes": changes,         # merged case + location diffs, chronological
+            "changes": changes,         # case diffs, chronological
             "links": links,             # re-emit links (or an inspection override)
-            "locationEntries": location_entries,  # raw location-API captures
         }
     )
 
@@ -1684,7 +1601,7 @@ def api_updates():
       - `id`            stable key `{receipt}:{source}:{toTimestamp}` (dedup / email tracking)
       - `caseLabel`     e.g. "I-485"
       - `receiptNumber`
-      - `source`        "case" | "location" (which endpoint produced the diff)
+      - `source`        `"case"`
       - `detectedOn`    day we observed this diff (YYYY-MM-DD)
       - `realUpdateDate`   actual updatedAt date post-change (may differ from detectedOn)
     Plus the original diff body (scalars / events / notices / documents / kind).
@@ -1733,21 +1650,6 @@ def api_export():
                 except (OSError, json.JSONDecodeError):
                     entries = []
                     arcname = None
-            # Location snapshot log (sibling file; may not exist yet)
-            lpath = _location_log_file_for(label)
-            location_entries: list = []
-            location_arcname: str | None = None
-            if lpath and lpath.exists():
-                try:
-                    raw = lpath.read_bytes()
-                    parsed = json.loads(raw) if raw else []
-                    if isinstance(parsed, list):
-                        location_entries = parsed
-                        location_arcname = lpath.name
-                        z.writestr(location_arcname, raw)
-                except (OSError, json.JSONDecodeError):
-                    location_entries = []
-                    location_arcname = None
 
             # Latest-status file (single {capturedAt, data} object, not a
             # list — the status endpoint is not snapshotted).
@@ -1771,8 +1673,6 @@ def api_export():
                 "receiptNumber": receipt,
                 "file": arcname,
                 "entries": len(entries),
-                "locationFile": location_arcname,
-                "locationEntries": len(location_entries),
                 "statusFile": status_arcname,
                 "statusPresent": status_present,
             })
@@ -1828,7 +1728,7 @@ def api_storage():
     })
 
 
-_CASE_FILE_RE = re.compile(r"^(\d+)_(case|location)\.json$")
+_CASE_FILE_RE = re.compile(r"^(\d+)_case\.json$")
 
 
 def _collect_storage_categories() -> list[dict]:
@@ -1836,10 +1736,9 @@ def _collect_storage_categories() -> list[dict]:
     file into one of a small set of categories. Returns a list sorted
     by bytes descending so the UI can display largest-first.
 
-    Case + location snapshots are grouped per form number into a
-    single bucket per case (e.g. `case_485` labelled "I-485") —
-    matching how an operator thinks about the data, not how it's
-    stored.
+    Case snapshots are grouped per form number into a single bucket per
+    case (e.g. `case_485` labelled "I-485") — matching how an operator
+    thinks about the data, not how it's stored.
     """
     buckets: dict[str, dict] = {}
 
@@ -2573,17 +2472,15 @@ def _recompute_diffs_at_startup(config: dict) -> dict:
             if not label:
                 continue
             case_changes = snapshot_changes(load_case_entries(label))
-            loc_changes = location_snapshot_changes(load_location_entries(label))
             cases_summary.append({
                 "label": label,
                 "case_changes": len(case_changes),
-                "location_changes": len(loc_changes),
             })
         sys_log("diff_recomputed", source="server", cases=cases_summary)
         logger.info(
             "Diff recomputed: %s",
             ", ".join(
-                f"{c['label']}=case:{c['case_changes']}+loc:{c['location_changes']}"
+                f"{c['label']}=case:{c['case_changes']}"
                 for c in cases_summary
             ) or "(no cases configured)",
         )

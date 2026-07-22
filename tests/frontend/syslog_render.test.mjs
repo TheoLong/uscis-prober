@@ -38,22 +38,22 @@ test("_syslogEventId() returns '' for an empty/missing event", () => {
 
 // ---------------- diff_recomputed.summarize (the one-line roll-up) ----------------
 
-test("summarize() sums case + location diffs into a single 'updates' total", () => {
+test("summarize() sums case diffs into a single 'updates' total", () => {
   const e = { cases: [
-    { label: "I-485", case_changes: 8, location_changes: 0 },
-    { label: "I-765", case_changes: 1, location_changes: 0 },
-    { label: "I-131", case_changes: 1, location_changes: 0 },
+    { label: "I-485", case_changes: 8 },
+    { label: "I-765", case_changes: 1 },
+    { label: "I-131", case_changes: 1 },
   ] };
   assert.equal(diffRecomputed().summarize(e), "3 cases · 10 updates");
 });
 
-test("summarize() counts location diffs in the total and singularizes correctly", () => {
+test("summarize() singularizes correctly", () => {
   assert.equal(
-    diffRecomputed().summarize({ cases: [{ label: "X", case_changes: 0, location_changes: 1 }] }),
+    diffRecomputed().summarize({ cases: [{ label: "X", case_changes: 1 }] }),
     "1 case · 1 update",
   );
   assert.equal(
-    diffRecomputed().summarize({ cases: [{ label: "X", case_changes: 2, location_changes: 3 }] }),
+    diffRecomputed().summarize({ cases: [{ label: "X", case_changes: 5 }] }),
     "1 case · 5 updates",
   );
 });
@@ -65,13 +65,13 @@ test("summarize() handles the empty and error cases", () => {
 
 // ---------------- diff_recomputed.renderContent (the per-case table) ----------------
 
-test("renderContent() renders one summed 'updates' total per case, no change columns", () => {
+test("renderContent() renders one 'updates' total per case, no change columns", () => {
   const html = diffRecomputed().renderContent({ cases: [
-    { label: "I-485", case_changes: 3, location_changes: 2 }, // total 5
-    { label: "I-131", case_changes: 0, location_changes: 0 }, // total 0
+    { label: "I-485", case_changes: 5 }, // total 5
+    { label: "I-131", case_changes: 0 }, // total 0
   ] });
   assert.match(html, /I-485/);
-  // 3 + 2 = 5 updates
+  // 5 updates
   assert.ok(
     html.includes('<span class="diffrc-num">5</span><span class="diffrc-unit">updates</span>'),
     "expected '5 updates' for I-485",
@@ -87,7 +87,7 @@ test("renderContent() renders one summed 'updates' total per case, no change col
 });
 
 test("renderContent() singularizes a total of exactly 1", () => {
-  const html = diffRecomputed().renderContent({ cases: [{ label: "I-765", case_changes: 1, location_changes: 0 }] });
+  const html = diffRecomputed().renderContent({ cases: [{ label: "I-765", case_changes: 1 }] });
   assert.ok(html.includes('<span class="diffrc-unit">update</span>'), "expected singular 'update'");
 });
 
@@ -112,7 +112,7 @@ test("flat row wires hideKeys + renderContent for a diff_recomputed entry", () =
     event: "diff_recomputed",
     level: "info",
     source: "server",
-    cases: [{ label: "I-485", case_changes: 8, location_changes: 0 }],
+    cases: [{ label: "I-485", case_changes: 8 }],
   });
   const html = block.innerHTML;
   // renderContent's per-case table is injected into the content band...

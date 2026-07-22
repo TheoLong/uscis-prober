@@ -125,8 +125,7 @@ def test_diff_recomputed_breakdown_styles_ship():
         ".diffrc-metric", ".diffrc-num", ".diffrc-unit",
     ):
         assert selector in STYLE_CSS, f"missing CSS for {selector}"
-    # The row grid is two columns now (label + single 'updates' metric),
-    # not the original three (case / location).
+    # The row grid is two columns: label + the 'updates' metric.
     row_block = STYLE_CSS[STYLE_CSS.find(".diffrc-row"):]
     row_block = row_block[: row_block.find("}")]
     grid = re.search(r"grid-template-columns:\s*([^;]+);", row_block)

@@ -64,7 +64,7 @@ if (!JSDOM) {
     // Render the raw tab (avoids the heavy Overview renderer) — header masking
     // is independent of the active panel.
     T.state.activeTab[RECEIPT] = "raw";
-    T.state.histories["I-485"] = { entries: [], locationEntries: [], changes: [] };
+    T.state.histories["I-485"] = { entries: [], changes: [] };
 
     T.state.redacted = false;
     T.renderCases();
@@ -127,7 +127,6 @@ if (!JSDOM) {
         receiptNumber: RECEIPT, applicantName: "DOE, JANE",
         representativeName: "SMITH, JOHN", formType: "I-485",
       } }],
-      locationEntries: [],
     };
     const panel = window.document.createElement("div");
 

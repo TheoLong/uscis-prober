@@ -693,9 +693,8 @@ body {
   line-height: 1.45;
 }
 /* Left-anchored variant: used when the trigger badge sits on the LEFT of
-   its container (e.g. the inline "Current location" row). The default
-   right-anchored placement would push the popover off the card/viewport
-   in that case. */
+   its container. The default right-anchored placement would push the
+   popover off the card/viewport in that case. */
 .info-popover.popover-left {
   right: auto;
   left: 0;
@@ -1081,9 +1080,9 @@ main[hidden] { display: none; }
 
 /* ---------- diff_recomputed per-case breakdown ----------
    Replaces a raw JSON dump of the `cases` array with a compact,
-   aligned mini-table: one row per case, mono label + two metric
-   columns (case changes / location changes). Zero-valued metrics
-   are dimmed so the eye lands on the cases that actually moved. */
+   aligned mini-table: one row per case, mono label + a metric
+   column (case changes). Zero-valued metrics are dimmed so the eye
+   lands on the cases that actually moved. */
 .diffrc-table {
   display: flex;
   flex-direction: column;
@@ -1699,77 +1698,6 @@ body.redaction-latched [data-guard="redaction"]::after {
 }
 .sub-fact-v.mono { font-family: var(--font-mono); font-size: 0.82rem; }
 
-/* ---------- current location row ---------- */
-.location-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-  padding: 10px 14px;
-  background: var(--pill-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-}
-.location-key {
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--muted-2);
-}
-.location-val {
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-  color: var(--text);
-  font-weight: 600;
-}
-.location-sub {
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-.location-tbd {
-  display: inline-block;
-  padding: 2px 8px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  background: var(--bg-elev-2);
-  border: 1px dashed var(--border);
-  border-radius: 999px;
-}
-.location-info-group {
-  position: relative;
-  display: inline-flex;
-}
-
-/* ---------- raw sub-source tabs (Case API / Location API) ---------- */
-.raw-sources {
-  display: inline-flex;
-  gap: 2px;
-  margin-bottom: 12px;
-  padding: 3px;
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-}
-.raw-source {
-  padding: 5px 12px;
-  font: inherit;
-  font-size: 0.8rem;
-  color: var(--muted);
-  background: transparent;
-  border: none;
-  border-radius: calc(var(--radius-sm) - 2px);
-  cursor: pointer;
-}
-.raw-source:hover { color: var(--text); }
-.raw-source.active {
-  color: var(--bg);
-  background: var(--accent-hot);
-  font-weight: 600;
-}
-
 /* ---------- timeline ---------- */
 .timeline {
   position: relative;
@@ -1854,30 +1782,6 @@ body.redaction-latched [data-guard="redaction"]::after {
   gap: 10px;
 }
 .change-range { font-family: var(--font-mono); }
-.change-arrow { color: var(--accent-hot); }
-
-/* Location-API diffs are visually distinct — the source changed, not the
-   case events. A left border ties them to the Location API tab colour. */
-.change-block-location {
-  border-left: 3px solid var(--accent-hot);
-}
-.source-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  margin-left: 6px;
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent-hot);
-  background: rgba(138, 178, 255, 0.12);
-  border: 1px solid var(--accent-hot);
-  border-radius: 999px;
-  vertical-align: middle;
-}
-.update-record-location {
-  border-left: 3px solid var(--accent-hot);
-}
 
 .kind-tag {
   font-size: 0.7rem;

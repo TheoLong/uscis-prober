@@ -1,0 +1,172 @@
+{
+ "generated": "2026-07-20",
+ "query": "EB2 (and adjacent) I-485 RFE -> approval gap, RFE-material-agnostic",
+ "definition": "gap_days = days from 'RFE response received' to 'I-485 approved'. context flags whether file was already at terminal adjudication (multi-FTA1/AR) vs early-stage (biometrics/interview still pending) — the dominant driver of the gap.",
+ "cases": [
+  {
+   "tid": "1174137",
+   "handle": "Justinllc",
+   "cat": "EB2_PERM",
+   "country": "ROW",
+   "interview": "waived",
+   "fta_stage": "3 FTA0 + 3 FTA1 (terminal adjudication)",
+   "rfe_material": "birth certificate (trivial)",
+   "rfe_resp_received": "2026-04-09",
+   "approved": "2026-04-14",
+   "gap_days": 5,
+   "terminal": "silent update 04/13 -> approved 04/14 (2xH008)",
+   "note": "exact structural twin of Theo (minus RFE material). File already at terminal adjudication.",
+   "stage_class": "terminal_adjudication"
+  },
+  {
+   "tid": "784496",
+   "handle": "jackydeep-Seattle",
+   "cat": "EB2",
+   "country": "?",
+   "interview": "none",
+   "fta_stage": "EARLY — biometrics still pending after RFE (fingerprint 06/11 AFTER response 02/18)",
+   "rfe_material": "medical exam + I-944",
+   "rfe_resp_received": "2021-02-18",
+   "approved": "2021-07-27",
+   "gap_days": 159,
+   "terminal": "biometrics cycle gated approval; pre-2022 I-944 era",
+   "note": "CONFOUNDED — the 159d was biometrics + I-944 era, NOT the RFE itself. File was NOT at terminal adjudication. Slow-tail illustration of why file-stage matters.",
+   "stage_class": "early_biometrics_confounded"
+  },
+  {
+   "tid": "1144326",
+   "handle": "anon-GX2LY-双飞",
+   "cat": "EB2_PERM",
+   "country": "?",
+   "interview": "none",
+   "fta_stage": "TERMINAL — derivative; primary already approved 08/21, 485J approved, derivative RFE",
+   "rfe_material": "marital + employment evidence (NOT birth cert)",
+   "rfe_resp_received": "2025-09-02",
+   "approved": "2025-10-02",
+   "gap_days": 30,
+   "terminal": "derivative approved 30d after RFE response",
+   "note": "Material-agnostic confirmation: marriage/employment-evidence RFE, still ~30d because file was at terminal adjudication. Derivative bound to already-approved primary.",
+   "stage_class": "terminal_adjudication"
+  },
+  {
+   "tid": "1176936",
+   "handle": "PonyGISer-IOE09343",
+   "cat": "EB2",
+   "country": "China",
+   "interview": "none",
+   "pd": "2021-04",
+   "rd": "2025-10-24",
+   "receipt_block": "IOE09343 (adjacent to Theo's IOE09357)",
+   "fta_stage": "TERMINAL — post-biometrics, active adjudication; TWO RFEs",
+   "rfe_material": "two RFEs (unspecified evidence, NOT birth cert)",
+   "rfe_cycles": [
+    {
+     "rfe": "2026-03-03",
+     "resp": "2026-04-13",
+     "result": "AP approved 2026-04-23",
+     "gap_days": 10
+    },
+    {
+     "rfe": "2026-04-23",
+     "resp": "2026-05-08",
+     "result": "485J 05/14 -> 485 approved 2026-05-15",
+     "gap_days": 7
+    }
+   ],
+   "gap_days": 7,
+   "gap_days_all": [
+    10,
+    7
+   ],
+   "approved": "2026-05-15",
+   "note": "STRONGEST ANALOG: China EB2, PD 2021-04 (~Theo 2021-05), IOE09343 block adjacent to Theo's IOE09357, no interview. TWO different RFEs, both response->decision in ~1 week (10d, 7d). Material-agnostic: neither was birth cert, both resolved fast because file was at terminal adjudication.",
+   "stage_class": "terminal_adjudication"
+  },
+  {
+   "tid": "1166519",
+   "handle": "echolfz-IOE09343",
+   "cat": "EB2",
+   "country": "China",
+   "interview": "none",
+   "pd": "2021-05",
+   "rd": "2025-10-20",
+   "receipt_block": "IOE09343 (adjacent to Theo's IOE09357)",
+   "fta_stage": "TERMINAL — post-biometrics active adjudication",
+   "rfe_material": "missing medical exam form (NOT birth cert; lawyer lost it)",
+   "rfe_resp_received": "2025-12-24",
+   "approved": "2026-02-18",
+   "gap_days": 56,
+   "terminal": "485J approved 02/17 -> 485 approved 02/18 (485J-close terminal signal)",
+   "note": "NEAR-TWIN: China EB2, PD 2021.5 (identical to Theo), IOE09343 block, no interview. 56d response->decision — slower terminal-stage case. Shows the terminal-stage gap RANGES; approval fired right after 485J-close.",
+   "stage_class": "terminal_adjudication"
+  },
+  {
+   "tid": "1059950",
+   "handle": "spicypotato-EB3",
+   "cat": "EB3",
+   "country": "China",
+   "interview": "none",
+   "pd": "2020-06",
+   "fta_stage": "early_mid — RFE right after biometrics, no FTA1/AR activity",
+   "stage_class": "early_biometrics_confounded",
+   "rfe_material": "birth certificate (defective translation; NOT the same as Theo's)",
+   "rfe_resp_received": "2024-01-17",
+   "approved": "2024-04-04",
+   "gap_days": 78,
+   "note": "EB3 original, PD 2020.6. RFE fired right after biometrics (early stage, no active-review cluster) -> 78d response->decision. Slower because file was NOT at terminal adjudication. Poster noted it was still 'fast for the receipt block'."
+  },
+  {
+   "tid": "1119201",
+   "handle": "iamhzgg2005-IOE09265-EB3",
+   "cat": "EB3",
+   "country": "China",
+   "interview": "none",
+   "pd": "2019-08",
+   "receipt_block": "IOE09265",
+   "fta_stage": "terminal — FO-transferred (LA County), event codes IKA->HA->H008 (same HA as Theo)",
+   "stage_class": "terminal_adjudication",
+   "rfe_material": "polio vaccine record (I-693 vaccine supplement; NOT birth cert)",
+   "rfe_resp_received": "2025-03-19",
+   "approved": "2025-03-20",
+   "gap_days": 1,
+   "note": "EB3 original, IOE09265, PD 2019-08, no interview, FO=LA County. RFE=polio vaccine. 'Response received' -> approved = 1 DAY. NOTE: 6-week lag between mailing response and USCIS logging 'response received' — but Theo is ALREADY past that (status shows received 7/20). Event codes IKA(RFE)->HA(response received)->H008(approved) — Theo currently shows HA, same as this case right before approval."
+  }
+ ],
+ "analysis": {
+  "terminal_stage_headline_gaps_days": [
+   5,
+   7,
+   30,
+   56
+  ],
+  "terminal_stage_all_rfe_cycles_days": [
+   1,
+   5,
+   7,
+   10,
+   30,
+   56
+  ],
+  "terminal_median": 8.5,
+  "terminal_range": [
+   1,
+   56
+  ],
+  "early_stage_outlier_days": 159,
+  "note": "Terminal-adjudication RFE-response->decision gaps (each RFE cycle counted): [5, 7, 10, 30, 56] days, median 10, range 5-56. The 159d case (784496) is early-stage (biometrics pending after RFE, pre-2022 I-944 regime) and excluded. RFE material varied (birth cert, medical form, marital+employment, unspecified, ×2) — gap is driven by file STAGE not RFE type. The two IOE09343 cases (1176936, 1166519) are the strongest analogs to Theo (China EB2, PD 2021-04/05, adjacent receipt block, no interview): 7d/10d and 56d.",
+  "eb2_eb3_only_note": "EB2 + EB3 only (NIW excluded per Theo). Terminal-adjudication gaps now include EB3 (1d, IOE09265) alongside EB2."
+ },
+ "consensus": {
+  "source": "Google AI Overview (Law Offices of Peter D. Chu + Reddy Neumann Brown + Reddit trackers), pulled 2026-07-20",
+  "eb2_concurrent_rfe_to_approval": "typically 30-60 days; occasionally 7-14 days; long tail 90-180 days only if further administrative review needed",
+  "material_agnostic": "timeline depends on concurrent-with-I-140 adjudication, background checks, and PD-current — NOT on the RFE material type",
+  "eb_job_offer_rfe": "Reddy Neumann Brown: the EB continuing-job-offer RFE \"often prompts an approval or a decision within days\""
+ },
+ "prediction_for_theo": {
+  "profile": "China EB2 PERM, PD 2021-05, IOE09357, concurrent, no interview, 3 FTA0 + 3 FTA1 (terminal adjudication), RFE response received 2026-07-20",
+  "primary_estimate": "RFE-response-received (2026-07-20) -> decision most likely within ~1-8 weeks; median comparable ~10 days, realistic band 1 week to ~2 months (late July through mid/late September)",
+  "basis": "5 primary DPs at terminal adjudication: gaps [5,7,10,30,56] days, median 10. Two strongest analogs (IOE09343 block, China EB2, PD 2021-04/05, no interview) = 7d/10d and 56d. Matches EB2-concurrent consensus 30-60d typical / 7-14d fast.",
+  "terminal_signal": "silent I-485 updatedAt bump OR 485J-close -> approval within ~24h (holds across all corpus approvals)",
+  "downside": "Charlotte bottom-decile EB throughput (0.23x national) could stretch to the 56d-and-beyond tail; a further admin-review RFE could reach 90-180d (low odds, RFE was routine)"
+ }
+}

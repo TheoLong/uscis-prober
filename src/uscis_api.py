@@ -50,9 +50,6 @@ from system_log import log as sys_log
 logger = logging.getLogger(__name__)
 
 CASE_ENDPOINT = "https://my.uscis.gov/account/case-service/api/cases/{receipt}"
-LOCATION_ENDPOINT = (
-    "https://my.uscis.gov/secure-messaging/api/case-service/receipt_info/{receipt}"
-)
 _DASHBOARD_URL = "https://my.uscis.gov/account/applicant"
 
 
@@ -188,80 +185,6 @@ def fetch_case(tab: Page, receipt: str) -> dict:
 
     status = response.status if response else 0
     return _parse_case_response(tab, receipt, status)
-
-
-def fetch_location(tab: Page, receipt: str) -> dict:
-    """Fetch the case location/service-center assignment for `receipt`.
-
-    Hits `/secure-messaging/api/case-service/receipt_info/{receipt}`. This
-    endpoint returns EITHER a 200 with `{"data": null}` (USCIS hasn't
-    assigned a service center yet — common for I-485 and I-131) OR a 200
-    with a populated `{"data": {"form": ..., "location": ..., ...}}`
-    (typical for I-765).
-
-    Unlike `fetch_case`, a `null`-data payload is a legitimate, retainable
-    snapshot — we store it so the dashboard can show "TBD" and record
-    exactly when USCIS starts returning data. Only transport-level errors
-    (non-200, bad JSON, empty body) raise.
-    """
-    url = LOCATION_ENDPOINT.format(receipt=receipt)
-    try:
-        response = tab.goto(url, wait_until="domcontentloaded", timeout=20_000)
-    except PlaywrightTimeout as e:
-        sys_log(
-            "api_location_nav_failed", level="error", source="uscis_api",
-            receipt=receipt, target=url,
-            error=f"PlaywrightTimeout: {e}"[:200],
-            final_url=getattr(tab, "url", "") or "",
-        )
-        raise
-    except PlaywrightError as e:
-        sys_log(
-            "api_location_nav_failed", level="error", source="uscis_api",
-            receipt=receipt, target=url,
-            error=f"{type(e).__name__}: {e}"[:200],
-            final_url=getattr(tab, "url", "") or "",
-        )
-        raise
-
-    status = response.status if response else 0
-    try:
-        body_text = tab.evaluate("() => document.body.innerText || ''").strip()
-    except Exception as e:
-        sys_log(
-            "api_location_body_read_failed", level="error", source="uscis_api",
-            receipt=receipt, status=status,
-            error=f"{type(e).__name__}: {e}"[:200],
-        )
-        raise ApiError(receipt, status, f"body read failed: {e}")
-
-    if status == 401:
-        raise SessionExpired(receipt, status, body_text)
-    if status != 200:
-        sys_log(
-            "api_location_non_200", level="error", source="uscis_api",
-            receipt=receipt, status=status,
-            body_preview=body_text[:400],
-        )
-        raise ApiError(receipt, status, body_text)
-    if not body_text:
-        sys_log(
-            "api_location_empty_body", level="error", source="uscis_api",
-            receipt=receipt, status=status,
-        )
-        raise ApiError(receipt, status, "(empty body)")
-    try:
-        return json.loads(body_text)
-    except json.JSONDecodeError as e:
-        sys_log(
-            "api_location_bad_json", level="error", source="uscis_api",
-            receipt=receipt, status=status,
-            body_preview=body_text[:400],
-            error=f"JSONDecodeError: {e}"[:200],
-        )
-        raise ApiError(
-            receipt, status, f"non-JSON body ({e}): {body_text[:200]}"
-        )
 
 
 def fetch_case_in_new_tab(

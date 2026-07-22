@@ -1,0 +1,154 @@
+{
+ "1174137_Justinllc": {
+  "tid": "1174137",
+  "applicant": "primary+derivative synced",
+  "category": "EB2_PERM",
+  "country": "ROW (Rest of World)",
+  "concurrent": "I-140(PP)+485+765+131",
+  "receipt": "IOE09341",
+  "FO": "NBC (National Benefits Center)",
+  "interview": "none",
+  "PD": "2024-05-06",
+  "RD": "2025-10-09",
+  "fta0_3": "2025-12-27",
+  "fta1_dates": [
+   "2026-01-05",
+   "2026-03-31",
+   "2026-04-02"
+  ],
+  "fta1_gap_notes": "1st FTA1 01/05 (with 'Actively Reviewed'); 2nd FTA1 03/31; 3rd FTA1 04/02 (2 days after 2nd, re-'Actively Reviewed'). Span 1st->3rd = 87 days; 2nd->3rd = 2 days.",
+  "rfe": "IAK/RFE issued 04/03 (1 day after 3rd FTA1), birth certificate (trivial - already provided), responded 04/09",
+  "outcome": "APPROVED 2026-04-14 (2x H008), card 04/18, delivered 04/22",
+  "key_gaps": {
+   "3rd_FTA1_to_approval_days": 12,
+   "3rd_FTA0_to_approval_days": 108,
+   "RD_to_approval_days": 187
+  },
+  "relevance_to_theo": "CLOSEST ANALOG. Concurrent EB2, NBC, 3 FTA1 with the 2nd+3rd clustered 2 days apart (Theo: 6/24+6/25). RFE fired 1 day after the 3rd FTA1, then approval 12 days after 3rd FTA1. Shows the 3rd-FTA1->RFE->approval path is real and fast once RFE cleared. Diff: ROW not China; RFE was trivial."
+ },
+ "1172377_DUP": {
+  "tid": "1172377",
+  "note": "SAME CASE as 1174137 (Justinllc, EB2 PERM ROW, PD 05/06/24, IOE09341). This is his earlier mid-RFE 'am I pre-adjudicated?' question; 1174137 is his approval report. DO NOT double-count.",
+  "useful_replies": "beam2188 (diff person): post-interview, waiting, 'FTA1 = supervisor review, dunno if reviewing or shelved'. zkwang2014: derivative RFIE same-day, primary approved."
+ },
+ "1174814_EB3_4fta1": {
+  "tid": "1174814",
+  "category": "EB3",
+  "country": "China (likely)",
+  "interview": "unknown",
+  "PD_current": "NO - 表A still not current",
+  "fta1_count": 4,
+  "fta1_notes": "4 FTA1s (2 new today + 2 from two months ago). OP couldn't find any other 4-FTA1 reports.",
+  "outcome": "PENDING (PD not current, can't approve)",
+  "community_reads": [
+   "大如牛眼的回锅肉: 'seen 3-FTA1 cases — it's the FO officer repeatedly picking up the case, finding it not-current, and shelving it again without bouncing to NBC' (the NOT-CURRENT explanation)",
+   "xiami15: 'seen 3 FTA1 - maybe RFE or interview'",
+   "lylwill/Holiday123: 'FTA1 means an officer looked at it'; '1 FTA1 already-current = nobody looking, more frustrating'"
+  ],
+  "relevance_to_theo": "IMPORTANT CONTRAST. This case's repeat FTA1s are explained by PD-NOT-CURRENT (officer picks up, can't approve, shelves). Theo's PD (2021-05) IS current (well ahead of FAD 2021-09), so the 'shelved-for-non-current' explanation does NOT fit Theo -> his repeat FTA1s more likely genuine active adjudication. EB3 not EB2."
+ },
+ "1177511_ddd1yy2": {
+  "tid": "1177511",
+  "category": "EB2 (likely)",
+  "interview": "YES (interview ~03/17/26)",
+  "PD_current": "yes (was being adjudicated)",
+  "fta0_count": 3,
+  "fta1_count": 4,
+  "fta1_timing": "per reply: FTA1s cluster around interview milestones - '1.5mo after biometrics / 1wk before interview-schedule notice / day of interview completion'. 4th FTA1 surfaced 05/14 (eventDateTime backdated to 03/17 = interview date).",
+  "sequence": "4th FTA1 05/14 -> 2wk no progress (5/30) -> silent update 6/3 (NBC) -> APPROVED 6/4 (24h after silent)",
+  "outcome": "APPROVED 2026-06-04",
+  "key_gaps": {
+   "4th_FTA1_to_approval_days": 21
+  },
+  "community_read": "beam2188: 'the 2nd FTA1 = supervisor review FINISHED'. 大如牛眼的回锅肉: own case is 3 FTA0 + 4 FTA1 too.",
+  "relevance_to_theo": "4-FTA1 interview case that APPROVED ~3wk after the last FTA1, via the silent-update->24h-approval pattern. Shows even 4 FTA1 + interview resolves to approval. The silent-update-then-24h-approval is the terminal signal to watch."
+ },
+ "_search_meta": {
+  "searched_terms": [
+   "三个FTA1/3 FTA1/3FTA1",
+   "第三个FTA1/third FTA1/多个FTA1",
+   "第四个FTA1/又一个FTA1/supervisor"
+  ],
+  "distinct_3plus_fta1_cases_found": [
+   "1174137/1172377 Justinllc - EB2 ROW concurrent - 3 FTA1 -> RFE -> APPROVED (12d after 3rd FTA1)",
+   "1173955 giacintayao - EB2 derivative - 3 FTA1 same-day + RFE (RFIE) - outcome RFE (no approval confirmed in thread)",
+   "1174814 EB3 - 4 FTA1, PD NOT current -> PENDING (shelved-for-non-current read)",
+   "1177511 ddd1yy2 - EB2 interview - 4 FTA1 -> APPROVED (21d after 4th FTA1, via silent->24h)"
+  ],
+  "note": "1167017 (EB1B) and 1176775 are not clean multi-FTA1 timelines; 1179148/1177261 are 1-2 FTA1 (already studied)."
+ },
+ "final_synthesis": {
+  "total_distinct_cases": 4,
+  "outcomes": {
+   "APPROVED": 2,
+   "RFE_then_unknown": 1,
+   "PENDING_not_current": 1
+  },
+  "patterns": [
+   "3+ FTA1 is a REAL, recurring phenomenon (not a glitch) — officer/supervisor repeatedly pulling the file.",
+   "FTA1 clusters often map to milestones: post-bio, pre-interview, interview-day, or supervisor-review passes. Repeat FTA1s 1-2 days apart (Justinllc 2nd+3rd, Theo 2nd+3rd) are common.",
+   "Outcome split: when PD IS current, 3-4 FTA1 resolved to APPROVAL in both clean cases (Justinllc, ddd1yy2) — one via RFE-then-approve (12d), one via silent->24h-approve (21d after last FTA1).",
+   "An RFE frequently fires right after the last FTA1 (Justinllc next-day, giacintayao). The RFEs seen were trivial (birth certificate already provided). RFE is part of the active-adjudication push, not a rejection signal.",
+   "When PD is NOT current (EB3 1174814), repeat FTA1 = officer picks up, can't approve, shelves it -> stays pending. This does NOT apply to Theo (PD current).",
+   "Terminal signal across approved cases: a SILENT UPDATE followed by approval within ~24h. Watch for that, not for the FTA1s themselves."
+  ],
+  "implication_for_theo": [
+   "Theo's PD is current, interview waived, concurrent EB2 — matches the two APPROVED profiles (Justinllc, ddd1yy2) far more than the PENDING EB3 (PD-not-current) or the derivative giacintayao.",
+   "The 2nd+3rd FTA1 clustered 1 day apart mirrors Justinllc's 2nd+3rd (2 days). In his case that cluster preceded RFE-then-approval by ~12 days.",
+   "Realistic forward read: a 3rd FTA1 with current PD points toward terminal adjudication. Expect EITHER a silent-update->24h-approval OR a (likely trivial) RFE then approval. Both resolved within ~2-3 weeks of the last FTA1 in the approved cases.",
+   "This RAISES confidence that Theo is in the approval-imminent regime rather than the shelved/stuck regime, while keeping the RFE branch live (it appeared in 2 of 3 non-EB3 cases). Interview branch is weaker for Theo (waived) than ddd1yy2."
+  ]
+ },
+ "multi_fta1_2x_cases": {
+  "1164866_tyywls": {
+   "tid": "1164866",
+   "category": "EB2",
+   "country": "China",
+   "interview": "waived",
+   "PD_current": "yes",
+   "concurrent": "485+765",
+   "PD": "2021-03",
+   "RD": "2025-11-19",
+   "FO": "NYC",
+   "fta0_3": "2026-01-30",
+   "fta1_dates": "2026-02-02 (TWO same day)",
+   "fta1_count": 2,
+   "outcome": "APPROVED 2026-02-12 (485J close 2/11 -> 485 next day)",
+   "RD_to_approval_days": 85,
+   "fta1_to_approval": "~10 days from the 2 same-day FTA1; derivative also approved",
+   "relevance": "VERY close structural match to Theo: concurrent EB2 China, interview WAIVED, 3rd FTA0 + FTA1 cluster. 2 same-day FTA1 -> approval in ~10d. Supports the fast-approval read when PD current + interview waived."
+  },
+  "1172139_bright869": {
+   "tid": "1172139",
+   "category": "EB1A",
+   "country": "China",
+   "interview": "none",
+   "PD": "2023-02",
+   "RD": "2025-10",
+   "receipt": "IOE09341",
+   "fta1_count": 2,
+   "fta0_count": 3,
+   "outcome": "APPROVED (card produced)",
+   "meta_signal": "OP checked ~30 adjacent receipts: ~15 card-produced/approved, 4 interview-scheduled. Real-world approval-rate snapshot for the IOE0934 block (~50% approved, ~13% interview).",
+   "relevance": "3 FTA0 + 2 FTA1 + no interview -> approved. EB1A (faster category) but same IOE0934 receipt family and the 'multiple FTA1 + no interview -> approval' shape."
+  }
+ },
+ "reddit_consensus": {
+  "source": "r/USCIS via Google AI Overview synthesis (Reddit JSON/pages hard-block the headless session)",
+  "code_meaning": "FTA1 = 'F' Field-office action + '1' secondary supervisor review / final internal processing. Multiple FTA1 = common, NOT an error.",
+  "outcome_timing": [
+   "'Most users who received a SECOND FTA1 report a final decision (often approval) within 10 days to 2 months; occasionally a longer wait or interview requirement.'",
+   "'Many EB and family applicants report approvals within a few days to two months after their THIRD or FOURTH FTA1 sequence.'",
+   "Silent updates = backend updatedAtTimestamp changes during active review; often immediately precede approval."
+  ],
+  "threads_seen": [
+   "1tad2t7 (third FTA1)",
+   "1tce3ek (3rd FTA1 05/11 + 2 silent updates 05/12)",
+   "1owmfdy (two FTA1 + full timeline)",
+   "1o413bd (multiple FTA1 timeline)",
+   "1r9cajq (FTA1+3rd FTA0 NIW EB2)",
+   "1o2gohz (FTA1 after interview+RFE; 'has anyone approved with FTA1?')",
+   "1q57zy3 (multiple FTA1, I-130/485 family)"
+  ]
+ }
+}
