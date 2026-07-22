@@ -3091,17 +3091,28 @@ function renderUpdateRecord(u) {
 // is an accident of pull cadence). So events and silent updates interleave in
 // true chronological order, and a re-emit lands when observed, not buried at
 // its stale claimed date. Events are deduped by eventId.
-function buildTimelineRows(events, changes) {
+function buildTimelineRows(events, changes, entries) {
   const rows = [];
   const seen = new Set();
-  // Map each eventId to the capturedAt of the diff that FIRST saw it — that's
-  // the detection time we surface on hover ("Detected at"). An event is
-  // detected on the pull whose diff lists it under events.added.
+  // Map each eventId to the capturedAt of the snapshot that FIRST contained
+  // it — that's the detection time we surface on hover ("Detected at"). This
+  // is derived from the raw capture history so it works identically for every
+  // case: events present at the very first snapshot are "detected" at that
+  // baseline capture, and events that appear later are detected on the pull
+  // that first saw them. (The events.added diff feed only covers post-baseline
+  // arrivals, so it can't be the sole source — that's what made detection look
+  // case-specific.)
   const detectedByEventId = new Map();
-  for (const ch of changes || []) {
-    for (const added of (ch.events && ch.events.added) || []) {
-      const eid = added.eventId;
-      if (eid && !detectedByEventId.has(eid)) detectedByEventId.set(eid, ch.to);
+  const sortedEntries = [...(entries || [])].sort((a, b) =>
+    (a.capturedAt || "").localeCompare(b.capturedAt || ""));
+  for (const entry of sortedEntries) {
+    const data = entry.data || entry;
+    const evs = Array.isArray(data && data.events) ? data.events : [];
+    for (const ev of evs) {
+      const eid = ev.eventId;
+      if (eid && !detectedByEventId.has(eid)) {
+        detectedByEventId.set(eid, entry.capturedAt || null);
+      }
     }
   }
   for (const e of events || []) {
@@ -3147,6 +3158,7 @@ function renderObservedEventCodes(c) {
   const hist = state.histories[c.label];
   const changes = (hist && hist.changes) || [];
   const links = (hist && hist.links) || [];
+  const entries = (hist && hist.entries) || [];
 
   // 1. Raw events from the latest snapshot, deduped by eventId.
   // eventId is USCIS's own natural key — collisions across the same
@@ -3159,7 +3171,7 @@ function renderObservedEventCodes(c) {
   // re-emitted with a new eventId at a later date, createdAt reflects
   // the re-emit day directly, no editorial layer required.
   const events = Array.isArray((c.latest || {}).events) ? c.latest.events : [];
-  const rows = buildTimelineRows(events, changes);
+  const rows = buildTimelineRows(events, changes, entries);
 
   if (!rows.length) {
     const empty = document.createElement("div");

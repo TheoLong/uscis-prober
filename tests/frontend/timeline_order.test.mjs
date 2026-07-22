@@ -62,3 +62,31 @@ test("buildTimelineRows dedups events by eventId and tolerates empties", () => {
   assert.equal(T.buildTimelineRows([], []).length, 0);
   assert.equal(T.buildTimelineRows(undefined, undefined).length, 0);
 });
+
+// Detection time ("Detected at") must derive from the raw capture history so
+// it behaves identically for every case — including cases whose events were
+// all present at the very first snapshot (which never appear in events.added
+// diffs). This is the bug where detection only showed on the I-485 case.
+test("detectedAt comes from the first snapshot containing the event, for ALL cases", () => {
+  // Case where BOTH events exist at the baseline snapshot (no post-baseline
+  // additions at all — the 765/131 situation). Detection must still resolve.
+  const entries = [
+    { capturedAt: "2026-03-05T17:00:00Z",
+      data: { events: [{ eventCode: "FTA0", eventId: "fta0-old" }] } },
+    { capturedAt: "2026-06-25T15:00:00Z",
+      data: { events: [{ eventCode: "FTA0", eventId: "fta0-old" },
+                       { eventCode: "FTA1", eventId: "fta1-new" }] } },
+  ];
+  const rows = T.buildTimelineRows(EVENTS, [], entries);
+  const byId = Object.fromEntries(Array.from(rows, r => [r.eventId, r.detectedAt]));
+  // FTA0 was present at the first capture → detected then.
+  assert.equal(byId["fta0-old"], "2026-03-05T17:00:00Z");
+  // FTA1 first appeared at the second capture → detected then.
+  assert.equal(byId["fta1-new"], "2026-06-25T15:00:00Z");
+});
+
+test("detectedAt is null when there's no capture history to source it from", () => {
+  const rows = T.buildTimelineRows(EVENTS, [], []);
+  assert.ok(rows.every(r => r.detectedAt === null),
+    "no entries → no detection time (never fabricated)");
+});
