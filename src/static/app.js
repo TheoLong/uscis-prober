@@ -6,7 +6,7 @@ const state = {
   cases: [],
   histories: {},           // label → history payload
   activeTab: {},           // receiptNumber → tab id
-  rawSource: {},           // receiptNumber → "case" | "location" (raw sub-tab)
+  rawSource: {},           // receiptNumber → "case" (raw sub-tab)
   rawSelection: {},        // "{receipt}:{source}" → capturedAt for raw view
   nextRun: null,
   pullRunning: false,
@@ -1414,101 +1414,12 @@ function renderOverview(panel, c) {
   }
   if (factCallouts.children.length) panel.appendChild(factCallouts);
 
-  // --- Current location (dedicated row so it's visible at a glance). ---
-  panel.appendChild(renderLocationRow(c));
-
   // --- Secondary facts: a compact strip, no duplication with header ---
   panel.appendChild(_renderSubFacts(c, latest));
 
   // --- Observed event codes (factual only — no inference, no stage
   // guessing, no community folklore; form-agnostic). ---
   panel.appendChild(renderObservedEventCodes(c));
-}
-
-// Renders "Current location: <SCD — 147-C9>" or a "TBD" badge + info popover
-// explaining what TBD means. The popover mirrors the existing `#export-info-*`
-// pattern (wireInfoBadge) so styling stays consistent with the header.
-function renderLocationRow(c) {
-  const loc = c.location || {};
-  const info = loc.info;
-  const wrap = document.createElement("div");
-  wrap.className = "location-row";
-
-  const k = document.createElement("span");
-  k.className = "location-key";
-  k.textContent = "Current location";
-  wrap.appendChild(k);
-
-  const val = document.createElement("span");
-  val.className = "location-val";
-
-  if (info && (info.location || info.subtype || info.form)) {
-    const parts = [];
-    if (info.location) parts.push(info.location);
-    if (info.subtype)  parts.push(info.subtype);
-    val.textContent = parts.join(" · ");
-    wrap.appendChild(val);
-
-    // Small meta (form / receipt date) as faded sub-text.
-    if (info.receipt_date || info.form) {
-      const sub = document.createElement("span");
-      sub.className = "location-sub";
-      const bits = [];
-      if (info.form) bits.push(info.form);
-      if (info.receipt_date) {
-        // receipt_date comes back as RFC 2822 ("Fri, 20 Feb 2026 00:00:00 GMT"),
-        // which formatDate can't parse on its own — wrap it in a Date first.
-        const parsed = new Date(info.receipt_date);
-        const rendered = isNaN(parsed.getTime())
-          ? info.receipt_date
-          : formatDate(parsed);
-        bits.push(`received ${rendered}`);
-      }
-      sub.textContent = bits.join(" · ");
-      wrap.appendChild(sub);
-    }
-  } else {
-    const tbd = document.createElement("span");
-    tbd.className = "location-tbd";
-    tbd.textContent = "TBD";
-    wrap.appendChild(tbd);
-
-    // Info popover: USCIS returned a null payload (hasn't assigned a
-    // service center yet) — explain *why* so "TBD" is never mysterious.
-    const group = document.createElement("span");
-    group.className = "location-info-group";
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "info-badge";
-    btn.textContent = "i";
-    btn.setAttribute("aria-label", "What does TBD mean?");
-    btn.setAttribute("aria-expanded", "false");
-    const pop = document.createElement("div");
-    // Left-anchored variant — the badge sits on the left side of the card,
-    // so the default right-anchor would push the popover off-viewport.
-    pop.className = "info-popover popover-left";
-    pop.hidden = true;
-    pop.setAttribute("role", "tooltip");
-    const capturedAt = loc.capturedAt
-      ? formatLocalDateTime(loc.capturedAt)
-      : null;
-    pop.innerHTML =
-      `<strong>No location available yet.</strong>` +
-      `USCIS's location endpoint returned <code>{"data": null}</code> — typically ` +
-      `this means a service center hasn't been assigned to this case yet. ` +
-      `I-765 (EAD) cases are usually populated first; I-485 and I-131 tend ` +
-      `to stay null until later in the pipeline.` +
-      (capturedAt ? `<br/><br/>Last checked: ${escapeHtml(capturedAt)}.` : "") +
-      (loc.captures
-        ? ` <span class="muted">(${loc.captures} snapshot${loc.captures === 1 ? "" : "s"} on file.)</span>`
-        : "");
-    wireInfoPopover(btn, pop);
-    group.appendChild(btn);
-    group.appendChild(pop);
-    wrap.appendChild(group);
-  }
-
-  return wrap;
 }
 
 // Generic info-badge / popover wiring. Mirrors #export-info-btn behaviour
@@ -1570,7 +1481,7 @@ function _renderSubFacts(c, latest) {
 
 function updateTabCounts(article, c) {
   // The Updates tab badge counts exactly the rows renderChanges paints —
-  // the merged case+location diff feed — so badge and tab content can't drift.
+  // the case diff feed — so badge and tab content can't drift.
   const hist = state.histories[c.label];
   const n = ((hist && hist.changes) || []).length;
   const badge = article.querySelector('.tab-count[data-count="changes"]');
@@ -1600,35 +1511,22 @@ const KIND_INFO = {
   notice:      { label: "new notice",     tone: "warn" },
   appointment: { label: "appointment",    tone: "warn" },
   status:      { label: "status change",  tone: "" },
-  location_assigned: { label: "location assigned", tone: "ok",
-                 desc: "USCIS assigned a service center to this case — location API flipped from null to populated." },
-  location_changed:  { label: "location changed",  tone: "warn",
-                 desc: "Service center, subtype, or receipt-level field on the location API changed." },
-  location_cleared:  { label: "location cleared",  tone: "warn",
-                 desc: "Location API stopped returning receipt_details — rare; may indicate a reassignment in flight." },
 };
 
 
 function renderChangeBlock(ch) {
   const block = document.createElement("div");
-  block.className = `change-block${ch.source === "location" ? " change-block-location" : ""}`;
+  block.className = "change-block";
   const info = KIND_INFO[ch.kind] || KIND_INFO.status;
   const kindTag =
     `<span class="kind-tag kind-${info.tone || "n"}" ` +
     `title="${escapeHtml(info.desc || info.label)}">${escapeHtml(info.label)}</span>`;
-  // Badge marks which USCIS endpoint generated this diff. Case diffs are
-  // the common case, so the badge only renders for location entries to
-  // keep the timeline visually quiet.
-  const sourceBadge = ch.source === "location"
-    ? `<span class="source-badge source-location" title="From the location API (/receipt_info)">Location API</span>`
-    : "";
   block.innerHTML =
     `<div class="change-block-head">` +
       // Show only the detection time — the `to` capturedAt, i.e. the pull that
       // first saw this change. The `from` side (the prior pull's time) is not
       // meaningful to the reader; what matters is when the change was detected.
       `<span class="change-range">Diff Detected: ${escapeHtml(formatLocalDateTime(ch.to))}</span>` +
-      sourceBadge +
       kindTag +
     `</div>`;
 
@@ -1812,10 +1710,7 @@ function describeItem(kind, obj) {
 
 // Well-known events and their visual tone. Any event not listed falls
 // through to "info" (or "error"/"warning" if the entry carries that level).
-// Well-known events and their visual tone. Paired case/location events
-// deliberately share the same tone so the operator sees them as a matching
-// family in the expanded pull row — "case snapshot appended" (ok) should
-// look identical to "location snapshot appended" (ok), etc.
+// Well-known events and their visual tone.
 const SYSTEMLOG_EVENT_INFO = {
   // Top-level envelope + server lifecycle
   pull:                        { tone: "info",  label: "Pull" },
@@ -1850,21 +1745,15 @@ const SYSTEMLOG_EVENT_INFO = {
   cli_run_session_expired_twice: { tone: "bad", label: "Session expired twice — giving up" },
   cli_uncaught_exception:      { tone: "bad",   label: "CLI uncaught exception" },
 
-  // Case-API events (paired with location-API events below — same tones)
+  // Case-API snapshot lifecycle events
   case_fetch_start:            { tone: "info",  label: "Case fetch start" },
   case_fetch_api_error:        { tone: "bad",   label: "Case fetch API error" },
   case_fetch_session_expired:  { tone: "warn",  label: "Case fetch session expired" },
   case_snapshot_appended:      { tone: "ok",    label: "Case snapshot appended" },
   case_snapshot_append_failed: { tone: "bad",   label: "Case snapshot append failed" },
+  post_fetch_rewarm_failed:    { tone: "warn",  label: "Post-fetch dashboard rewarm failed" },
 
-  // Location-API events (mirror of the case-API events above)
-  location_fetch_failed:       { tone: "warn",  label: "Location fetch failed" },
-  location_fetch_session_expired: { tone: "warn", label: "Location fetch session expired" },
-  location_snapshot_appended:  { tone: "ok",    label: "Location snapshot appended" },
-  location_snapshot_append_failed: { tone: "warn", label: "Location snapshot append failed" },
-  location_post_fetch_rewarm_failed: { tone: "warn", label: "Location post-fetch dashboard rewarm failed" },
-
-  // Generic, used by both case + location paths via _append_to_log_file
+  // Generic, used by the case snapshot path via _append_to_log_file
   snapshot_log_not_array:      { tone: "warn",  label: "Snapshot log wasn't an array" },
   snapshot_log_invalid_json:   { tone: "warn",  label: "Snapshot log was malformed JSON" },
 
@@ -1924,14 +1813,13 @@ const SYSTEMLOG_EVENT_INFO = {
       }
       const n = e.cases.length;
       const total = e.cases.reduce(
-        (s, c) => s + (Number(c.case_changes) || 0) + (Number(c.location_changes) || 0), 0);
+        (s, c) => s + (Number(c.case_changes) || 0), 0);
       return `${n} case${n === 1 ? "" : "s"} · ${total} update${total === 1 ? "" : "s"}`;
     },
     renderContent: e => {
       if (!Array.isArray(e.cases) || !e.cases.length) return "";
-      // Per case, sum case-diffs + location-diffs into a single "updates" total.
       const rows = e.cases.map(c => {
-        const total = (Number(c.case_changes) || 0) + (Number(c.location_changes) || 0);
+        const total = Number(c.case_changes) || 0;
         return `<div class="diffrc-row">` +
           `<span class="diffrc-label">${escapeHtml(c.label ?? "?")}</span>` +
           `<span class="diffrc-metric${total ? "" : " is-zero"}">` +
@@ -2394,19 +2282,12 @@ function _renderNestedSystemLogRow(entry) {
   if (entry.trigger) bits.push(entry.trigger);
   if (typeof entry.duration_seconds === "number")
     bits.push(`${entry.duration_seconds}s`);
-  // "case" and "location" snapshot counters are rendered as a paired
-  // pair (`3 case · 3 location`) when both are present, so the summary
-  // visibly balances the two APIs instead of treating one as primary.
   if (typeof summary.case_snapshots === "number")
     bits.push(`${summary.case_snapshots} case`);
-  if (typeof summary.location_snapshots === "number")
-    bits.push(`${summary.location_snapshots} location`);
   if (summary.new_diffs_emailed)
     bits.push(`${summary.new_diffs_emailed} email${summary.new_diffs_emailed === 1 ? "" : "s"}`);
   if (summary.case_fetch_failures)
     bits.push(`${summary.case_fetch_failures} case-fail`);
-  if (summary.location_fetch_failures)
-    bits.push(`${summary.location_fetch_failures} location-fail`);
   if (summary.notify_failures)
     bits.push(`${summary.notify_failures} email-fail`);
   if (entry.timed_out) bits.push("timed out");
@@ -3050,13 +2931,11 @@ function renderUpdateRecord(u) {
     : `Detected ${detectedDisplay}`;
 
   const block = document.createElement("article");
-  block.className = `update-record${u.source === "location" ? " update-record-location" : ""}`;
+  block.className = "update-record";
   // The update id is "{receipt}:{source}:{date}" — scrub the receipt out of
   // the DOM attribute when redaction is on (nothing reads it functionally).
   block.dataset.id = redactMaybe(u.id || "");
-  const sourceBadge = u.source === "location"
-    ? `<span class="source-badge source-location" title="From the location API (/receipt_info)">Location API</span>`
-    : "";
+  const sourceBadge = "";
   block.innerHTML =
     `<header class="update-head">` +
       `<div class="update-head-left">` +
@@ -3598,40 +3477,16 @@ const RAW_SOURCES = {
     fileSuffix: "_case.json",
     emptyMsg: "No captures yet.",
   },
-  location: {
-    label: "Location API",
-    historyKey: "locationEntries",
-    fileSuffix: "_location.json",
-    emptyMsg:
-      "No location snapshots yet — the next pull will start recording this endpoint.",
-  },
 };
 
 function renderRaw(panel, c) {
   panel.innerHTML = "";
   const hist = state.histories[c.label] || {};
 
-  // Sub-tab nav. Default to "case" but remember the user's choice per card.
-  const activeSource = state.rawSource[c.receiptNumber] || "case";
+  // Per-capture selection state (state.rawSelection) is keyed by source so it
+  // stays stable across re-renders.
+  const activeSource = "case";
   state.rawSource[c.receiptNumber] = activeSource;
-
-  const nav = document.createElement("nav");
-  nav.className = "raw-sources";
-  nav.setAttribute("role", "tablist");
-  for (const [id, meta] of Object.entries(RAW_SOURCES)) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = `raw-source${id === activeSource ? " active" : ""}`;
-    btn.dataset.source = id;
-    const count = (hist[meta.historyKey] || []).length;
-    btn.textContent = count ? `${meta.label} (${count})` : meta.label;
-    btn.addEventListener("click", () => {
-      state.rawSource[c.receiptNumber] = id;
-      renderRaw(panel, c);
-    });
-    nav.appendChild(btn);
-  }
-  panel.appendChild(nav);
 
   const src = RAW_SOURCES[activeSource];
   const entries = (hist[src.historyKey] || []);

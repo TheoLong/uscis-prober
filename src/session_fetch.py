@@ -13,12 +13,11 @@ The session persists in `.uscis_session.json` (gitignored). A typical run:
   2. Probe the API first. If it works, we never enter the login flow.
   3. If the API is rejecting the session, re-authenticate exactly once and retry.
 
-Daily snapshots are written to two sibling files per case:
+Daily snapshots are written per case:
   - `data/{formNum}_case.json`     — response from the case endpoint
                                      `/account/case-service/api/cases/{id}`
-  - `data/{formNum}_location.json` — response from the location endpoint
-                                     `/secure-messaging/api/case-service/
-                                     receipt_info/{id}`
+  - `data/{formNum}_status.json`   — latest response from the dashboard status
+                                     endpoint (single object, not snapshotted)
 Both files share the same row shape:
 `{ "capturedAt": "YYYY-MM-DDTHH:MM:SSZ", "data": <full API response> }`.
 Each run's timestamp is second-precision ISO-8601 UTC; the diff engine
@@ -50,7 +49,6 @@ from uscis_api import (
     SessionExpired,
     fetch_case,
     fetch_case_in_new_tab,
-    fetch_location,
     open_worker_tab,
 )
 from uscis_status import StatusFetchError, fetch_case_status
@@ -137,36 +135,19 @@ def load_auth(
 
 
 def case_log_file_for(form_type: str) -> Path:
-    """Path to the case-API snapshot log for a form type (I-485 → 485_case.json).
-
-    Paired with `location_log_file_for` — the two APIs live in sibling
-    files so their histories and diffs stay independent.
-    """
+    """Path to the case-API snapshot log for a form type (I-485 → 485_case.json)."""
     m = _FORM_NUM_RE.search(form_type or "")
     if not m:
         raise ValueError(f"Unrecognized form type: {form_type!r}")
     return DATA_DIR / f"{m.group(1)}_case.json"
 
 
-def location_log_file_for(form_type: str) -> Path:
-    """Path to the location-API snapshot log for a form type (I-485 → 485_location.json).
-
-    Mirror of `case_log_file_for`. Separate file so the two endpoints can
-    evolve independently and the Raw-JSON panel can show them as distinct
-    sub-tabs without having to demux a merged payload.
-    """
-    m = _FORM_NUM_RE.search(form_type or "")
-    if not m:
-        raise ValueError(f"Unrecognized form type: {form_type!r}")
-    return DATA_DIR / f"{m.group(1)}_location.json"
-
-
 def status_log_file_for(form_type: str) -> Path:
     """Path to the human-readable status snapshot log (I-485 → 485_status.json).
 
-    Sibling of the case and location logs. Holds the plain-English
-    `statusTitle`/`statusText` from the dashboard status endpoint, kept in
-    its own file so it stays independent of the rich API history.
+    Sibling of the case log. Holds the plain-English `statusTitle`/`statusText`
+    from the dashboard status endpoint, kept in its own file so it stays
+    independent of the rich API history.
     """
     m = _FORM_NUM_RE.search(form_type or "")
     if not m:
@@ -175,7 +156,7 @@ def status_log_file_for(form_type: str) -> Path:
 
 
 def _append_to_log_file(path: Path, entry: dict) -> Path:
-    """Shared append-with-malformed-recovery used by both case and location logs."""
+    """Shared append-with-malformed-recovery for the case snapshot log."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     logs: list[dict] = []
@@ -216,10 +197,6 @@ def append_case_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
     day each get their own row keyed by the full ISO-8601 timestamp in
     `capturedAt`.
 
-    Mirror of `append_location_snapshot`. The two helpers are deliberately
-    parallel so the call sites read as "fetch case → append case snapshot;
-    fetch location → append location snapshot" with zero asymmetry.
-
     Emits sys_log events when an existing log file is malformed, so a
     silent "start fresh" never happens without a trace.
     """
@@ -229,28 +206,12 @@ def append_case_snapshot(form_type: str, data: dict, captured_at: str) -> Path:
     )
 
 
-def append_location_snapshot(
-    form_type: str, payload: dict | None, captured_at: str
-) -> Path:
-    """Append a location-API snapshot entry.
-
-    `payload` is the full response body (typically `{"data": null}` or
-    `{"data": {...}}`). Stored verbatim so downstream code can diff the
-    full envelope, including the moment `null` flips to a populated
-    record.
-    """
-    return _append_to_log_file(
-        location_log_file_for(form_type),
-        {"capturedAt": captured_at, "data": payload},
-    )
-
-
 def write_status_latest(
     form_type: str, payload: dict | None, captured_at: str
 ) -> Path:
     """Write the LATEST status response, overwriting any prior value.
 
-    Unlike the case and location logs, the status endpoint is NOT
+    Unlike the case log, the status endpoint is NOT
     snapshotted — we keep only the most recent response. The dashboard is a
     separate process, so the current status still has to live on disk, but
     the file holds a single `{capturedAt, data}` object that each pull
@@ -348,50 +309,14 @@ def _extract_cases(
                 label=label or "?", receipt=receipt,
                 form_type=form_type, file=path.name)
 
-        # Location endpoint is best-effort. A failure here must not
-        # count against the case-fetch run (events are the source of
-        # truth). In keep-alive mode we don't have a worker tab — the
-        # per-case tab already navigated to the case endpoint and
-        # would get overwritten if we reused it, so we skip.
+        # Status endpoint is best-effort. A failure here must not count
+        # against the case-fetch run (events are the source of truth). In
+        # keep-alive mode we don't have a worker tab — the per-case tab
+        # already navigated to the case endpoint and would get overwritten
+        # if we reused it, so we skip.
         if probe_tab is not None:
-            try:
-                loc_data = fetch_location(probe_tab, receipt)
-            except SessionExpired:
-                # Session death during location fetch still matters.
-                sys_log("location_fetch_session_expired", level="warning",
-                        source="session_fetch", label=label or "?",
-                        receipt=receipt)
-                raise
-            except (ApiError, Exception) as e:  # noqa: BLE001
-                logger.warning("  ⚠ location fetch failed for %s: %s", receipt, e)
-                sys_log("location_fetch_failed", level="warning",
-                        source="session_fetch", label=label or "?",
-                        receipt=receipt,
-                        error=f"{type(e).__name__}: {e}"[:200])
-            else:
-                try:
-                    lpath = append_location_snapshot(
-                        form_type, loc_data, captured_at
-                    )
-                    logger.info("  → %s", lpath.relative_to(ROOT))
-                    has_data = bool(
-                        isinstance(loc_data, dict)
-                        and loc_data.get("data") is not None
-                    )
-                    sys_log("location_snapshot_appended", source="session_fetch",
-                            label=label or "?", receipt=receipt,
-                            form_type=form_type, file=lpath.name,
-                            has_data=has_data)
-                except ValueError as e:
-                    logger.warning("  ⚠ location log skipped: %s", e)
-                    sys_log("location_snapshot_append_failed", level="warning",
-                            source="session_fetch", label=label or "?",
-                            receipt=receipt, error=str(e))
-
-            # Status endpoint is best-effort like location — a failure here
-            # must not count against the case-fetch run. It carries the
-            # plain-English statusTitle/statusText that translates the rich
-            # API's cryptic event codes.
+            # Status endpoint carries the plain-English statusTitle/statusText
+            # that translates the rich API's cryptic event codes.
             try:
                 status_data = fetch_case_status(probe_tab, receipt)
             except StatusFetchError as e:
@@ -437,7 +362,7 @@ def _extract_cases(
                 )
             except Exception as e:  # noqa: BLE001 — best-effort dashboard warm-up
                 sys_log(
-                    "location_post_fetch_rewarm_failed", level="warning",
+                    "post_fetch_rewarm_failed", level="warning",
                     source="session_fetch", receipt=receipt,
                     error=f"{type(e).__name__}: {e}"[:200],
                 )
