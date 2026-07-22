@@ -255,13 +255,14 @@ def _flatten_scalars(data: Any, prefix: str = "") -> dict[str, Any]:
             if isinstance(v, dict):
                 out.update(_flatten_scalars(v, prefix=f"{path}."))
             elif isinstance(v, list):
-                if _is_pure_list_of_dicts(v):
-                    continue  # fully covered by the collection diff
-                # Any other list shape — pure scalars, empty, nested lists, or
-                # MIXED (dicts + scalars) — is compared as a whole under its key
-                # so no element change is ever dropped. (A mixed list also gets
-                # its dict entries diffed by the collection pass; the whole-list
-                # scalar is the backstop that catches the non-dict elements.)
+                # Skip the whole-list scalar snapshot when the collection diff
+                # fully covers the list: an EMPTY list (nothing to lose, and it
+                # may later hold dicts — snapshotting [] would spuriously churn
+                # to null once it does) or a PURE list-of-dicts. Any list with a
+                # non-dict element (pure scalars, MIXED, nested lists) still gets
+                # the scalar backstop so no non-dict element change is dropped.
+                if len(v) == 0 or _is_pure_list_of_dicts(v):
+                    continue
                 out[path] = v
             else:
                 out[path] = v

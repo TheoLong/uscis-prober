@@ -836,6 +836,20 @@ def test_compute_change_catches_list_of_lists():
     assert change["scalars"]["matrix"]["to"] == [[1, 2], [3]]
 
 
+def test_compute_change_empty_list_to_dicts_is_collection_not_scalar_churn():
+    """An empty list that becomes a list-of-dicts must surface ONLY as a
+    collection add — never as a spurious `[] -> null` (or `[] -> [...]`) scalar.
+    Snapshotting the empty list as a scalar would create a misleading before/
+    after on the row where the first entry lands."""
+    prev = _entry("2026-06-29T00:00:00Z", concurrentCases=[])
+    curr = _entry("2026-06-30T00:00:00Z", concurrentCases=[{"id": "c1"}])
+    change = compute_change(prev, curr)
+    # No scalar churn for the list field.
+    assert "concurrentCases" not in change["scalars"]
+    # The add is captured by the collection diff.
+    assert change["collections"]["concurrentCases"]["added"][0]["id"] == "c1"
+
+
 def _apply_change(base_data: dict, change: dict) -> dict:
     """Reconstruct the NEXT snapshot's data from a base + one diff record.
 

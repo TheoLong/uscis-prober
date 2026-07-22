@@ -1634,11 +1634,10 @@ function renderChangeBlock(ch) {
     : "";
   block.innerHTML =
     `<div class="change-block-head">` +
-      // `from` / `to` are the full ISO capturedAt timestamps of the two
-      // consecutive captures being compared — show the wall-clock time so
-      // the operator can correlate a diff with the specific pull that saw it.
-      `<span class="change-range">${escapeHtml(formatLocalDateTime(ch.from))} ` +
-      `<span class="change-arrow">→</span> ${escapeHtml(formatLocalDateTime(ch.to))}</span>` +
+      // Show only the detection time — the `to` capturedAt, i.e. the pull that
+      // first saw this change. The `from` side (the prior pull's time) is not
+      // meaningful to the reader; what matters is when the change was detected.
+      `<span class="change-range">Diff Detected: ${escapeHtml(formatLocalDateTime(ch.to))}</span>` +
       sourceBadge +
       kindTag +
     `</div>`;
@@ -3148,6 +3147,16 @@ function renderUpdateRecord(u) {
 function buildTimelineRows(events, changes) {
   const rows = [];
   const seen = new Set();
+  // Map each eventId to the capturedAt of the diff that FIRST saw it — that's
+  // the detection time we surface on hover ("Detected at"). An event is
+  // detected on the pull whose diff lists it under events.added.
+  const detectedByEventId = new Map();
+  for (const ch of changes || []) {
+    for (const added of (ch.events && ch.events.added) || []) {
+      const eid = added.eventId;
+      if (eid && !detectedByEventId.has(eid)) detectedByEventId.set(eid, ch.to);
+    }
+  }
   for (const e of events || []) {
     const eid = e.eventId;
     if (eid) {
@@ -3157,14 +3166,15 @@ function buildTimelineRows(events, changes) {
     // Write-time fields first; fall back to claimed-time only if absent.
     const ts = e.createdAtTimestamp || e.createdAt || e.eventTimestamp || e.eventDateTime || "";
     rows.push({ date: (ts || "").slice(0, 10) || "—", ts, code: e.eventCode || "?",
-                event: e, eventId: eid || null });
+                event: e, eventId: eid || null,
+                detectedAt: (eid && detectedByEventId.get(eid)) || null });
   }
   for (const ch of changes || []) {
     if (ch.kind !== "silent_update") continue;
     const sc = ch.scalars || {};
     const ts = (sc.updatedAtTimestamp || {}).to || (sc.updatedAt || {}).to || ch.to || "";
     rows.push({ date: (ts || "").slice(0, 10) || "—", ts, code: "silent update",
-                silent: true, change: ch });
+                silent: true, change: ch, detectedAt: ch.to || null });
   }
   // Fall back to the day when a row has no timestamp at all.
   rows.sort((a, b) => (b.ts || b.date).localeCompare(a.ts || a.date));
@@ -3220,8 +3230,8 @@ function renderObservedEventCodes(c) {
     item.className = "events-item";
     if (r.eventId) item.dataset.eventId = r.eventId;
     const tooltip = r.silent
-      ? buildSilentUpdateTooltip(r.change)
-      : buildEventTooltip(r.event);
+      ? buildSilentUpdateTooltip(r.change, r.detectedAt)
+      : buildEventTooltip(r.event, r.detectedAt);
     const codeClasses =
       `events-code${r.silent ? " events-code-silent" : ""}` +
       (tooltip ? " events-tooltip" : "");
@@ -3538,9 +3548,10 @@ function formatTimestampLocal(v) {
 // when *they* claim it happened). Localized so the user sees their own
 // wall-clock time. The first line states the timezone explicitly so a
 // hover-only reader knows the times below are local, not UTC.
-function buildEventTooltip(e) {
+function buildEventTooltip(e, detectedAt) {
   if (!e) return "";
   const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
+  if (detectedAt) lines.push(`Detected at: ${formatTimestampLocal(detectedAt)}`);
   if (e.eventCode) lines.push(`Code:    ${e.eventCode}`);
   if (e.updatedAtTimestamp) {
     lines.push(`Updated: ${formatTimestampLocal(e.updatedAtTimestamp)}`);
@@ -3560,13 +3571,16 @@ function buildEventTooltip(e) {
 // and the eye can compare them at a glance. "After:" is padded with an
 // extra space so the colons (and thus the value column) align with
 // "Before:". First line states the timezone so the hover is
-// self-explanatory.
-function buildSilentUpdateTooltip(ch) {
+// self-explanatory. Always leads with the detection time — even when the
+// timestamp itself didn't move (JSON changed but updatedAt didn't), the
+// "Detected at" line still tells the reader when we saw it.
+function buildSilentUpdateTooltip(ch, detectedAt) {
   if (!ch) return "";
   const scalars = ch.scalars || {};
   const keys = Object.keys(scalars);
-  if (!keys.length) return "";
   const lines = [`Times shown in ${getLocalTimezoneAbbrev()}`];
+  const det = detectedAt || ch.to;
+  if (det) lines.push(`Detected at: ${formatTimestampLocal(det)}`);
   for (const key of keys) {
     const { from, to } = scalars[key];
     lines.push(`${key}:`);
