@@ -280,7 +280,8 @@ Fill in `config.json`:
     "uscis_mfa_email":        "you@example.com",
     "uscis_mfa_app_password": "16charapppassword",
     "optional_access_code":   "",
-    "notification_email":     ""
+    "notification_email":     "",
+    "notification_from_name": ""
   },
   "pull_hours": [0, 6, 10, 14, 18],
   "retry": 2,
@@ -300,6 +301,7 @@ Fill in `config.json`:
 | `retry_wait_seconds` | yes | Wait between retry attempts, in seconds (int, ≥0). `180` is a good default — long enough for a transient anti-bot block to clear. |
 | `auth.optional_access_code` | no | Recommended when deployed remotely. When non-empty, dashboard requires this code to view. |
 | `auth.notification_email` | no | Override recipient for diff-update emails. Defaults to `uscis_mfa_email`. |
+| `auth.notification_from_name` | no | Display name shown as the sender of diff-update emails. Defaults to `USCIS Prober`. |
 | `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace (useful for verifying capture against a green pull). Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
 
 Verify:

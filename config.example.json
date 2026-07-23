@@ -10,7 +10,8 @@
     "uscis_mfa_email": "USCIS MFA email",
     "uscis_mfa_app_password": "USCIS MFA Email 16-char-app-password",
     "admin_password": "GetGreenImmediately",
-    "notification_email": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email."
+    "notification_email": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email.",
+    "notification_from_name": "Optional: display name shown as the sender of diff-update emails. Defaults to 'USCIS Prober'."
   },
   "pull_hours": [0, 6, 10, 14, 18],
   "retry": 2,
