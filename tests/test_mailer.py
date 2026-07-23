@@ -191,6 +191,60 @@ def test_send_email_invokes_smtp_flow():
     fake_smtp.send_message.assert_called_once()
 
 
+def test_send_email_sets_display_name_on_from_header():
+    from unittest.mock import MagicMock, patch
+    from mailer import send_email
+
+    fake_smtp = MagicMock()
+    fake_smtp.__enter__.return_value = fake_smtp
+    with patch("mailer.smtplib.SMTP", return_value=fake_smtp):
+        send_email(
+            uscis_mfa_email="u@example.com",
+            uscis_mfa_app_password="pw",
+            to="x@example.com",
+            subject="hi",
+            plain="plain",
+            html="<p>html</p>",
+        )
+    msg = fake_smtp.send_message.call_args.args[0]
+    # Default display name is applied; sending address is preserved.
+    assert msg["From"] == "USCIS Prober <u@example.com>"
+
+
+def test_send_email_custom_from_name():
+    from unittest.mock import MagicMock, patch
+    from mailer import send_email
+
+    fake_smtp = MagicMock()
+    fake_smtp.__enter__.return_value = fake_smtp
+    with patch("mailer.smtplib.SMTP", return_value=fake_smtp):
+        send_email(
+            uscis_mfa_email="u@example.com",
+            uscis_mfa_app_password="pw",
+            to="x@example.com",
+            subject="hi",
+            plain="plain",
+            html="<p>html</p>",
+            from_name="Case Alert",
+        )
+    msg = fake_smtp.send_message.call_args.args[0]
+    assert msg["From"] == "Case Alert <u@example.com>"
+
+
+def test_notify_update_passes_config_from_name():
+    from unittest.mock import patch
+    from mailer import notify_update
+
+    auth = {
+        "uscis_mfa_email": "u",
+        "uscis_mfa_app_password": "pw",
+        "notification_from_name": "Custom Name",
+    }
+    with patch("mailer.send_email") as send:
+        notify_update(auth, "x@example.com", _record("silent_update"))
+    assert send.call_args.kwargs["from_name"] == "Custom Name"
+
+
 def test_notify_update_uses_auth_dict():
     from unittest.mock import patch
     from mailer import notify_update

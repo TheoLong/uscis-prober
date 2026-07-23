@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr
 
 from providers import smtp_host_port
 from system_log import log as sys_log
@@ -201,6 +202,9 @@ def build_update_email(
 # SMTP
 # ---------------------------------------------------------------------------
 
+DEFAULT_FROM_NAME = "USCIS Prober"
+
+
 def send_email(
     *,
     uscis_mfa_email: str,
@@ -209,6 +213,7 @@ def send_email(
     subject: str,
     plain: str,
     html: str,
+    from_name: str = DEFAULT_FROM_NAME,
 ) -> None:
     """Build + send a multipart email via the mailbox's provider SMTP.
 
@@ -221,7 +226,7 @@ def send_email(
     the operator needs to react very differently.
     """
     msg = EmailMessage()
-    msg["From"] = uscis_mfa_email
+    msg["From"] = formataddr((from_name, uscis_mfa_email))
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(plain)
@@ -304,4 +309,5 @@ def notify_update(
         subject=subject,
         plain=plain,
         html=html,
+        from_name=auth.get("notification_from_name") or DEFAULT_FROM_NAME,
     )
