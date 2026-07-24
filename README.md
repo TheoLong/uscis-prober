@@ -72,6 +72,24 @@ A few guarantees hold this together:
 
 ---
 
+## Account prerequisites
+
+Because the tracker signs in as **you** and pulls *your* case API, your
+USCIS account and email must be set up so the server can log in
+unattended:
+
+1. **Your cases are tied to your USCIS account.** The receipts you want
+   to track must appear when you sign in at `my.uscis.gov` — the case API
+   is only reachable through your authenticated session.
+2. **USCIS MFA is set to email.** Sign-in must challenge with a code sent
+   to an email inbox (not SMS or an authenticator app), because the
+   server reads that code from your mailbox automatically.
+3. **An email app password for that inbox.** The server retrieves the MFA
+   code over IMAP and sends notifications over SMTP using an app password
+   (see [Setup → Obtain an app password](#2-obtain-an-app-password)).
+
+---
+
 ## Setup
 
 The fast path — clone, install, configure, run:
@@ -90,24 +108,11 @@ python src/server.py
 ```
 
 After cloning, **one file** is all you touch: `config.json` (gitignored).
-The steps below cover the prerequisites, the app password, every config
-field, and how to run it exposed vs. local.
+Make sure you've met the [account prerequisites](#account-prerequisites)
+first; the steps below install it, get an app password, fill in the
+config, and run it exposed vs. local.
 
-### 1. Prerequisites
-
-Because the tracker signs in as **you** and pulls *your* case API, your
-USCIS account and email must be set up so the server can log in
-unattended:
-
-1. **Your cases are tied to your USCIS account.** The receipts you want
-   to track must appear when you sign in at `my.uscis.gov` — the case API
-   is only reachable through your authenticated session.
-2. **USCIS MFA is set to email.** Sign-in must challenge with a code sent
-   to an email inbox (not SMS or an authenticator app), because the
-   server reads that code from your mailbox automatically.
-3. **An email app password for that inbox.** The server retrieves the MFA
-   code over IMAP and sends notifications over SMTP using an app password
-   (see [step 2](#2-obtain-an-app-password)).
+### 1. Install
 
 System requirements: Python 3.10+, a system that can run headless
 Chromium (macOS, Linux, WSL), and outbound network to `my.uscis.gov` and
