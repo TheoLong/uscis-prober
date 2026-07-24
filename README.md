@@ -22,16 +22,9 @@ carries event codes, notice history, jurisdiction, and an internal
 sentence changes — or moves without the sentence changing at all.
 
 USCIS Case Prober captures that full record every pull and tells you the
-moment anything shifts.
-
-| | Public status page | USCIS Case Prober |
-|---|---|---|
-| Data source | Scraped one-line status | Real case API — full event + notice history |
-| History | Latest state only | Every snapshot appended, nothing overwritten |
-| Silent `updatedAt` bumps | Invisible | Flagged as a `silent_update` |
-| New event codes / notices | Buried or absent | Classified and diffed per pull |
-| Notifications | None | One email per new change |
-| Hosting | Theirs | Yours |
+moment anything shifts. Pulls run on the schedule you set, and a single
+**Pull update** button lets you probe on demand — check right now,
+anytime, without waiting for the next scheduled run.
 
 ---
 
