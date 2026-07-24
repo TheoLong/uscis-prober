@@ -16,10 +16,12 @@ import server
 import demo_export
 
 
-REAL_RECEIPT = "IOE0935749409"
-REAL_NAME = "Jane Q Applicant"
-REAL_REP = "Larry L Lawyer"
-REAL_EMAIL = "applicant@example.com"
+# A synthetic receipt in the reserved IOE000000000X placeholder range — NOT a
+# real case number. It stands in for the sensitive input the export must mask.
+FAKE_RECEIPT = "IOE0000000001"
+FAKE_NAME = "Jane Q Applicant"
+FAKE_REP = "Larry L Lawyer"
+FAKE_EMAIL = "applicant@example.com"
 
 
 def _seed(data_dir: Path):
@@ -28,9 +30,9 @@ def _seed(data_dir: Path):
         {
             "capturedAt": "2026-05-01T00:00:00Z",
             "data": {
-                "receiptNumber": REAL_RECEIPT,
-                "applicantName": REAL_NAME,
-                "representativeName": REAL_REP,
+                "receiptNumber": FAKE_RECEIPT,
+                "applicantName": FAKE_NAME,
+                "representativeName": FAKE_REP,
                 "formName": "I-485",
                 "updatedAt": "2026-05-01T00:00:00Z",
                 "closed": False,
@@ -48,7 +50,7 @@ def _seed(data_dir: Path):
         "capturedAt": "2026-05-01T00:00:00Z",
         "data": {
             "statusTitle": "Case Was Received",
-            "statusText": f"We received your case, Receipt Number {REAL_RECEIPT}.",
+            "statusText": f"We received your case, Receipt Number {FAKE_RECEIPT}.",
             "historicalCaseStatuses": [],
         },
     }))
@@ -60,10 +62,10 @@ def app(monkeypatch, tmp_path):
     data_dir.mkdir()
     cfg = {
         "auth": {
-            "uscis_email": REAL_EMAIL, "uscis_password": "p",
-            "uscis_mfa_email": REAL_EMAIL, "uscis_mfa_app_password": "pw",
+            "uscis_email": FAKE_EMAIL, "uscis_password": "p",
+            "uscis_mfa_email": FAKE_EMAIL, "uscis_mfa_app_password": "pw",
         },
-        "cases": [{"id": REAL_RECEIPT, "label": "I-485"}],
+        "cases": [{"id": FAKE_RECEIPT, "label": "I-485"}],
         "pull_hours": [0],
         "retry": 0, "retry_wait_seconds": 0,
     }
@@ -98,10 +100,10 @@ def test_demo_is_self_contained(app):
 def test_demo_redacts_all_pii(app):
     _, html = demo_export.build_demo_html(app)
     # Every real identifier must be masked out of the artifact.
-    assert REAL_RECEIPT not in html
-    assert REAL_NAME not in html
-    assert REAL_REP not in html
-    assert REAL_EMAIL not in html
+    assert FAKE_RECEIPT not in html
+    assert FAKE_NAME not in html
+    assert FAKE_REP not in html
+    assert FAKE_EMAIL not in html
     # The receipt embedded in free-text status must be scrubbed too.
     assert "\u2022" * 8 in html   # fixed-width mask present
 
@@ -145,7 +147,7 @@ def test_demo_route_serves_inline(app):
     assert "USCIS Prober" in body
     assert "window.__DEMO_MODE__ = true" in body
     # Same PII guarantee as the download path.
-    assert REAL_RECEIPT not in body
+    assert FAKE_RECEIPT not in body
 
 
 def test_export_demo_route_downloads(app):
