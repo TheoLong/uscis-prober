@@ -50,6 +50,7 @@ from diff_utils import (
 from event_links import event_links
 from mailer import notify_update
 from redaction import redact_obj as _redact_obj
+from demo_export import build_demo_html
 from uscis_api import CASE_ENDPOINT
 from uscis_status import STATUS_ENDPOINT
 from system_log import (
@@ -1700,6 +1701,24 @@ def api_export():
     return Response(
         buf.getvalue(),
         mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/export-demo")
+def api_export_demo():
+    """Return a static, self-contained HTML demo of the dashboard.
+
+    The artifact renders identically to the live site in redaction mode, with
+    all data frozen in and every action inert — safe to share as case data or a
+    demo. Built by `demo_export.build_demo_html`, which reuses the live
+    frontend and applies the same server-side redaction unconditionally, so
+    this route is not itself redaction-gated (the output is always masked).
+    """
+    filename, html = build_demo_html(app)
+    return Response(
+        html,
+        mimetype="text/html; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

@@ -253,6 +253,14 @@ body {
   padding: 14px 20px 14px 12px;
   flex-shrink: 0;
   box-shadow: 0 1px 4px rgba(58, 92, 216, 0.12);
+  text-decoration: none;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.brand:hover,
+.brand:focus-visible {
+  border-color: var(--accent-hot);
+  box-shadow: 0 2px 8px rgba(58, 92, 216, 0.22);
 }
 .brand-name {
   /* Stacks "USCIS / Prober" on two lines at wide widths so the brand
