@@ -72,7 +72,9 @@ A few guarantees hold this together:
 
 ---
 
-## Quick start
+## Setup
+
+The fast path — clone, install, configure, run:
 
 ```bash
 git clone https://github.com/<you>/uscis-case-prober.git && cd uscis-case-prober
@@ -81,50 +83,15 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp config.example.json config.json
-# fill in config.json — see Setup → Configure below
+# fill in config.json — see step 3 below
 
 python src/server.py
 # open http://127.0.0.1:8080
 ```
 
 After cloning, **one file** is all you touch: `config.json` (gitignored).
-The [Setup](#setup) section walks through the app password and every
-config field.
-
----
-
-## How to run it
-
-Three deployment shapes, in increasing order of exposure:
-
-- **Completely local.** Run `python src/server.py` on your own machine
-  and reach the dashboard at `http://127.0.0.1:8080`. Nothing is exposed
-  to the network, so no password is needed. Simplest and most private —
-  the good default.
-- **Local with public exposure.** Run it locally but put it behind a
-  tunnel or reverse proxy (Caddy, Cloudflare Tunnel, `ngrok`) to reach it
-  from your phone or share it. The moment it's reachable off your machine,
-  set `auth.admin_password`.
-- **Remote deployment.** Run it on an always-on machine (see
-  [Running as a service](#running-as-a-service)) so pulls keep running
-  whether your laptop is on or not. A remote server is internet-reachable,
-  so `auth.admin_password` is **required**, not optional.
-
-### Security
-
-The dashboard exposes your real case data — names, receipt numbers,
-notice history. On `127.0.0.1` that's fine; nothing off your machine can
-reach it. **The moment it's reachable from anywhere else, set
-`auth.admin_password`** to a random string. When non-empty, the site
-requires that password to view, backed by a signed 30-day session cookie,
-constant-time comparison, a brute-force guard (5 failed attempts per IP
-per 5 minutes), and automatic session invalidation when you rotate the
-password. A redaction toggle can also mask PII in the rendered view —
-handy when sharing a screen.
-
----
-
-## Setup
+The steps below cover the prerequisites, the app password, every config
+field, and how to run it exposed vs. local.
 
 ### 1. Prerequisites
 
@@ -140,29 +107,20 @@ unattended:
    server reads that code from your mailbox automatically.
 3. **An email app password for that inbox.** The server retrieves the MFA
    code over IMAP and sends notifications over SMTP using an app password
-   (see [Step 3](#3-obtain-an-app-password)).
+   (see [step 2](#2-obtain-an-app-password)).
 
-System requirements:
-
-- Python 3.10 or newer
-- A system that can run headless Chromium (macOS, Linux, WSL)
-- Outbound network to `my.uscis.gov` and your email provider's IMAP
-  (993) + SMTP (587) endpoints
-
-### 2. Install
+System requirements: Python 3.10+, a system that can run headless
+Chromium (macOS, Linux, WSL), and outbound network to `my.uscis.gov` and
+your email provider's IMAP (993) + SMTP (587). Install with:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-Verify: `python -c "import flask, apscheduler, playwright"` (silent on
-success) and `playwright --version`.
-
-### 3. Obtain an app password
+### 2. Obtain an app password
 
 An **app password** is a scoped credential (usually 16 characters) your
 email provider issues for IMAP/SMTP access by third-party programs — not
@@ -231,7 +189,7 @@ Using a provider not listed? Add one line to `src/providers.py` with its
 IMAP/SMTP hosts — no config-schema change needed. Any provider offering
 IMAP + SMTP-with-STARTTLS + app passwords will work.
 
-### 4. Configure
+### 3. Configure
 
 ```bash
 cp config.example.json config.json
@@ -267,11 +225,11 @@ Fill in `config.json`:
 | `cases[].label` | yes | Short label shown in the UI (e.g. `I-485`). Must contain a form number. |
 | `auth.uscis_email` / `uscis_password` | yes | Your `my.uscis.gov` login. |
 | `auth.uscis_mfa_email` | yes | Inbox where USCIS MFA emails land. Any supported provider. |
-| `auth.uscis_mfa_app_password` | yes | App password for that inbox (see Step 3). |
+| `auth.uscis_mfa_app_password` | yes | App password for that inbox (see step 2). |
 | `pull_hours` | yes | Automatic-pull schedule: non-empty array of integer hours (0–23, 24h America/New_York), normalised to sorted-unique. The starter `[0, 6, 10, 14, 18]` pulls five times daily, weighted toward US daytime. No default — you must set it. |
 | `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). `2` is a good start. Only auth failures retry; timeouts and config errors do not. |
 | `retry_wait_seconds` | yes | Wait between retries, in seconds (int, ≥0). `180` gives a transient anti-bot block time to clear. |
-| `auth.admin_password` | no | Required once the dashboard is reachable off-machine (see [Security](#security)). When non-empty, the site requires this password to view. |
+| `auth.admin_password` | no | Required once the dashboard is reachable off-machine (see [Run it](#4-run-it)). When non-empty, the site requires this password to view. |
 | `auth.notification_email` | no | Override recipient for diff emails. Defaults to `uscis_mfa_email`. |
 | `auth.notification_from_name` | no | Display name on the diff emails. Defaults to `USCIS Prober`. |
 | `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace. Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
@@ -286,9 +244,40 @@ python -c "import json; c=json.load(open('config.json')); \
   print('config ok:', len(c['cases']), 'case(s)')"
 ```
 
+### 4. Run it
+
+```bash
+python src/server.py
+# open http://127.0.0.1:8080
+```
+
+Where you run it decides whether you need a password, in increasing order
+of exposure:
+
+- **Completely local.** On your own machine, reachable only at
+  `127.0.0.1`. Nothing is exposed, so no password is needed. Simplest and
+  most private — the good default.
+- **Local, exposed.** Put it behind a tunnel or reverse proxy (Caddy,
+  Cloudflare Tunnel, `ngrok`) to reach it from your phone or share it.
+- **Remote, always-on.** Run it on a VM or home server (see
+  [Running as a service](#running-as-a-service)) so pulls continue whether
+  your laptop is on or not.
+
+**Security.** The dashboard exposes your real case data — names, receipt
+numbers, notice history. On `127.0.0.1` that's fine. **The moment it's
+reachable from anywhere else, set `auth.admin_password`** to a random
+string. When non-empty, the site requires that password to view, backed
+by a signed 30-day session cookie, constant-time comparison, a
+brute-force guard (5 failed attempts per IP per 5 minutes), and automatic
+session invalidation when you rotate the password. A redaction toggle can
+also mask PII in the rendered view — handy when sharing a screen.
+
 ---
 
-## Running locally
+## Development & CLI
+
+Beyond the dashboard's **Pull update** button, `session_fetch.py` exposes
+the pull pipeline as a CLI — useful for testing and debugging.
 
 **Run the tests** (`pytest -q`) — expect `580+ passed`, 100% line
 coverage on `src/`. A failure here is a dependency or install issue.
@@ -310,18 +299,10 @@ python src/session_fetch.py extract   # reuses the session, refuses to re-login
 scheduler; `fetch` is an alias), which wipes the session and does a full
 cold-start login every time.
 
-**Start the dashboard:**
-
-```bash
-python src/server.py
-# ... Scheduler started: daily pulls at 00:00, 06:00, 10:00, 14:00, 18:00 (America/New_York)
-#  * Running on http://127.0.0.1:8080
-```
-
-The listen port defaults to `8080`; override with `USCIS_PORT`. In the
-dashboard, **Pull update** runs an ad-hoc probe, **Export data**
-downloads the zip archive, and **Export log** (inside System) downloads
-the system log plus every preserved trace.
+The dashboard's listen port defaults to `8080`; override with
+`USCIS_PORT`. Beyond **Pull update**, **Export data** downloads the full
+zip archive and **Export log** (inside System) downloads the system log
+plus every preserved trace.
 
 ### Troubleshooting
 
@@ -339,7 +320,7 @@ the system log plus every preserved trace.
 
 To keep pulls running when your laptop is off, run it on any always-on
 machine (a VM, a home server, a Raspberry Pi). The setup is identical to
-[Quick start](#quick-start) — clone, install, configure — plus three
+[Setup](#setup) — clone, install, configure — plus three
 things for an unattended, exposed deployment:
 
 1. **Keep it running.** Use a process manager so it restarts on crash and
@@ -366,7 +347,7 @@ things for an unattended, exposed deployment:
    the proxy.
 
 3. **Set `auth.admin_password`.** Required once the dashboard is
-   reachable off-machine — see [Security](#security).
+   reachable off-machine — see [Run it](#4-run-it).
 
 > [!WARNING]
 > **Two instances on the same USCIS account must never fire a scheduled
