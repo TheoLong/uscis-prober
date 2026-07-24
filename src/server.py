@@ -1723,6 +1723,19 @@ def api_export_demo():
     )
 
 
+@app.route("/demo")
+def serve_demo():
+    """Serve the static demo dashboard *inline* (rendered in the browser).
+
+    Same self-contained artifact as `/api/export-demo`, but without the
+    attachment disposition, so pointing a hostname at this instance gives a
+    live-hosted, always-freshly-redacted demo without a separate static server.
+    Not redaction-gated — the output is always masked.
+    """
+    _filename, html = build_demo_html(app)
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
 DEFAULT_SYSLOG_PAGE_SIZE = 100
 MAX_SYSLOG_PAGE_SIZE = 500
 
