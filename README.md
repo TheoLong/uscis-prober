@@ -2,42 +2,88 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
-**Pulls the real USCIS case API 3×/day and diffs
-snapshots** to catch silent `updatedAt` bumps and event-code changes
-that public status checkers miss.
-Self-hosted, one config file.
+Self-hosted monitor for pending USCIS cases (I-485, I-765, I-131, and
+any other `IOE…` receipt). It signs in with your own USCIS account,
+pulls the **real case API** on a schedule you set, snapshots every
+response, and diffs consecutive snapshots to surface changes the public
+"Check Case Status" page never shows you — including silent internal
+`updatedAt` bumps and new event codes.
 
-### vs. other case checkers
+One config file. No SaaS. Runs on your laptop or a cheap VM.
 
-- **Real API, not scraped status.** Calls the USCIS case endpoint
-  (`/case-service/api/cases/{id}` — full event + notice history) per
-  pull and logs a complete snapshot.
-- **Authenticates with your USCIS login.** Playwright-driven sign-in;
-  MFA code auto-read from your inbox. No manual steps after setup.
-- **Pulls 3×/day, keeps the full history.** Every snapshot is appended
-  to disk — nothing overwritten.
-- **Catches silent updates.** Internal `updatedAt` bumps that never
-  show up in the public status and are effectively invisible on the
-  public site.
-- **Runs on your machine, easily deployable.** `python src/server.py`
-  locally, or drop it on a $15/month AWS/Azure VM. No SaaS.
+---
+
+## Why this exists
+
+The public USCIS status page shows a single plain-English sentence and
+hides the machine-readable case record behind your login. That record
+carries event codes, notice history, jurisdiction, and an internal
+"last updated" timestamp that often moves **days before** the public
+sentence changes — or moves without the sentence changing at all.
+
+USCIS Case Prober captures that full record every pull and tells you the
+moment anything shifts.
+
+| | Public status page | USCIS Case Prober |
+|---|---|---|
+| Data source | Scraped one-line status | Real case API — full event + notice history |
+| History | Latest state only | Every snapshot appended, nothing overwritten |
+| Silent `updatedAt` bumps | Invisible | Flagged as a `silent_update` |
+| New event codes / notices | Buried or absent | Classified and diffed per pull |
+| Notifications | None | One email per new change |
+| Hosting | Theirs | Yours |
+
+---
+
+## Features
+
+- **Real API, full snapshots.** Every pull hits the case endpoint
+  (`/case-service/api/cases/{id}`) and writes the complete payload —
+  events, notices, flags — never a summary string.
+- **Append-only history, diffed on the fly.** No snapshot is ever
+  deleted or overwritten. Diffs are recomputed from the full history on
+  every restart, so a reboot or code change never loses or
+  double-counts a change.
+- **Change classification.** Each diff is tagged `event` (new event
+  code — FTA0, APR0, …), `notice` (RFE / receipt / appointment letter),
+  `appointment` (biometrics rescheduled), `decision` (`closed` /
+  `actionRequired` flipped), or `silent_update` (timestamp advanced with
+  nothing else visible).
+- **Hands-off authentication.** Playwright signs in to `my.uscis.gov`;
+  the MFA code is read automatically from your email inbox over IMAP. No
+  manual steps after first setup.
+- **Cold-start logins.** The saved session is wiped before every
+  scheduled and manual pull, so each run exercises the full OIDC + MFA
+  flow. Login regressions surface at the next pull, not days later when a
+  stale cookie quietly expires.
+- **Email alerts.** One email per new change per pull, de-duplicated by
+  capture timestamp so restarts never re-send or drop a notification.
+- **Dashboard.** Per-case Overview, Updates, and Raw JSON tabs; a global
+  Updates feed; a System tab with a storage breakdown, paginated event
+  log, and a live countdown to the next pull.
+- **Deep failure diagnostics.** Every pull records a native Playwright
+  trace (DOM, network, console, screenshots). On failure — or on every
+  pull in Debug mode — the trace is saved alongside a wire-level IMAP
+  sidecar, replayable in the built-in trace viewer.
+- **One-click export.** Bundle every case snapshot + manifest into a
+  timestamped zip for a lawyer or your own archive.
 
 ---
 
 ## Screenshots
 
-Receipt numbers, applicant / representative names, letter IDs, and
-event UUIDs are redacted; everything else (form types, event codes,
-timestamps, counters) is exactly what the
-dashboard renders. Shots show a single case — the live dashboard
-stacks one card per configured receipt.
+Receipt numbers, applicant / representative names, letter IDs, and event
+UUIDs are redacted. Everything else — form types, event codes,
+timestamps, counters — is exactly what the dashboard renders. Shots show
+a single case; the live dashboard stacks one card per configured
+receipt.
 
-**Dashboard** — hero metrics and timeline. Topbar chip shows the
+**Dashboard** — hero metrics and timeline. The topbar chip shows the
 running build version.
 
 ![Dashboard overview](docs/screenshot-dashboard.png)
 
-**Raw JSON** — full USCIS payload with syntax highlighting.
+**Raw JSON** — the full USCIS payload with syntax highlighting.
 
 ![Raw JSON view](docs/screenshot-raw-json.png)
 
@@ -56,17 +102,15 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp config.example.json config.json
-# fill in config.json — full field reference + app-password walkthrough
-# is in [Setup → Configure](#4-configure)
+# fill in config.json — see Setup → Configure below
 
 python src/server.py
 # open http://127.0.0.1:8080
 ```
 
 After cloning, **one file** is all you touch: `config.json` (gitignored).
-See [Setup → Configure](#4-configure) for the full field reference and
-[Setup → Obtain an app password](#3-obtain-an-app-password) for how to
-get the credentials your email provider needs.
+The [Setup](#setup) section walks through the app password and every
+config field.
 
 ---
 
@@ -74,80 +118,37 @@ get the credentials your email provider needs.
 
 **Core principle: snapshot everything, diff nothing away.**
 
-- **One API pulled per case, snapshots stored.** Each pull
-  hits the case endpoint and writes:
-    - `data/{formNum}_case.json` — case-endpoint response (events,
-      notices, flags).
-    - `data/{formNum}_status.json` — dashboard status-endpoint response,
-      the plain-English `statusTitle`/`statusText` USCIS shows on its
-      public case-status tool. **Not snapshotted** — this file holds only
-      the latest response (overwritten each pull); the "Current Status"
-      block shows the exact title + paragraph + jurisdiction + action code
-      USCIS returned, and the "Status history" dropdown comes from the
-      API's own `historicalCaseStatuses` array. Nothing composed or
-      interpreted.
-- **Each snapshot is the full API payload**, not a summary string.
-  One row per pull, ISO-8601 timestamped. No row is ever
-  deleted or overwritten.
-- **Diffs are recomputed on the fly** from that append-only history.
-  Restart, reboot, code change — never loses a record, never
-  double-counts one.
-- **Every change gets classified.** `event` (new
-  event code — FTA0, APR0, etc.), `notice` (Request for Evidence /
-  receipt / appointment letter), `appointment` (biometrics
-  rescheduled), `decision` (`closed` / `actionRequired` flipped), or
-  `silent_update` (case update timestamp advanced with nothing else
-  visible). A timestamp bump that merely echoes an event USCIS just
-  wrote is folded into that event's row, not surfaced separately.
-- **Email notifications.** One email per new diff per pull.
-  Record IDs embed the full capture timestamp
-  (`{receipt}:case:{timestamp}`) so
-  each diff emits a distinct email. Before / after
-  diff-ID snapshotting around each pull → no duplicates, no misses,
-  survives restarts.
-- **One pull → one system-log row.** Each pull produces a single
-  consolidated `pull` entry with its 15+ internal steps (auth, case
-  fetch, snapshot append, notify) nested as `steps[]`.
-  Top-level tone = worst-child severity, so an otherwise green pull
-  containing a single failed fetch still shows up as yellow.
-- **Every pull is a cold start.** `.uscis_session.json` is wiped at
-  the start of every pull and never persisted at the end, so every
-  scheduled or manual pull exercises the full OIDC + MFA flow. Login
-  regressions surface at the next scheduled fire, not days later when
-  a stale cookie expires.
-- **Full Playwright trace on failure (or in debug mode).** Every pull
-  records a native Playwright `trace.zip` (DOM snapshots, network,
-  console, screenshots) in memory. On failure — or on every pull when
-  you flip the Debug-mode pill in the topbar — the zip is written to
-  `data/full_traces/<ts>_fail_.../` alongside an `mfa_trace/` sidecar
-  containing wire-level IMAP events (`events.jsonl`) and every raw
-  email considered (`email_<uid>.eml`). Click **Open trace** on any
-  pull row to replay it in the self-hosted Playwright viewer; click
-  **MFA events** for a modal that decodes the sidecar into a
-  filterable table + rendered email previews.
-- **Build version visible in the dashboard.** Top-left chip reads
-  e.g. `2026-04-24T17:28:04 EDT` — the commit's authored time rendered
-  in *your* browser's timezone. Lexicographic comparison between two
-  chip labels matches chronological order on the date+time portion,
-  so you can tell at a glance whether what you just pushed has landed
-  on the VM. The server's `/api/version` response keeps the sortable
-  UTC key (`2026-04-24.2128`) so external deploy-verification scripts
-  have a stable, timezone-free field to compare.
-- **One-click export.** `/api/export` (or the "Export data" button)
-  bundles every `data/*_case.json` and
-  a manifest into a timestamped zip. Useful for sharing with a lawyer
-  or archiving.
+- **One API call per case, per pull.** Each pull writes:
+  - `data/{formNum}_case.json` — the case-endpoint response (events,
+    notices, flags), appended as a new timestamped row.
+  - `data/{formNum}_status.json` — the plain-English
+    `statusTitle` / `statusText` from the public status endpoint. This
+    file holds only the latest response (overwritten each pull). The
+    "Current Status" block shows exactly what USCIS returned; the "Status
+    history" dropdown comes straight from the API's own
+    `historicalCaseStatuses` array. Nothing is composed or interpreted.
+- **Diffs recomputed from history.** Changes are derived from the
+  append-only `_case.json` log on the fly, so the system never loses a
+  record or double-counts one across restarts.
+- **Timestamp bumps folded into events.** An `updatedAt` bump that
+  merely echoes an event USCIS just wrote is attached to that event's
+  row rather than surfaced as a separate `silent_update`.
+- **One pull → one log row.** Each pull produces a single consolidated
+  `pull` entry in the system log, with its internal steps (auth, fetch,
+  snapshot, notify) nested as `steps[]`. The row's severity is the worst
+  of its children, so a green pull hiding one failed fetch still shows
+  yellow.
+- **Chromium runs out-of-process.** Each pull is a separate subprocess,
+  so the Flask web server never manages a browser lifetime.
 
-### Design invariants (don't break these)
+### Design invariants
 
 - `config.json`, `data/*.json`, `.uscis_session.json`, and
-  `.flask_secret` are **gitignored**. Never commit them.
-- `uscis_auth.py` is the **only** module allowed to trigger MFA.
-  Fetch / extract code paths must never call the login flow directly.
-- All timestamps in snapshot logs are ISO-8601 UTC. Display-time
-  localisation happens in the browser only.
-- Chromium stays out of the Flask process — each pull is a separate
-  subprocess so the web server never manages Playwright lifetimes.
+  `.flask_secret` are **gitignored** — never commit them.
+- `uscis_auth.py` is the **only** module allowed to trigger MFA. Fetch
+  and extract paths must never call the login flow directly.
+- All snapshot timestamps are ISO-8601 UTC. Localisation happens in the
+  browser only.
 
 ---
 
@@ -157,8 +158,8 @@ get the credentials your email provider needs.
 
 - Python 3.10 or newer
 - A system that can run headless Chromium (macOS, Linux, WSL)
-- Outbound network to `my.uscis.gov` and your email provider's
-  IMAP (993) + SMTP (587) endpoints — see the provider table below
+- Outbound network to `my.uscis.gov` and your email provider's IMAP
+  (993) + SMTP (587) endpoints
 
 ```bash
 python3 --version            # must be >= 3.10
@@ -188,19 +189,18 @@ An **app password** is a scoped credential (usually 16 characters) your
 email provider issues for IMAP/SMTP access by third-party programs. It
 is *not* your regular account password.
 
-**Why:** once MFA / 2FA is on (effectively mandatory for all modern
-providers), your regular password stops working for IMAP/SMTP. The
-provider expects an app password instead. Properties:
+**Why you need one:** with MFA / 2FA enabled (effectively mandatory
+everywhere now), your regular password stops working for IMAP/SMTP. The
+app password is:
 
-- Scoped to mail only — can't log into the web UI, read chat, etc.
-- Individually revocable — delete just the tracker's password without
-  touching anything else.
-- Displayed exactly once on creation. Copy it immediately.
+- Scoped to mail only — it can't log into the web UI or read chat.
+- Individually revocable — delete just this one without touching
+  anything else.
+- Shown exactly once on creation. Copy it immediately.
 
-The tracker stores it in `config.json` and uses it to:
-
-1. Read the USCIS MFA email over IMAP to get the 6-digit code.
-2. Send diff-notification emails over SMTP.
+The tracker stores it in `config.json` and uses it to (1) read the USCIS
+MFA email over IMAP for the 6-digit code, and (2) send diff
+notifications over SMTP.
 
 IMAP/SMTP hosts are auto-detected from your email domain (see
 `src/providers.py`), so you never enter them. Supported out of the box:
@@ -213,8 +213,8 @@ IMAP/SMTP hosts are auto-detected from your email domain (see
 2. Visit <https://myaccount.google.com/apppasswords>.
 3. In *App name* type something like `USCIS tracker`, click *Create*.
 4. Copy the 16-character string (spaces are ignored).
-5. Enable IMAP in Gmail: *Settings → See all settings →
-   Forwarding and POP/IMAP → IMAP access: Enable*.
+5. Enable IMAP: *Settings → See all settings → Forwarding and POP/IMAP
+   → IMAP access: Enable*.
 </details>
 
 <details>
@@ -255,9 +255,9 @@ IMAP/SMTP hosts are auto-detected from your email domain (see
 3. Copy the password.
 </details>
 
-Using a provider not listed above? Add one line to `src/providers.py`
-with its IMAP/SMTP hosts; no config-schema change needed. Any provider
-offering IMAP + SMTP-with-STARTTLS + app passwords will work.
+Using a provider not listed? Add one line to `src/providers.py` with its
+IMAP/SMTP hosts — no config-schema change needed. Any provider offering
+IMAP + SMTP-with-STARTTLS + app passwords will work.
 
 ### 4. Configure
 
@@ -293,16 +293,16 @@ Fill in `config.json`:
 |---|---|---|
 | `cases[].id` | yes | USCIS receipt number (`IOE…`). One entry per case to track. |
 | `cases[].label` | yes | Short label shown in the UI (e.g. `I-485`). Must contain a form number. |
-| `auth.uscis_email` / `uscis_password` | yes | `my.uscis.gov` login. |
-| `auth.uscis_mfa_email` | yes | Inbox where USCIS MFA emails land. Any major provider. |
+| `auth.uscis_email` / `uscis_password` | yes | Your `my.uscis.gov` login. |
+| `auth.uscis_mfa_email` | yes | Inbox where USCIS MFA emails land. Any supported provider. |
 | `auth.uscis_mfa_app_password` | yes | App password for that inbox (see Step 3). |
-| `pull_hours` | yes | Automatic-pull schedule: non-empty array of integer hours (0–23, 24h America/New_York). Normalised to sorted unique values. Starter `[0, 6, 10, 14, 18]` pulls five times daily, weighted toward US daytime hours. No default — must be set. |
-| `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). Start with `2`. Only auth failures retry; timeouts and config errors do not. |
-| `retry_wait_seconds` | yes | Wait between retry attempts, in seconds (int, ≥0). `180` is a good default — long enough for a transient anti-bot block to clear. |
+| `pull_hours` | yes | Automatic-pull schedule: non-empty array of integer hours (0–23, 24h America/New_York), normalised to sorted-unique. The starter `[0, 6, 10, 14, 18]` pulls five times daily, weighted toward US daytime. No default — you must set it. |
+| `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). `2` is a good start. Only auth failures retry; timeouts and config errors do not. |
+| `retry_wait_seconds` | yes | Wait between retries, in seconds (int, ≥0). `180` gives a transient anti-bot block time to clear. |
 | `auth.admin_password` | no | Recommended when deployed remotely. When non-empty, the dashboard requires this password to view, and it backs the per-action admin challenge. |
-| `auth.notification_email` | no | Override recipient for diff-update emails. Defaults to `uscis_mfa_email`. |
-| `auth.notification_from_name` | no | Display name shown as the sender of diff-update emails. Defaults to `USCIS Prober`. |
-| `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace (useful for verifying capture against a green pull). Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
+| `auth.notification_email` | no | Override recipient for diff emails. Defaults to `uscis_mfa_email`. |
+| `auth.notification_from_name` | no | Display name on the diff emails. Defaults to `USCIS Prober`. |
+| `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace. Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
 
 Verify:
 
@@ -324,8 +324,8 @@ python -c "import json; c=json.load(open('config.json')); \
 pytest -q
 ```
 
-Expected: `580+ passed`, 100% line coverage across `src/`. Any failure
-here means a dependency / install issue — fix it before moving on.
+Expected: `580+ passed`, 100% line coverage across `src/`. A failure here
+means a dependency or install issue — fix it before moving on.
 
 ### 2. First login (one-off; triggers an MFA email)
 
@@ -335,9 +335,9 @@ python src/session_fetch.py login
 
 Headless Chromium signs in to `my.uscis.gov`, polls your inbox for the
 MFA code, and saves the session to `.uscis_session.json`. This file is
-used only by the `extract` CLI subcommand below for debugging —
-scheduled and manual pulls (`run` / `/api/pull`) deliberately wipe it
-before each pull so every run exercises the full OIDC + MFA flow.
+used only by the `extract` subcommand below; scheduled and manual pulls
+deliberately wipe it before each run so every pull exercises the full
+login flow.
 
 ```bash
 ls -la .uscis_session.json        # must exist and be non-empty
@@ -349,15 +349,14 @@ ls -la .uscis_session.json        # must exist and be non-empty
 python src/session_fetch.py extract
 ```
 
-`extract` uses the saved session but **refuses** to re-login — safe to
-iterate with without burning more MFA codes. Success writes one row
-per case to `data/{formNum}_case.json` (case API).
+`extract` reuses the saved session and **refuses** to re-login — safe to
+iterate with without burning more MFA codes. Success writes one row per
+case to `data/{formNum}_case.json`.
 
-> Note: `extract` is a debug / inspection tool. The production pull
-> path is `python src/session_fetch.py run` (called by `/api/pull` and
-> the scheduler), which starts from a clean slate every time — the
-> saved `.uscis_session.json` is wiped at the start of `run` and not
-> re-created at the end.
+> The production pull path is `python src/session_fetch.py run` (called by
+> `/api/pull` and the scheduler; `fetch` is an alias). It starts from a
+> clean slate every time — the saved session is wiped at the start and
+> not recreated at the end. Use `extract` only for debugging.
 
 ```bash
 ls data/*.json                    # one file per form number + system_log.json
@@ -375,22 +374,25 @@ python src/server.py
  * Running on http://127.0.0.1:8080
 ```
 
-Open <http://127.0.0.1:8080>. Cases render with Overview / Updates /
-Raw JSON tabs, plus a global Updates feed and a System tab (storage
-breakdown + paginated event log). Pulls run on the schedule; click
-**Pull update** for an ad-hoc probe; **Export data** downloads the
-full zip archive; **Export log** (inside System) downloads the
-system log + every preserved trace.
+Open <http://127.0.0.1:8080>. Cases render with Overview / Updates / Raw
+JSON tabs, plus a global Updates feed and a System tab (storage breakdown
++ paginated event log). Pulls run on the schedule; click **Pull update**
+for an ad-hoc probe, **Export data** for the full zip archive, and
+**Export log** (inside System) for the system log plus every preserved
+trace.
+
+> The listen port defaults to `8080`; override with the `USCIS_PORT`
+> environment variable.
 
 ### Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `Missing auth keys in config.json` | A required `auth` field is empty. All four credential fields must be set. |
-| `No USCIS MFA code … within 180s` | IMAP didn't see the email. Verify the app password works (paste into any IMAP client), IMAP access is on, and the USCIS email actually arrived. |
+| `No USCIS MFA code … within 180s` | IMAP didn't see the email. Verify the app password works (paste it into any IMAP client), IMAP access is enabled, and the USCIS email actually arrived. |
 | `AuthError: Session is stale and allow_login=False` | Run `python src/session_fetch.py login` to refresh. |
 | `HTTP 429` on `/api/login` | Brute-force guard tripped. Wait 5 min per IP, or restart the server to reset. |
-| Dashboard shows no cases | Check `data/*_case.json` exists. If empty, the pull step didn't populate them. |
+| Dashboard shows no cases | Check `data/*_case.json` exists. If empty, the pull step didn't populate it. |
 
 ---
 
@@ -399,33 +401,25 @@ system log + every preserved trace.
 Optional — skip if you're running only locally.
 
 > [!WARNING]
-> **Multiple instances against the same USCIS account must not
-> fire a scheduled pull at the same time.** Running several
-> servers side-by-side — a deployed VM, one or more local copies,
-> a one-off testing process — is fine for development, debugging,
-> or sanity-checking a config change, *as long as their scheduled
-> pulls don't overlap*. The hazard is two or more processes
-> hitting USCIS's OIDC + MFA flow within seconds of each other:
-> they'll race for the same MFA email in the IMAP inbox,
-> invalidate one another's session, and can trip rate limits or
-> lockouts on the underlying account.
+> **Two instances on the same USCIS account must never fire a scheduled
+> pull at the same time.** Running several servers side by side — a
+> deployed VM, a local copy, a one-off test process — is fine *as long as
+> their scheduled pulls don't overlap*. Two processes hitting the OIDC +
+> MFA flow within seconds of each other will race for the same MFA email,
+> invalidate each other's session, and can trip rate limits or lockouts
+> on the account.
 >
 > Two safe ways to coexist:
 >
-> - **Stop the others before the next scheduled fire.** If
->   multiple instances share the same `pull_hours` schedule, shut
->   all but one down (close the terminals running `python
->   src/server.py`, or `sudo systemctl stop uscis-checker` on the
->   VM) before that hour hits. Manual `/api/pull` triggers are
->   fine to interleave — just don't let the schedulers fire
->   concurrently.
-> - **Stagger the schedules.** Set non-overlapping `pull_hours`
->   in each `config.json` (e.g. VM at `[6]`, local-A at `[7]`,
->   local-B at `[8]`) so their auto-pulls never collide.
+> - **Stop the others before the next fire.** If instances share the same
+>   `pull_hours`, shut all but one down (close the `python src/server.py`
+>   terminals, or `sudo systemctl stop uscis-checker` on the VM) before
+>   that hour hits. Manual `/api/pull` triggers are fine to interleave.
+> - **Stagger the schedules.** Give each `config.json` non-overlapping
+>   `pull_hours` (e.g. VM `[6]`, local-A `[7]`, local-B `[8]`).
 >
-> The same applies to back-to-back browser logins via `python
-> src/session_fetch.py login`, or any setup where multiple
-> processes share the same `auth.uscis_email`.
+> The same applies to back-to-back `python src/session_fetch.py login`
+> runs sharing one `auth.uscis_email`.
 
 ### 1. Create the VM
 
@@ -507,8 +501,8 @@ EOF
 sudo systemctl restart caddy
 ```
 
-Open ports 80 + 443 in the Azure NSG; keep 8080 closed to the public
-so traffic only reaches Flask through Caddy.
+Open ports 80 + 443 in the Azure NSG; keep 8080 closed to the public so
+traffic only reaches Flask through Caddy.
 
 ### 3. Register the VM's deploy key on GitHub
 
@@ -533,7 +527,7 @@ gh secret set VM_USER --repo <you>/<repo> --body "azureuser"
 gh secret set VM_SSH_KEY --repo <you>/<repo> < ~/.ssh/uscis_checker
 ```
 
-After this, every push to `main` runs tests → SSHes to the VM →
+After this, every push to `main` runs the test suite → SSHes to the VM →
 `git reset --hard origin/main` → reinstalls deps if `requirements.txt`
 changed → restarts the systemd unit → smoke-checks `/login`.
 
@@ -546,100 +540,62 @@ changed → restarts the systemd unit → smoke-checks `/login`.
 ```
 src/
 ├── server.py          Flask app + scheduler + build-version resolver.
-│                      Owns the consolidated pull-envelope logging:
-│                      spawns session_fetch as a subprocess with
-│                      USCIS_LOG_JSONL_STDERR=1, collects the child's
-│                      events, folds in any server-process events via
-│                      thread-local sys_log capture, writes one `pull`
-│                      row.
-├── session_fetch.py   CLI: `run` / `login` / `extract`. Spawned by
-│                      server.py on schedule / button. Writes case
-│                      snapshots to disk.
-├── uscis_auth.py      OpenID Connect + MFA login flow. The *only* module
-│                      that burns an MFA code.
-├── uscis_api.py       Case endpoint (`/cases/{id}`), navigated inside
-│                      an authenticated tab.
-├── mfa_mailbox.py     Polls IMAP for the USCIS MFA code. Provider-
-│                      agnostic — host auto-selected from email domain.
+│                      Spawns session_fetch as a subprocess, collects its
+│                      events, and writes one consolidated `pull` log row.
+├── session_fetch.py   CLI: run / fetch / login / extract. Spawned by
+│                      server.py on schedule / button. Writes snapshots.
+├── uscis_auth.py      OpenID Connect + MFA login. The only module that
+│                      burns an MFA code.
+├── uscis_api.py       Case endpoint (`/cases/{id}`), navigated in an
+│                      authenticated tab.
+├── uscis_status.py    Public status endpoint (statusTitle / statusText).
+├── mfa_mailbox.py     Polls IMAP for the MFA code. Provider-agnostic.
 ├── providers.py       Email-domain → IMAP/SMTP host lookup.
-├── diff_utils.py      Pure functions: day-bin, classify case diff,
-│                      summarize.
+├── diff_utils.py      Pure functions: day-bin, classify diff, summarize.
 ├── access_gate.py     Optional session-cookie gate + brute-force guard.
-├── mailer.py          Email formatting + SMTP send (any provider).
-│                      Every failure stage emits a categorised smtp_*
-│                      event that folds into the pull envelope.
-├── system_log.py      Append-only event store with thread-local and
-│                      JSONL-stderr capture modes. Powers the System
-│                      log tab; paginated 100/page.
+├── mailer.py          Email formatting + SMTP send. Each failure stage
+│                      emits a categorised event into the pull envelope.
+├── event_links.py     Relates events across snapshots for the timeline.
+├── redaction.py       Server-side PII redaction for the dashboard.
+├── system_log.py      Append-only event store (thread-local + JSONL
+│                      capture). Powers the System tab; 100/page.
 └── static/            Dashboard UI (index.html + app.js + style.css).
 
 tests/                 pytest — 580+ tests, 100% line coverage on src/.
 data/                  Snapshot logs. Gitignored.
   {num}_case.json      Case-API snapshot history per form.
-  {num}_status.json    Latest human-readable status per form (overwritten each pull, not snapshotted).
+  {num}_status.json    Latest human-readable status (overwritten each pull).
   system_log.json      Structured event log (rotates at 5000 entries).
 config.json            Your secrets. Gitignored.
 config.example.json    Template.
 ```
 
-### UI & operational features
+### HTTP API
 
-Beyond the snapshot/diff core:
+| Route | Method | Purpose |
+|---|---|---|
+| `/` | GET | Dashboard SPA. |
+| `/api/cases` | GET | All configured cases with current state. |
+| `/api/cases/<label>/history` | GET | Full snapshot + diff history for one case. |
+| `/api/updates` | GET | Global diff feed across every case. |
+| `/api/pull` | POST | Trigger an ad-hoc pull. |
+| `/api/pull/status` | GET | Pull-in-progress state + next scheduled fire. |
+| `/api/export` | GET | Zip of every case snapshot + manifest. |
+| `/api/storage` | GET | Per-case + system-log storage breakdown. |
+| `/api/system-log` | GET | Paginated event log. |
+| `/api/system-log/export` | GET | System log + every preserved trace, zipped. |
+| `/api/redaction-mode` | GET/POST | Read / toggle dashboard PII redaction. |
+| `/api/debug-mode` | GET/POST | Read / toggle `trace_successful_pulls` live. |
+| `/api/version` | GET | Running commit SHA + authored time + sortable label. |
+| `/login`, `/api/login`, `/api/logout`, `/api/auth/status` | — | Access gate (present only when `admin_password` is set). |
 
-- **Dashboard views.** Per-case Overview, Updates (case diffs, with a
-  count badge), Raw JSON; a global Updates feed; a System tab with a
-  stacked storage bar (per case + system log) and a paginated system
-  log; live countdown to the next scheduled pull; build-version chip
-  in the topbar; Debug-mode pill next to it that flips
-  `trace_successful_pulls` live (next pull preserves its trace
-  regardless of outcome).
-- **Login isolation.** `uscis_auth.py` is the only module that burns an
-  MFA code. `extract` refuses to log in — safe for iterating on
-  scraping logic without spamming your inbox. Fresh-session policy in
-  `cmd_run` means scheduled and manual pulls always exercise the full
-  login + MFA flow; the saved session file is *only* used by the
-  `extract` debug subcommand.
-- **Comprehensive failure logging.** Every exit/failure point in
-  every module emits a categorised `sys_log` event (SMTP stage-by-
-  stage, Flask secret I/O, scheduler dispatch, pull thread crashes,
-  route exceptions). One pull produces one consolidated envelope even
-  when 20+ internal events fire; failures never disappear silently.
-- **Optional access gate.** Signed session cookie, constant-time code
-  comparison, 5-per-5-min brute-force guard, 30-day lifetime. The
-  secret key is derived from `admin_password` — rotating the
-  password invalidates every existing session on restart.
-- **CI/CD.** GitHub Actions runs `pytest` on every push/PR; on `main`
-  it SSHes to the VM, `git reset --hard`s, restarts the systemd unit,
-  and smoke-checks `/login`. `GET /api/version` returns the running
-  commit SHA + authored time — useful for deploy-verification scripts.
+### CI/CD
 
-### Configuration (`config.json`)
-
-One file. Gitignored. Minimum viable shape:
-
-```json
-{
-  "cases": [
-    { "id": "IOE…", "label": "I-485" }
-  ],
-  "auth": {
-    "uscis_email":            "…",
-    "uscis_password":         "…",
-    "uscis_mfa_email":        "…",
-    "uscis_mfa_app_password": "…"
-  },
-  "pull_hours": [0, 6, 10, 14, 18],
-  "retry": 2,
-  "retry_wait_seconds": 180
-}
-```
-
-Required keys: `cases`, `auth` (with all four credential fields),
-`retry`, `retry_wait_seconds`, `pull_hours`. Optional runtime
-fields — `trace_successful_pulls` (bool), `admin_password`,
-`notification_email` — default sensibly when absent.
-
-See Setup → Configure for the full field table with optional overrides.
+GitHub Actions runs the full pytest suite (Python 3.11, Node 22 for the
+DOM tests) on every push and pull request. On `main`, it additionally
+deploys to the VM and smoke-checks `/login`. `GET /api/version` returns
+the running commit and a sortable build label, so deploy-verification
+scripts can confirm what landed.
 
 ---
 
@@ -650,10 +606,10 @@ See [LICENSE](LICENSE) for the full text.
 
 Copyright (C) 2026 the USCIS Prober contributors.
 
-Short version: you're free to use, modify, and redistribute this code.
-If you deploy a **modified** version — including as a network service
-your users reach over the internet — you must make the modified
-source available to those users under the same license. Keeping
-this project and any derivatives open is the point.
+Short version: you're free to use, modify, and redistribute this code. If
+you deploy a **modified** version — including as a network service your
+users reach over the internet — you must make the modified source
+available to those users under the same license. Keeping this project and
+any derivatives open is the point.
 
 There is **no warranty**. See sections 15 and 16 of the license.
