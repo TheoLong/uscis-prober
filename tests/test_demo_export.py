@@ -130,3 +130,30 @@ def test_capture_pseudonymizes_ids_not_masks(app):
     _, html = demo_export.build_demo_html(app)
     assert "evt-abc-123" not in html      # real id gone
     assert "id-" in html                  # pseudonymized token present
+
+
+def test_demo_route_serves_inline(app):
+    """GET /demo renders the artifact inline (no attachment disposition)."""
+    app.config["TESTING"] = True
+    client = app.test_client()
+    resp = client.get("/demo")
+    assert resp.status_code == 200
+    assert resp.mimetype == "text/html"
+    # Inline: must NOT force a download.
+    assert "attachment" not in (resp.headers.get("Content-Disposition") or "")
+    body = resp.get_data(as_text=True)
+    assert "USCIS Prober" in body
+    assert "window.__DEMO_MODE__ = true" in body
+    # Same PII guarantee as the download path.
+    assert REAL_RECEIPT not in body
+
+
+def test_export_demo_route_downloads(app):
+    """GET /api/export-demo keeps the attachment disposition (download)."""
+    app.config["TESTING"] = True
+    client = app.test_client()
+    resp = client.get("/api/export-demo")
+    assert resp.status_code == 200
+    cd = resp.headers.get("Content-Disposition") or ""
+    assert "attachment" in cd
+    assert ".html" in cd
