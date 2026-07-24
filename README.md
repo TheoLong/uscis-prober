@@ -1,4 +1,4 @@
-# USCIS Case Prober
+# USCIS Prober
 
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 
@@ -11,7 +11,7 @@ response, and diffs consecutive snapshots to surface changes the public
 
 One config file. No SaaS. Runs on your laptop or a cheap VM.
 
-**[▶ View the live demo →](https://theolong.github.io/uscis-case-prober/)**
+**[▶ View the live demo →](https://theolong.github.io/uscis-prober/)**
 — a fully-redacted, read-only snapshot of the dashboard (all case numbers
 and names masked; every action inert). See exactly what the tool shows
 without installing anything.
@@ -33,7 +33,7 @@ other tracker operates at.
 
 The only way to catch them today is to log into your own account, pull
 the record by hand, save it, and compare it against last time — over and
-over. USCIS Case Prober automates exactly that:
+over. USCIS Prober automates exactly that:
 
 - **Probes the full case API**, not the public status — on a schedule you
   set, plus a one-click **Pull update** for an instant on-demand check.
@@ -82,7 +82,7 @@ A few guarantees hold this together:
 A fully-redacted, read-only demo is published via **GitHub Pages** from the
 [`docs/`](docs/) folder:
 
-**<https://theolong.github.io/uscis-case-prober/>**
+**<https://theolong.github.io/uscis-prober/>**
 
 It's a single self-contained HTML file — the real dashboard with every case
 number and applicant/representative name masked and every action inert. No
@@ -125,7 +125,7 @@ unattended:
 The fast path — clone, install, configure, run:
 
 ```bash
-git clone https://github.com/<you>/uscis-case-prober.git && cd uscis-case-prober
+git clone https://github.com/<you>/uscis-prober.git && cd uscis-prober
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
@@ -363,12 +363,12 @@ things for an unattended, exposed deployment:
 
    ```ini
    [Unit]
-   Description=USCIS Case Prober
+   Description=USCIS Prober
    After=network-online.target
 
    [Service]
-   WorkingDirectory=/path/to/uscis-case-prober
-   ExecStart=/path/to/uscis-case-prober/venv/bin/python src/server.py
+   WorkingDirectory=/path/to/uscis-prober
+   ExecStart=/path/to/uscis-prober/venv/bin/python src/server.py
    Restart=on-failure
 
    [Install]
