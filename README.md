@@ -30,22 +30,17 @@ anytime, without waiting for the next scheduled run.
 
 ## How it works
 
-Every pull — scheduled or triggered by the **Pull update** button — runs
-the same pipeline:
+A pull is triggered two ways — automatically on your `pull_hours`
+schedule, or on demand with the **Pull update** button. Either way, it
+runs the same sequence:
 
-```mermaid
-flowchart TD
-    S["Scheduled pull<br/>(your pull_hours)"] --> W
-    M["Manual pull<br/>(Pull update button)"] --> W
-    W["Wipe any saved session"] --> L["Playwright signs in<br/>to my.uscis.gov"]
-    L --> C["Read the MFA code from<br/>your email inbox over IMAP"]
-    C --> A["Authenticated session"]
-    A --> F["Fetch the case API<br/>for each configured case"]
-    F --> P["Append each response<br/>to data/*_case.json"]
-    P --> D["Diff against history,<br/>classify what changed"]
-    D --> U["Update the dashboard"]
-    D --> E["Email one notification<br/>per new change"]
-```
+1. **Sign in.** Wipe any saved session and log in to `my.uscis.gov` with
+   Playwright, reading the MFA code from your email inbox over IMAP.
+2. **Fetch.** Pull the case API for each configured case and append the
+   full response to `data/{formNum}_case.json`.
+3. **Diff.** Compare against history and classify what changed (`event`,
+   `notice`, `appointment`, `decision`, or `silent_update`).
+4. **Surface.** Update the dashboard and send one email per new change.
 
 A few guarantees hold this together:
 
@@ -66,8 +61,9 @@ A few guarantees hold this together:
 
 ## Features
 
-- **Catches silent updates.** Internal `updatedAt` bumps that are
-  invisible on the public page are flagged as a `silent_update`.
+- **Catches silent updates.** Any change with no new event — a
+  timestamp bump, a flag flip, a field edit — that's invisible on the
+  public page is flagged as a `silent_update`.
 - **Full change classification.** Each diff is tagged `event` (new event
   code — FTA0, APR0, …), `notice` (RFE / receipt / appointment letter),
   `appointment` (biometrics rescheduled), `decision` (`closed` /
@@ -118,8 +114,8 @@ Three deployment shapes, in increasing order of exposure:
   tunnel or reverse proxy (Caddy, Cloudflare Tunnel, `ngrok`) to reach it
   from your phone or share it. The moment it's reachable off your machine,
   set `auth.admin_password`.
-- **Remote deployment.** Run it on an always-on VM (see
-  [Deployment](#deployment-azure-vm--caddy--cicd)) so pulls keep running
+- **Remote deployment.** Run it on an always-on machine (see
+  [Running as a service](#running-as-a-service)) so pulls keep running
   whether your laptop is on or not. A remote server is internet-reachable,
   so `auth.admin_password` is **required**, not optional.
 
@@ -348,127 +344,47 @@ the system log plus every preserved trace.
 
 ---
 
-## Deployment (Azure VM + Caddy + CI/CD)
+## Running as a service
 
-Optional — skip if you're running only locally.
+To keep pulls running when your laptop is off, run it on any always-on
+machine (a VM, a home server, a Raspberry Pi). The setup is identical to
+[Quick start](#quick-start) — clone, install, configure — plus three
+things for an unattended, exposed deployment:
+
+1. **Keep it running.** Use a process manager so it restarts on crash and
+   boot. A minimal systemd unit:
+
+   ```ini
+   [Unit]
+   Description=USCIS Case Prober
+   After=network-online.target
+
+   [Service]
+   WorkingDirectory=/path/to/uscis-case-prober
+   ExecStart=/path/to/uscis-case-prober/venv/bin/python src/server.py
+   Restart=on-failure
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+2. **Put it behind a reverse proxy with HTTPS.** The server listens on
+   `127.0.0.1:8080` (plain HTTP, single-user). Front it with Caddy,
+   nginx, or a tunnel (Cloudflare Tunnel, `ngrok`) to terminate TLS, and
+   keep port 8080 closed to the public so traffic only arrives through
+   the proxy.
+
+3. **Set `auth.admin_password`.** Required once the dashboard is
+   reachable off-machine — see [Security](#security).
 
 > [!WARNING]
 > **Two instances on the same USCIS account must never fire a scheduled
 > pull at the same time.** Two processes hitting the OIDC + MFA flow
 > within seconds of each other will race for the same MFA email,
 > invalidate each other's session, and can trip rate limits or lockouts.
-> Either stop all but one before the next scheduled hour, or give each
-> `config.json` non-overlapping `pull_hours` (e.g. VM `[6]`, local `[7]`).
-> Manual `/api/pull` triggers are fine to interleave.
-
-### 1. Create the VM
-
-```bash
-RG=rg-uscis-checker
-az group create --name $RG --location eastus2
-
-ssh-keygen -t ed25519 -f ~/.ssh/uscis_checker -N ""
-
-az vm create \
-  --resource-group $RG \
-  --name uscis-checker-vm \
-  --image Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest \
-  --size Standard_B1ms \
-  --admin-username azureuser \
-  --ssh-key-values ~/.ssh/uscis_checker.pub \
-  --public-ip-sku Standard \
-  --storage-sku StandardSSD_LRS \
-  --os-disk-size-gb 30 \
-  --nsg-rule SSH
-
-# Optional friendly DNS
-az network public-ip update \
-  --resource-group $RG \
-  --name uscis-checker-vmPublicIP \
-  --dns-name <label>   # → <label>.eastus2.cloudapp.azure.com
-```
-
-### 2. First-time provisioning on the VM
-
-```bash
-sudo apt-get update
-sudo apt-get install -y python3-venv git caddy
-ssh-keygen -t ed25519 -f ~/.ssh/github_deploy -N ""
-cat ~/.ssh/github_deploy.pub     # save for step 3
-
-cat >> ~/.ssh/config <<'EOF'
-Host github.com
-  IdentityFile ~/.ssh/github_deploy
-  IdentitiesOnly yes
-EOF
-
-git clone git@github.com:<you>/<repo>.git ~/uscis-checker
-cd ~/uscis-checker
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-
-cp config.example.json config.json
-# edit config.json — set auth.admin_password to a random string
-
-# systemd unit
-sudo tee /etc/systemd/system/uscis-checker.service <<'EOF'
-[Unit]
-Description=USCIS Case Prober dashboard
-After=network-online.target
-
-[Service]
-Type=simple
-User=azureuser
-WorkingDirectory=/home/azureuser/uscis-checker
-ExecStart=/home/azureuser/uscis-checker/venv/bin/python src/server.py
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl enable --now uscis-checker
-
-# Caddy reverse proxy (automatic HTTPS via Let's Encrypt)
-sudo tee /etc/caddy/Caddyfile <<'EOF'
-<your-hostname> {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:8080
-}
-EOF
-sudo systemctl restart caddy
-```
-
-Open ports 80 + 443 in the Azure NSG; keep 8080 closed to the public so
-traffic only reaches Flask through Caddy.
-
-### 3. Register the VM's deploy key on GitHub
-
-Back on your laptop (`gh` CLI installed):
-
-```bash
-gh repo deploy-key add <(ssh $VM 'cat ~/.ssh/github_deploy.pub') \
-  --repo <you>/<repo> --title "uscis-checker-vm"
-```
-
-### 4. Add GitHub Actions secrets
-
-| Secret | Value |
-|---|---|
-| `VM_HOST` | Public IP or DNS of the VM |
-| `VM_USER` | SSH login (`azureuser` by default) |
-| `VM_SSH_KEY` | **Private** SSH key reaching the VM (`~/.ssh/uscis_checker`) |
-
-```bash
-gh secret set VM_HOST --repo <you>/<repo> --body "<ip-or-host>"
-gh secret set VM_USER --repo <you>/<repo> --body "azureuser"
-gh secret set VM_SSH_KEY --repo <you>/<repo> < ~/.ssh/uscis_checker
-```
-
-After this, every push to `main` runs the test suite → SSHes to the VM →
-`git reset --hard origin/main` → reinstalls deps if `requirements.txt`
-changed → restarts the systemd unit → smoke-checks `/login`.
+> If you run more than one, give each `config.json` non-overlapping
+> `pull_hours` (e.g. server `[6]`, laptop `[7]`). Manual **Pull update**
+> triggers are fine to interleave.
 
 ---
 
@@ -527,9 +443,9 @@ config.example.json    Template.
 ### CI/CD
 
 GitHub Actions runs the full pytest suite (Python 3.11, Node 22 for the
-DOM tests) on every push and pull request. On `main`, it additionally
-deploys to the VM and smoke-checks `/login`. `GET /api/version` returns
-the running commit and a sortable build label for deploy verification.
+DOM tests) on every push and pull request. `GET /api/version` returns the
+running commit and a sortable build label, so a deploy hook can verify
+which build is live.
 
 ---
 
