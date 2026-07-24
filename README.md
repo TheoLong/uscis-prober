@@ -279,7 +279,7 @@ Fill in `config.json`:
     "uscis_password":         "your-uscis-password",
     "uscis_mfa_email":        "you@example.com",
     "uscis_mfa_app_password": "16charapppassword",
-    "optional_access_code":   "",
+    "admin_password":         "",
     "notification_email":     "",
     "notification_from_name": ""
   },
@@ -299,7 +299,7 @@ Fill in `config.json`:
 | `pull_hours` | yes | Automatic-pull schedule: non-empty array of integer hours (0–23, 24h America/New_York). Normalised to sorted unique values. Starter `[0, 6, 10, 14, 18]` pulls five times daily, weighted toward US daytime hours. No default — must be set. |
 | `retry` | yes | Auth-failure retries per scheduled pull (int, ≥0). Start with `2`. Only auth failures retry; timeouts and config errors do not. |
 | `retry_wait_seconds` | yes | Wait between retry attempts, in seconds (int, ≥0). `180` is a good default — long enough for a transient anti-bot block to clear. |
-| `auth.optional_access_code` | no | Recommended when deployed remotely. When non-empty, dashboard requires this code to view. |
+| `auth.admin_password` | no | Recommended when deployed remotely. When non-empty, the dashboard requires this password to view, and it backs the per-action admin challenge. |
 | `auth.notification_email` | no | Override recipient for diff-update emails. Defaults to `uscis_mfa_email`. |
 | `auth.notification_from_name` | no | Display name shown as the sender of diff-update emails. Defaults to `USCIS Prober`. |
 | `trace_successful_pulls` | no | When `true`, every pull preserves its Playwright trace (useful for verifying capture against a green pull). Defaults to `false`; toggle live via the Debug-mode pill in the dashboard. |
@@ -324,7 +324,7 @@ python -c "import json; c=json.load(open('config.json')); \
 pytest -q
 ```
 
-Expected: `350+ passed`, 100% line coverage across `src/`. Any failure
+Expected: `580+ passed`, 100% line coverage across `src/`. Any failure
 here means a dependency / install issue — fix it before moving on.
 
 ### 2. First login (one-off; triggers an MFA email)
@@ -413,15 +413,15 @@ Optional — skip if you're running only locally.
 > Two safe ways to coexist:
 >
 > - **Stop the others before the next scheduled fire.** If
->   multiple instances share the same `pull_minute` cadence, shut
+>   multiple instances share the same `pull_hours` schedule, shut
 >   all but one down (close the terminals running `python
 >   src/server.py`, or `sudo systemctl stop uscis-checker` on the
->   VM) before that minute hits. Manual `/api/pull` triggers are
+>   VM) before that hour hits. Manual `/api/pull` triggers are
 >   fine to interleave — just don't let the schedulers fire
 >   concurrently.
-> - **Stagger the schedules.** Set different `pull_minute` values
->   in each `config.json` (e.g. VM at `[0]`, local-A at `[20]`,
->   local-B at `[40]`) so their auto-pulls never collide.
+> - **Stagger the schedules.** Set non-overlapping `pull_hours`
+>   in each `config.json` (e.g. VM at `[6]`, local-A at `[7]`,
+>   local-B at `[8]`) so their auto-pulls never collide.
 >
 > The same applies to back-to-back browser logins via `python
 > src/session_fetch.py login`, or any setup where multiple
@@ -476,7 +476,7 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp config.example.json config.json
-# edit config.json — set auth.optional_access_code to a random string
+# edit config.json — set auth.admin_password to a random string
 # (strongly recommended when the server is reachable from the internet)
 
 # systemd unit
@@ -573,7 +573,7 @@ src/
 │                      log tab; paginated 100/page.
 └── static/            Dashboard UI (index.html + app.js + style.css).
 
-tests/                 pytest — 350+ tests, 100% line coverage on src/.
+tests/                 pytest — 580+ tests, 100% line coverage on src/.
 data/                  Snapshot logs. Gitignored.
   {num}_case.json      Case-API snapshot history per form.
   {num}_status.json    Latest human-readable status per form (overwritten each pull, not snapshotted).
@@ -606,8 +606,8 @@ Beyond the snapshot/diff core:
   when 20+ internal events fire; failures never disappear silently.
 - **Optional access gate.** Signed session cookie, constant-time code
   comparison, 5-per-5-min brute-force guard, 30-day lifetime. The
-  secret key is derived from `optional_access_code` — rotating the
-  code invalidates every existing session on restart.
+  secret key is derived from `admin_password` — rotating the
+  password invalidates every existing session on restart.
 - **CI/CD.** GitHub Actions runs `pytest` on every push/PR; on `main`
   it SSHes to the VM, `git reset --hard`s, restarts the systemd unit,
   and smoke-checks `/login`. `GET /api/version` returns the running
@@ -636,7 +636,7 @@ One file. Gitignored. Minimum viable shape:
 
 Required keys: `cases`, `auth` (with all four credential fields),
 `retry`, `retry_wait_seconds`, `pull_hours`. Optional runtime
-fields — `trace_successful_pulls` (bool), `optional_access_code`,
+fields — `trace_successful_pulls` (bool), `admin_password`,
 `notification_email` — default sensibly when absent.
 
 See Setup → Configure for the full field table with optional overrides.

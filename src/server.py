@@ -310,9 +310,8 @@ def load_access_lockout_enabled(config: dict | None = None) -> bool:
 def admin_password(config: dict | None = None) -> str:
     """The single site admin password, or "" when password gating is disabled.
 
-    Reads `auth.admin_password`, falling back to the legacy
-    `auth.optional_access_code` so older configs keep working. Empty/missing
-    means no gating: latches toggle freely and actions are never challenged.
+    Reads `auth.admin_password`. Empty/missing means no gating: latches toggle
+    freely and actions are never challenged.
     """
     if config is None:
         try:
@@ -320,7 +319,7 @@ def admin_password(config: dict | None = None) -> str:
         except Exception:
             return ""
     auth = config.get("auth") or {}
-    return (auth.get("admin_password") or auth.get("optional_access_code") or "")
+    return auth.get("admin_password") or ""
 
 
 def _verify_admin_request() -> tuple[bool, int]:

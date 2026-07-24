@@ -1,8 +1,8 @@
 # Copyright (C) 2026 the USCIS Prober contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Optional single-code access gate for the dashboard.
+"""Optional admin-password access gate for the dashboard.
 
-Enabled when `config.auth.optional_access_code` is a non-empty string. Behaviour:
+Enabled when `config.auth.admin_password` is a non-empty string. Behaviour:
   - Unauthenticated requests (except /login, /api/login, /static/*, /api/auth/*)
     are redirected to the login page (for browser nav) or rejected 401 (API).
   - Successful login sets a signed session cookie with a 30-day lifetime.
@@ -167,14 +167,14 @@ def verify_code(provided: str, expected: str, *, ip: str | None = None) -> tuple
 # Stable Flask secret key: persist to disk, regenerate when code rotates
 # ---------------------------------------------------------------------------
 
-def _fingerprint(optional_access_code: str) -> str:
-    return hashlib.sha256(optional_access_code.encode("utf-8")).hexdigest()[:16]
+def _fingerprint(admin_password: str) -> str:
+    return hashlib.sha256(admin_password.encode("utf-8")).hexdigest()[:16]
 
 
-def _load_or_create_secret(root: Path, optional_access_code: str) -> bytes:
-    """Load (or create) a 32-byte secret key bound to the current access code.
+def _load_or_create_secret(root: Path, admin_password: str) -> bytes:
+    """Load (or create) a 32-byte secret key bound to the current admin password.
 
-    If the code changes, the file is rewritten → old cookies invalidate.
+    If the password changes, the file is rewritten → old cookies invalidate.
 
     Every distinct failure mode (corrupt file, chmod rejected, write
     refused) emits a `flask_secret_*` sys_log event so the operator can
@@ -183,7 +183,7 @@ def _load_or_create_secret(root: Path, optional_access_code: str) -> bytes:
     silently drop into the same `except` today without a log.
     """
     secret_file = root / ".flask_secret"
-    fp = _fingerprint(optional_access_code)
+    fp = _fingerprint(admin_password)
     if secret_file.exists():
         try:
             raw = secret_file.read_bytes()
