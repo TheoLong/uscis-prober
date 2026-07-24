@@ -237,6 +237,13 @@ function btnLabel(el) {
 // Returns "" if no challenge is needed, the password to send, or null on cancel.
 // `always:true` forces the prompt (the latch toggles always require it).
 async function adminChallenge({ always = false, action } = {}) {
+  // In the static demo export there is no backend to authenticate against, so
+  // every guarded action is inert. Show one universal notice instead of the
+  // password prompt and abort (null = treated as cancel by every caller).
+  if (window.__DEMO_MODE__) {
+    toast("Action not available in demo site", "warn");
+    return null;
+  }
   if (!always && state.redacted !== true) return "";
   return await requestAdminPassword({ action });
 }
@@ -282,6 +289,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Export data is an <a href> — intercept for the guarded blob path.
   document.getElementById("export-btn")
     ?.addEventListener("click", (e) => guardedDownload(e, "/api/export"));
+  document.getElementById("export-demo-btn")
+    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export-demo"));
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
@@ -405,6 +414,7 @@ function wireExportInfo() {
   // others so they can't visually block each other.
   const pairs = [
     ["export-info-btn",         "export-info-popover"],
+    ["export-demo-info-btn",    "export-demo-info-popover"],
     ["debug-info-btn",          "debug-info-popover"],
     ["recompute-info-btn",      "recompute-info-popover"],
     ["redaction-info-btn",      "redaction-info-popover"],
