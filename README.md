@@ -43,6 +43,10 @@ over. USCIS Prober automates exactly that:
   it's detected.
 - **Hosts locally**, making it genuinely free and private: your
   credentials and case data never leave your machine.
+- **Exports a shareable demo** — one click produces a self-contained,
+  read-only snapshot of your dashboard with every detail intact but all
+  PII (names, receipt numbers) redacted, so you can safely share your case
+  timeline without exposing who it belongs to.
 
 ---
 
