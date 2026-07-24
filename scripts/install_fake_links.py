@@ -18,10 +18,11 @@ if the snapshot changes.
 """
 from __future__ import annotations
 import json
+import os
 import sys
 import urllib.request
 
-BASE = "http://127.0.0.1:8731"
+BASE = f"http://127.0.0.1:{os.environ.get('USCIS_PORT', '8080')}"
 
 # Real I-485 eventIds, oldest -> newest.
 E = {

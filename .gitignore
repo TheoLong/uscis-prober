@@ -23,3 +23,6 @@ venv/
 # Node (frontend test tooling)
 node_modules/
 references/
+
+# Runtime lock files (live PID / timestamps).
+data/*.lock

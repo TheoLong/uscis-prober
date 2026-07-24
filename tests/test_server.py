@@ -1818,7 +1818,7 @@ def test_static_version_falls_back_on_missing_files(monkeypatch):
 
 def test_main_runs_with_configure_gate_and_scheduler(monkeypatch, tmp_path):
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"auth": {"optional_access_code": "c"}, "cases": []}))
+    cfg_path.write_text(json.dumps({"auth": {"admin_password": "c"}, "cases": []}))
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server, "_setup_scheduler", MagicMock())
     monkeypatch.setattr(server.app, "run", MagicMock())
@@ -1826,7 +1826,7 @@ def test_main_runs_with_configure_gate_and_scheduler(monkeypatch, tmp_path):
         server.main()
     gate.assert_called_once()
     args, kwargs = gate.call_args
-    # optional_access_code was propagated from config
+    # admin_password was propagated from config
     assert args[1] == "c"
 
 
@@ -1895,7 +1895,7 @@ def test_main_access_gate_failure_is_fatal(monkeypatch, tmp_path):
     """Access-gate configure failure MUST re-raise — a running server
     without a gate is worse than no server."""
     cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps({"auth": {"optional_access_code": "c"}, "cases": []}))
+    cfg_path.write_text(json.dumps({"auth": {"admin_password": "c"}, "cases": []}))
     monkeypatch.setattr(server, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(server.app, "run", MagicMock())
     with patch.object(server, "configure_access_gate",
