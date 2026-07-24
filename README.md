@@ -114,6 +114,46 @@ config field.
 
 ---
 
+## How to run it
+
+Three deployment shapes, in increasing order of exposure:
+
+- **Completely local.** Run `python src/server.py` on your own machine
+  and reach the dashboard at `http://127.0.0.1:8080`. Nothing is exposed
+  to the network; the site needs no password because only you can reach
+  it. Simplest and most private — good default.
+- **Local with public exposure.** Run it locally but put it behind a
+  tunnel or reverse proxy (Caddy, Cloudflare Tunnel, `ngrok`) so you can
+  check it from your phone or share it. The moment the dashboard is
+  reachable off your machine, **set `auth.admin_password`** (see below).
+- **Remote deployment.** Run it on an always-on VM (the
+  [Deployment](#deployment-azure-vm--caddy--cicd) section walks through
+  Azure + Caddy + CI/CD). Pulls keep running whether your laptop is on or
+  not. A remote server is internet-reachable, so `auth.admin_password` is
+  **required** here, not optional.
+
+### Security
+
+The dashboard exposes your real case data — names, receipt numbers,
+notice history. As long as it only listens on `127.0.0.1` (completely
+local), that's fine: nothing off your machine can reach it.
+
+**The moment it's reachable from anywhere else, protect it.** Set
+`auth.admin_password` in `config.json` to a random string. When it's
+non-empty the site requires that password to view, backed by:
+
+- a signed session cookie (30-day lifetime),
+- constant-time password comparison (a wrong guess reveals nothing by
+  timing),
+- a brute-force guard (max 5 failed attempts per IP per 5 minutes),
+- automatic session invalidation when you rotate the password.
+
+Leave it empty only for the completely-local case. The dashboard also
+supports a redaction toggle that masks PII (names, receipt numbers,
+letter IDs) in the rendered view — handy when sharing a screen.
+
+---
+
 ## How it works
 
 **Core principle: snapshot everything, diff nothing away.**
@@ -155,6 +195,25 @@ config field.
 ## Setup
 
 ### 1. Prerequisites
+
+Because the tracker signs in as **you** and pulls *your* case API, your
+USCIS account and email must be set up so the server can log in
+unattended:
+
+1. **Your cases are tied to your USCIS account.** The receipts you want
+   to track must appear when you sign in at `my.uscis.gov` — the case API
+   is only reachable through your authenticated session. Add them to your
+   account first if they aren't already.
+2. **USCIS MFA is set to email.** Sign-in must challenge with a code sent
+   to an email inbox (not SMS or an authenticator app), because the
+   server reads that code from your mailbox automatically. Set your USCIS
+   account's MFA method to email.
+3. **An email app password for that inbox.** The server retrieves the MFA
+   code over IMAP and sends notifications over SMTP using an app password
+   (see [Step 3](#3-obtain-an-app-password)). This is what lets it sign
+   in and pull the API without you in the loop.
+
+System requirements:
 
 - Python 3.10 or newer
 - A system that can run headless Chromium (macOS, Linux, WSL)
