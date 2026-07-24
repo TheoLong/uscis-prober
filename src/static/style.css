@@ -289,7 +289,11 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin: 6px 0 0 4px;
+  /* Left-align with the brand pill above: the topbar has 28px side padding,
+     so the brand's left edge sits at 28px. Match it here (this pill lives
+     outside .topbar). The narrow-width override below tracks the topbar's
+     reduced 16px padding. */
+  margin: 6px 0 0 28px;
   padding: 2px 9px;
   font-size: 0.72rem;
   font-weight: 600;
@@ -2210,6 +2214,9 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
     padding: 14px 16px;
     gap: 10px;
   }
+  /* Keep the byline left-aligned with the brand at the ≤900px topbar
+     padding (16px). Applies down through the narrower breakpoints too. */
+  .byline-pill { margin-left: 16px; }
 
   .case-header {
     flex-direction: column;
