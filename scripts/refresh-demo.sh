@@ -2,11 +2,11 @@
 # Copyright (C) 2026 the USCIS Prober contributors
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regenerate the GitHub Pages demo (docs/index.html) from a running prober.
+# Regenerate the GitHub Pages demo (demo/index.html) from a running prober.
 #
 # The demo is a single self-contained, fully-redacted HTML artifact — safe to
 # commit. This rebuilds it so the published Pages site reflects current case
-# data. Run it, then commit docs/index.html.
+# data. Run it, then commit demo/index.html.
 #
 # Usage:
 #   scripts/refresh-demo.sh                 # pull from the local prober (:8731)
@@ -15,7 +15,7 @@ set -euo pipefail
 
 PROBER_URL="${PROBER_URL:-http://127.0.0.1:8731}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/docs/index.html"
+OUT="$ROOT/demo/index.html"
 
 echo "Fetching demo from ${PROBER_URL}/api/export-demo ..."
 curl -fsS "${PROBER_URL}/api/export-demo" -o "$OUT"
@@ -31,4 +31,4 @@ if [ -n "$leaked" ]; then
 fi
 
 bytes=$(wc -c < "$OUT")
-echo "Wrote $OUT (${bytes} bytes). Review, then commit docs/index.html."
+echo "Wrote $OUT (${bytes} bytes). Review, then commit demo/index.html."

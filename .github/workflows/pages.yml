@@ -1,0 +1,38 @@
+# Publish the redacted demo (demo/) to GitHub Pages.
+#
+# Branch-based Pages can only serve from / or /docs, so this uses the
+# Actions deployment path to publish the demo/ folder instead. Enable via
+# repo Settings -> Pages -> Source: GitHub Actions (requires a public repo
+# on the Free plan).
+name: Deploy demo to Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["demo/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo
+      - id: deployment
+        uses: actions/deploy-pages@v4

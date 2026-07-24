@@ -80,7 +80,7 @@ A few guarantees hold this together:
 ## Demo
 
 A fully-redacted, read-only demo is published via **GitHub Pages** from the
-[`docs/`](docs/) folder:
+[`demo/`](demo/) folder:
 
 **<https://theolong.github.io/uscis-prober/>**
 
@@ -93,12 +93,14 @@ backend, no private data; safe to share.
   applying server-side redaction. `GET /demo` serves the same artifact inline.
 - **Refresh it** after case data changes:
   ```bash
-  scripts/refresh-demo.sh        # pulls from the local prober, writes docs/index.html
-  git add docs/index.html && git commit -m "Refresh demo"
+  scripts/refresh-demo.sh        # pulls from the local prober, writes demo/index.html
+  git add demo/index.html && git commit -m "Refresh demo"
   ```
   The script refuses to publish if any unmasked receipt number slips through.
-- **Enable Pages** (one-time): repo *Settings → Pages → Source: Deploy from a
-  branch → `main` / `docs`*. Requires a public repo on the Free plan.
+- **Enable Pages** (one-time): repo *Settings → Pages → Source: GitHub
+  Actions*. The included [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
+  publishes the `demo/` folder on every push to `main`. Requires a public repo
+  on the Free plan.
 
 ---
 
