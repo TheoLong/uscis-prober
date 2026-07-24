@@ -15,16 +15,29 @@ One config file. No SaaS. Runs on your laptop or a cheap VM.
 
 ## Why this exists
 
-The public USCIS status page shows a single plain-English sentence and
-hides the machine-readable case record behind your login. That record
-carries event codes, notice history, jurisdiction, and an internal
-"last updated" timestamp that often moves **days before** the public
-sentence changes — or moves without the sentence changing at all.
+Every case tracker out there watches the same thing: the public **case
+status** — that one plain-English sentence USCIS shows on its site. Some
+charge money for it. None of them look at the full case API behind your
+login, and none keep snapshot-level history to diff against.
 
-USCIS Case Prober captures that full record every pull and tells you the
-moment anything shifts. Pulls run on the schedule you set, and a single
-**Pull update** button lets you probe on demand — check right now,
-anytime, without waiting for the next scheduled run.
+But the real signal lives in that API: event codes, notice history,
+jurisdiction, and an internal "last updated" timestamp that often moves
+**days before** the public sentence changes — or moves without it ever
+changing. These **silent updates** are invisible at the resolution every
+other tracker operates at.
+
+The only way to catch them today is to log into your own account, pull
+the record by hand, save it, and compare it against last time — over and
+over. USCIS Case Prober automates exactly that:
+
+- **Probes the full case API**, not the public status — on a schedule you
+  set, plus a one-click **Pull update** for an instant on-demand check.
+- **Stores every snapshot** and diffs consecutive ones, so it surfaces
+  silent updates no status-only checker can see.
+- **Emails you on any movement** — official or unofficial — the moment
+  it's detected.
+- **Hosts locally**, making it genuinely free and private: your
+  credentials and case data never leave your machine.
 
 ---
 
@@ -56,28 +69,6 @@ A few guarantees hold this together:
 - **Never commit secrets.** `config.json`, `data/*.json`,
   `.uscis_session.json`, and `.flask_secret` are gitignored. Only
   `uscis_auth.py` may trigger MFA.
-
----
-
-## Features
-
-- **Catches silent updates.** Any change with no new event — a
-  timestamp bump, a flag flip, a field edit — that's invisible on the
-  public page is flagged as a `silent_update`.
-- **Full change classification.** Each diff is tagged `event` (new event
-  code — FTA0, APR0, …), `notice` (RFE / receipt / appointment letter),
-  `appointment` (biometrics rescheduled), `decision` (`closed` /
-  `actionRequired` flipped), or `silent_update`.
-- **Dashboard.** Per-case Overview / Updates / Raw JSON tabs, a global
-  Updates feed, and a System tab with a storage breakdown, paginated
-  event log, and a live countdown to the next pull.
-- **Email alerts.** One email per new change, de-duplicated across
-  restarts so nothing is re-sent or dropped.
-- **Deep diagnostics.** Every pull records a native Playwright trace
-  (DOM, network, console, screenshots), saved on failure — or on every
-  pull in Debug mode — and replayable in the built-in viewer.
-- **One-click export.** Bundle every case snapshot + manifest into a
-  timestamped zip for a lawyer or your own archive.
 
 ---
 
