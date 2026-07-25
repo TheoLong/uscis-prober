@@ -100,6 +100,25 @@ def test_redaction_lock_overlay_styles_ship():
     assert ".admin-pw-input" in STYLE_CSS, "missing admin-password prompt input style"
 
 
+def test_locked_api_pill_does_not_get_double_padlock():
+    # The API pill renders its own padlock via .api-link-locked::before. The
+    # generic guard overlay (body.redaction-latched [data-guard]::after) also
+    # adds a padlock, so the pill MUST be excluded from that overlay or it shows
+    # two locks. Regression guard for that double-lock visual bug.
+    assert ".api-link-locked::before" in STYLE_CSS, "API pill should own a lock glyph"
+    # Every guard-overlay rule must exclude the api-link-locked pill.
+    overlay_rules = [
+        line for line in STYLE_CSS.splitlines()
+        if 'redaction-latched' in line and 'data-guard="redaction"' in line
+    ]
+    assert overlay_rules, "guard overlay rules not found"
+    for rule in overlay_rules:
+        assert ":not(.api-link-locked)" in rule, (
+            "guard overlay must exclude .api-link-locked to avoid a double "
+            f"padlock: {rule.strip()!r}"
+        )
+
+
 def test_redaction_popover_explains_what_is_masked():
     pop = INDEX_HTML[INDEX_HTML.find('id="redaction-info-popover"'):]
     pop = pop[: pop.find("</div>") + len("</div>")].lower()

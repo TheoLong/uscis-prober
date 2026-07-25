@@ -1627,13 +1627,15 @@ main[hidden] { display: none; }
    clickable (clicking prompts for the admin password) but reads as locked:
    desaturated and dimmed, with a faded padlock centered over it. The overlay
    is pointer-transparent so the click still lands on the button beneath. */
-body.redaction-latched [data-guard="redaction"] {
+/* The locked API pill renders its own padlock via .api-link-locked::before,
+   so it opts OUT of the generic guard overlay below to avoid a double lock. */
+body.redaction-latched [data-guard="redaction"]:not(.api-link-locked) {
   position: relative;
   filter: grayscale(1);
   opacity: 0.6;
 }
-body.redaction-latched [data-guard="redaction"]:hover { opacity: 0.78; }
-body.redaction-latched [data-guard="redaction"]::after {
+body.redaction-latched [data-guard="redaction"]:not(.api-link-locked):hover { opacity: 0.78; }
+body.redaction-latched [data-guard="redaction"]:not(.api-link-locked)::after {
   content: "🔒";
   position: absolute;
   inset: 0;
