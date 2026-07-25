@@ -78,31 +78,37 @@ test("REDACT_KEYS covers both receipt key spellings + the two names", () => {
   assert.deepEqual(keys, ["applicantName", "receipt", "receiptNumber", "representativeName"]);
 });
 
-test("redactSnapshot masks any identifier key (eventId, letterId, pid)", () => {
+test("redactSnapshot pseudonymizes render-critical ids, masks display-only ids", () => {
   const { T } = load();
   const out = T.redactSnapshot({
     events: [{ eventId: "abc-123", eventCode: "RFE", eventDateTime: "2026-03-01" }],
     notices: [{ letterId: "L-998877", actionType: "ISSUED" }],
     pid: "P-42",
+    noticeId: "94aa58520cdb",
     formType: "I485",
   });
-  assert.equal(out.events[0].eventId, MASK, "eventId masked");
+  // Render-critical: pseudonymized (unique token, real value withheld).
+  assert.ok(out.events[0].eventId.startsWith("id-"), "eventId pseudonymized");
+  assert.notEqual(out.events[0].eventId, "abc-123");
+  assert.notEqual(out.events[0].eventId, MASK);
+  // Display-only ids: fully masked (no id-token in a shared demo).
   assert.equal(out.notices[0].letterId, MASK, "letterId masked");
   assert.equal(out.pid, MASK, "pid masked");
+  assert.equal(out.noticeId, MASK, "noticeId masked");
   // Non-identifier siblings are untouched.
   assert.equal(out.events[0].eventCode, "RFE");
   assert.equal(out.notices[0].actionType, "ISSUED");
   assert.equal(out.formType, "I485");
 });
 
-test("redactDetailValue masks an identifier-keyed row when redaction is on", () => {
+test("redactDetailValue masks a display-only id row when redaction is on", () => {
   const { T } = load();
   T.state.redacted = true;
-  assert.equal(T.redactDetailValue("eventId", "abc-123"), MASK);
   assert.equal(T.redactDetailValue("letterId", "L-1"), MASK);
+  assert.equal(T.redactDetailValue("noticeId", "n-1"), MASK);
   assert.equal(T.redactDetailValue("eventCode", "RFE"), "RFE"); // non-id kept
   T.state.redacted = false;
-  assert.equal(T.redactDetailValue("eventId", "abc-123"), "abc-123"); // no-op when off
+  assert.equal(T.redactDetailValue("letterId", "L-1"), "L-1"); // no-op when off
 });
 
 test("redactSnapshot masks the system-log style `receipt` key", () => {
@@ -112,14 +118,18 @@ test("redactSnapshot masks the system-log style `receipt` key", () => {
   assert.equal(out.label, "I-485"); // form type kept
 });
 
-test("redactSnapshot scrubs receipt numbers embedded in free-text strings", () => {
+test("redactSnapshot masks url keys and scrubs receipts in free text", () => {
   const { T } = load();
   const out = T.redactSnapshot({
     url: "https://egov.uscis.gov/casestatus/IOE0000000000/detail",
+    statusText: "Receipt Number IOE0000000000 processing",
     note: "no identifiers here",
   });
-  assert.ok(!out.url.includes("IOE0000000000"), "embedded receipt should be scrubbed");
-  assert.ok(out.url.includes(T.REDACTION_MASK));
+  // url is a URI key -> fully masked (no id-token, no receipt survives).
+  assert.equal(out.url, T.REDACTION_MASK, "url masked outright");
+  // free text still pattern-scrubbed in place.
+  assert.ok(!out.statusText.includes("IOE0000000000"), "embedded receipt scrubbed");
+  assert.ok(out.statusText.includes(T.REDACTION_MASK));
   assert.equal(out.note, "no identifiers here");
 });
 

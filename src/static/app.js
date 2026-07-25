@@ -122,10 +122,26 @@ function isNameKey(k) {
   return lk.endsWith("name") && !NAME_KEY_ALLOW.has(lk) && !REDACT_KEYS.has(k);
 }
 
-// Any identifier key (eventId, letterId, pid, …) is also masked in displayed
-// copies. These are USCIS-internal IDs, so they only need hiding on screen —
-// not withholding from the browser, where the timeline still keys on the real
-// eventId. Display-layer only; never applied to data the renderer keys on.
+// A very small set of id keys are render-critical: the timeline dedups on
+// `eventId`, the update stream on `id`, and the reemit overlay wires
+// `originId`→`reemitId`. Masking these to one constant would merge distinct
+// rows, so they are PSEUDONYMIZED (stable opaque token, uniqueness kept).
+// Mirror of redaction.py _PSEUDONYMIZE_KEYS.
+const PSEUDONYMIZE_KEYS = new Set(["eventId", "originId", "reemitId", "id"]);
+function isPseudonymizeKey(k) {
+  return PSEUDONYMIZE_KEYS.has(k);
+}
+
+// Stable opaque token for a render-critical id (uniqueness preserved, value
+// hidden). Not cryptographic — the demo ships server-redacted data already;
+// this only keeps the live-site redaction toggle from collapsing the timeline.
+function pseudonymize(value) {
+  const s = String(value);
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+  return "id-" + (h >>> 0).toString(16).padStart(8, "0");
+}
+
 // URL / URI / link keys carry receipt-bearing paths or opaque access tokens
 // (documentUri). Mirror of redaction.py: match url/uri/link/href as a whole
 // word-segment of the key (split on non-alphanumerics AND camelCase), so
@@ -138,7 +154,12 @@ function isUriKey(k) {
   return segs.some(s => URI_KEY_TOKENS.has(s.toLowerCase()));
 }
 
+// True when a key's value must be MASKED (••••••••). Excludes the
+// render-critical pseudonymize keys, which are handled separately so the
+// timeline/overlay keep working. Display-only ids (noticeId, letterId, pid,
+// …), name keys, URI/token keys, and explicit REDACT_KEYS all mask.
 function isRedactKey(k) {
+  if (isPseudonymizeKey(k)) return false;
   return REDACT_KEYS.has(k) || isNameKey(k) || isUriKey(k) || /id$/i.test(k);
 }
 
@@ -167,9 +188,14 @@ function redactSnapshot(value) {
   if (value && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = (isRedactKey(k) && v != null && typeof v !== "object")
-        ? REDACTION_MASK
-        : redactSnapshot(v);
+      const scalar = v != null && typeof v !== "object";
+      if (isPseudonymizeKey(k) && scalar) {
+        out[k] = pseudonymize(v);            // keep unique for rendering
+      } else if (isRedactKey(k) && scalar) {
+        out[k] = REDACTION_MASK;             // display-only id / uri / name / PII
+      } else {
+        out[k] = redactSnapshot(v);
+      }
     }
     return out;
   }

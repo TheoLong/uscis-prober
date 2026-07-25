@@ -52,28 +52,44 @@ _PATTERNS = (
     re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
 )
 
-# Identifier keys (eventId, letterId, originId, pid, the synthetic update `id`, …)
-# can't be fixed-masked: the browser keys the event timeline + link overlay on
-# the real eventId, so collapsing them all to one mask would merge every event.
-# Instead we pseudonymize — replace each id with a stable opaque token — so the
-# real value never reaches the browser while uniqueness (all the client needs)
-# is preserved. The salt is per-process and random, so tokens can't be reversed.
+# A very small set of identifier keys are load-bearing for RENDERING: the
+# frontend dedups the event timeline on `eventId` and the update stream on the
+# synthetic `id`, and draws the reemit link overlay between `originId` and
+# `reemitId` rows. If these collapsed to one constant mask, distinct events
+# would merge and the overlay would mis-wire. For ONLY these we pseudonymize —
+# swap each real value for a stable opaque token so uniqueness survives while
+# the real id never ships. Every OTHER identifier/URI key is display-only and
+# gets fully masked (••••••••) — a shared demo should surface no id-looking
+# tokens at all. The salt is per-process and random, so tokens can't be
+# reversed.
 _ID_SALT = secrets.token_bytes(16)
+
+# Render-critical id keys that MUST stay unique (pseudonymized, not masked).
+_PSEUDONYMIZE_KEYS = frozenset({"eventId", "originId", "reemitId", "id"})
+
+
+def _is_pseudonymize_key(key: Any) -> bool:
+    return key in _PSEUDONYMIZE_KEYS
 
 
 def _is_id_key(key: Any) -> bool:
-    return isinstance(key, str) and key.lower().endswith("id") and key not in REDACT_KEYS
+    # Any *Id key (noticeId, letterId, pid, cmsContentId, …) that is NOT one of
+    # the render-critical keys above — these get fully masked.
+    return (
+        isinstance(key, str)
+        and key.lower().endswith("id")
+        and key not in REDACT_KEYS
+        and key not in _PSEUDONYMIZE_KEYS
+    )
 
 
 # URL / URI / link keys carry receipt-bearing paths (…/cases/IOE…) or opaque
-# access tokens (documentUri) that must never reach a shared demo. We can't
-# fixed-mask them (a link overlay may need distinct values), so they are
-# pseudonymized like ids — the real URL/token never ships, uniqueness is kept.
-# Matched when url/uri/link/href appears as a whole word-segment of the key —
-# split on non-alphanumerics AND camelCase — so `url`, `documentUri`,
-# `url_before`, `url_after`, `pageHref`, `sourceLink` are all caught, while
-# lookalikes that merely embed the letters (`jurisdictionDescription`,
-# `documentCount`) are not.
+# access tokens (documentUri) that must never reach a shared demo. None of them
+# are render-critical, so they are fully masked. Matched when url/uri/link/href
+# appears as a whole word-segment of the key — split on non-alphanumerics AND
+# camelCase — so `url`, `documentUri`, `url_before`, `url_after`, `pageHref`,
+# `sourceLink` are all caught, while lookalikes that merely embed the letters
+# (`jurisdictionDescription`, `documentCount`) are not.
 _URI_KEY_TOKENS = frozenset({"url", "uri", "link", "href"})
 _CAMEL_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
 
@@ -114,10 +130,15 @@ def redact_obj(value: Any) -> Any:
                 out[k] = REDACTION_MASK
             elif _is_name_key(k) and scalar:
                 out[k] = REDACTION_MASK
+            elif _is_pseudonymize_key(k) and scalar:
+                # Render-critical ids: keep unique via an opaque token.
+                out[k] = _pseudonymize(v)
             elif _is_id_key(k) and scalar:
-                out[k] = _pseudonymize(v)
+                # Display-only ids (noticeId, letterId, pid, …): fully masked.
+                out[k] = REDACTION_MASK
             elif _is_uri_key(k) and scalar:
-                out[k] = _pseudonymize(v)
+                # URLs / tokens (documentUri, url, …): fully masked.
+                out[k] = REDACTION_MASK
             else:
                 out[k] = redact_obj(v)
         return out
