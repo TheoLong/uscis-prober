@@ -2087,7 +2087,17 @@ def api_case_api_link():
     # Password gate — only while redaction is latched (the receipt is masked
     # then, so the URL is sensitive). Mirrors _redaction_action_gate but scoped
     # to this one resolver so it can hand back the real URL on success.
-    if load_redaction_enabled() and admin_password():
+    #
+    # When redaction is latched the receipt is sensitive, so the real URL must
+    # only ever be handed to a verified admin. If a password IS configured we
+    # verify it; if NO password is configured there's nothing to verify against,
+    # so we refuse (403) rather than leak the receipt — otherwise this route
+    # would hand back the exact number every other response masks (the
+    # after_request scrubber exempts this path on 200). Mirrors how
+    # _redaction_action_gate degrades guarded actions to 403.
+    if load_redaction_enabled():
+        if not admin_password():
+            return jsonify({"ok": False, "error": "redaction_enabled"}), 403
         ok, retry_after = _verify_admin_request()
         if not ok:
             if retry_after:
@@ -2099,7 +2109,7 @@ def api_case_api_link():
     try:
         cfg = load_config()
     except Exception as e:  # pragma: no cover — defensive
-        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_load_failed", "type": type(e).__name__}), 500
 
     receipt = None
     for c in cfg.get("cases", []):
@@ -2144,7 +2154,7 @@ def api_redaction_mode():
     try:
         cfg = load_config()
     except Exception as e:  # pragma: no cover — defensive
-        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_load_failed", "type": type(e).__name__}), 500
 
     cfg["redaction_enabled"] = desired
     try:
@@ -2152,7 +2162,7 @@ def api_redaction_mode():
         tmp.write_text(json.dumps(cfg, indent=2))
         os.replace(tmp, CONFIG_PATH)
     except OSError as e:  # pragma: no cover — filesystem should not fail
-        return jsonify({"ok": False, "error": f"config_write_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_write_failed", "type": type(e).__name__}), 500
 
     return jsonify({"ok": True, "enabled": desired})
 
@@ -2185,7 +2195,7 @@ def api_access_lockout():
     try:
         cfg = load_config()
     except Exception as e:  # pragma: no cover — defensive
-        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_load_failed", "type": type(e).__name__}), 500
 
     cfg["access_lockout_enabled"] = desired
     try:
@@ -2193,7 +2203,7 @@ def api_access_lockout():
         tmp.write_text(json.dumps(cfg, indent=2))
         os.replace(tmp, CONFIG_PATH)
     except OSError as e:  # pragma: no cover — filesystem should not fail
-        return jsonify({"ok": False, "error": f"config_write_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_write_failed", "type": type(e).__name__}), 500
 
     return jsonify({"ok": True, "enabled": desired})
 
@@ -2226,7 +2236,7 @@ def api_debug_mode():
     try:
         cfg = load_config()
     except Exception as e:  # pragma: no cover — defensive
-        return jsonify({"ok": False, "error": f"config_load_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_load_failed", "type": type(e).__name__}), 500
 
     prior = cfg.get("trace_successful_pulls")
     cfg["trace_successful_pulls"] = desired
@@ -2236,7 +2246,7 @@ def api_debug_mode():
         tmp.write_text(json.dumps(cfg, indent=2))
         os.replace(tmp, CONFIG_PATH)
     except OSError as e:  # pragma: no cover — filesystem should not fail
-        return jsonify({"ok": False, "error": f"config_write_failed: {e}"}), 500
+        return jsonify({"ok": False, "error": "config_write_failed", "type": type(e).__name__}), 500
 
     # The toggle is a lightweight UI action — no system-log entry.
     # The next pull will carry `trace_successful_pulls` through its

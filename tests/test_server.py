@@ -538,6 +538,28 @@ def test_case_api_link_password_gated_while_redacted(admin_client, tmp_path):
     assert "•" not in url and "IOE0000000000" in url, "receipt must not be masked in the URL"
 
 
+def test_case_api_link_refused_when_redacted_and_no_password(client, tmp_path):
+    # Redaction ON but NO admin_password configured: there's nothing to verify
+    # against, so the route must REFUSE (403) rather than hand back the real
+    # receipt-bearing URL. Regression test for the redaction-bypass where the
+    # gate was skipped whenever admin_password() was empty, leaking the exact
+    # receipt that every other response masks.
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["cases"] = [{"id": "IOE0000000000", "label": "I-485"}]
+    cfg["redaction_enabled"] = True
+    cfg.get("auth", {}).pop("admin_password", None)
+    cfg_path.write_text(json.dumps(cfg))
+
+    r = client.post("/api/case-api-link", json={"label": "I-485", "kind": "case"})
+    assert r.status_code == 403
+    body = r.get_json()
+    assert body.get("error") == "redaction_enabled"
+    assert "url" not in body
+    # The real receipt must not appear anywhere in the response.
+    assert "IOE0000000000" not in r.get_data(as_text=True)
+
+
 def test_case_api_link_rejects_bad_input(admin_client):
     assert admin_client.post("/api/case-api-link", json={"kind": "case"}).status_code == 400
     assert admin_client.post("/api/case-api-link",

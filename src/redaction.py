@@ -26,6 +26,22 @@ REDACT_KEYS = frozenset({
     "receiptNumber", "receipt", "applicantName", "representativeName",
 })
 
+# Defense-in-depth for future USCIS API changes: any *other* key ending in
+# "name" (beneficiaryName, petitionerName, firstName, lastName, fullName, …) is
+# also masked, so a newly-added name field can't silently leak in redaction
+# mode before REDACT_KEYS is updated. A small allowlist exempts the known
+# name-suffixed keys that are NOT PII and must stay visible (e.g. the form
+# type). Verified against real data (2026-07): the only *Name keys present are
+# applicantName / representativeName (PII, masked) and formName (safe).
+_NAME_KEY_ALLOW = frozenset({"formname", "statusname", "eventname"})
+
+
+def _is_name_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    k = key.lower()
+    return k.endswith("name") and k not in _NAME_KEY_ALLOW and key not in REDACT_KEYS
+
 # Fixed-width mask — leaks nothing about the original length.
 REDACTION_MASK = "•" * 8  # ••••••••
 
@@ -75,6 +91,8 @@ def redact_obj(value: Any) -> Any:
         for k, v in value.items():
             scalar = v is not None and not isinstance(v, (dict, list))
             if k in REDACT_KEYS and scalar:
+                out[k] = REDACTION_MASK
+            elif _is_name_key(k) and scalar:
                 out[k] = REDACTION_MASK
             elif _is_id_key(k) and scalar:
                 out[k] = _pseudonymize(v)

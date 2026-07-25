@@ -98,3 +98,23 @@ def test_pseudonymize_is_stable_and_distinct():
     b = redact_obj({"eventId": "other"})["eventId"]
     assert a1 == a2, "stable across keys/calls for the same real id"
     assert a1 != b, "distinct ids yield distinct tokens"
+
+
+def test_name_keys_masked_except_safe_allowlist():
+    # Defense-in-depth: any key ending in "name" (beyond the explicit
+    # REDACT_KEYS) is masked, so a future USCIS name field can't leak in
+    # redaction mode. Known-safe name-suffixed keys stay visible.
+    out = redact_obj({
+        "applicantName": "TESTNAME",        # explicit REDACT_KEY
+        "beneficiaryName": "SOMEONE",       # new → masked by heuristic
+        "petitionerName": "ACME CORP",      # new → masked by heuristic
+        "fullName": "A B",                  # new → masked by heuristic
+        "formName": "I-485",                # allowlisted → visible
+        "statusName": "Pending",            # allowlisted → visible
+    })
+    assert out["applicantName"] == REDACTION_MASK
+    assert out["beneficiaryName"] == REDACTION_MASK
+    assert out["petitionerName"] == REDACTION_MASK
+    assert out["fullName"] == REDACTION_MASK
+    assert out["formName"] == "I-485"
+    assert out["statusName"] == "Pending"

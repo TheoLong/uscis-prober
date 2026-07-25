@@ -111,12 +111,23 @@ const REDACT_KEYS = new Set([
   "receiptNumber", "receipt", "applicantName", "representativeName",
 ]);
 
+// Defense-in-depth mirror of the server (redaction.py): any OTHER key ending
+// in "name" is treated as PII too, so a future USCIS name field is masked
+// before it's ever displayed. A small allowlist keeps known-safe name-suffixed
+// keys visible (the form type, status/event labels).
+const NAME_KEY_ALLOW = new Set(["formname", "statusname", "eventname"]);
+function isNameKey(k) {
+  if (typeof k !== "string") return false;
+  const lk = k.toLowerCase();
+  return lk.endsWith("name") && !NAME_KEY_ALLOW.has(lk) && !REDACT_KEYS.has(k);
+}
+
 // Any identifier key (eventId, letterId, pid, …) is also masked in displayed
 // copies. These are USCIS-internal IDs, so they only need hiding on screen —
 // not withholding from the browser, where the timeline still keys on the real
 // eventId. Display-layer only; never applied to data the renderer keys on.
 function isRedactKey(k) {
-  return REDACT_KEYS.has(k) || /id$/i.test(k);
+  return REDACT_KEYS.has(k) || isNameKey(k) || /id$/i.test(k);
 }
 
 // A fixed mask — fixed width so it leaks nothing about the original length.

@@ -243,8 +243,17 @@ def _extract_cases(
 
     failures = 0
     for case in cases:
-        receipt = case["id"]
+        # Read the receipt defensively BEFORE the per-case try below: a config
+        # entry missing "id" must skip just that case, not KeyError out of the
+        # loop and abort every remaining case (defeating per-case isolation).
+        receipt = case.get("id")
         label = case.get("label") or case.get("type") or ""
+        if not receipt:
+            failures += 1
+            logger.warning("Skipping case with no 'id' (label=%r)", label or "?")
+            sys_log("case_fetch_skipped_no_id", level="warning",
+                    source="session_fetch", label=label or "?")
+            continue
         logger.info("Fetching %s (%s)...", label or "?", receipt)
         sys_log("case_fetch_start", source="session_fetch",
                 label=label or "?", receipt=receipt)
