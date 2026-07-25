@@ -48,6 +48,17 @@ over. USCIS Prober automates exactly that:
   PII (names, receipt numbers) redacted, so you can safely share your case
   timeline without exposing who it belongs to.
 
+**Start early, and don't go it alone.** The tool can only diff what it has
+captured, so the sooner you start probing, the more complete your case
+history will be — begin the day you file and you'll have a snapshot of
+every movement from receipt onward, with no gaps to guess around. And the
+more people who run USCIS Prober, the more we can converge on a
+**standardized, shareable data format** for case histories. Pooling
+redacted timelines across many cases is how we start to understand USCIS
+processing as a whole — which event codes really precede an approval, how
+long each stage actually takes, and what the silent updates mean — instead
+of everyone reverse-engineering their own case in isolation.
+
 ---
 
 ## How it works
