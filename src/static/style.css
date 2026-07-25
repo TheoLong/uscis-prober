@@ -1015,11 +1015,12 @@ main[hidden] { display: none; }
   content: "↗ ";
   opacity: 0.7;
 }
-/* Locked variant shown while redaction is latched — a padlock signals the
-   receipt is masked and the real URL is behind the admin password. */
+/* Locked variant shown while redaction is latched. It carries
+   data-guard="redaction" like every other guarded control, so its single
+   padlock comes from the generic guard overlay below — no pill-specific lock.
+   We only suppress the ↗ arrow the base .api-link would otherwise add. */
 .api-link-locked::before {
-  content: "🔒 ";
-  opacity: 0.85;
+  content: none;
 }
 .api-link:hover,
 .api-link:focus-visible {
@@ -1627,15 +1628,13 @@ main[hidden] { display: none; }
    clickable (clicking prompts for the admin password) but reads as locked:
    desaturated and dimmed, with a faded padlock centered over it. The overlay
    is pointer-transparent so the click still lands on the button beneath. */
-/* The locked API pill renders its own padlock via .api-link-locked::before,
-   so it opts OUT of the generic guard overlay below to avoid a double lock. */
-body.redaction-latched [data-guard="redaction"]:not(.api-link-locked) {
+body.redaction-latched [data-guard="redaction"] {
   position: relative;
   filter: grayscale(1);
   opacity: 0.6;
 }
-body.redaction-latched [data-guard="redaction"]:not(.api-link-locked):hover { opacity: 0.78; }
-body.redaction-latched [data-guard="redaction"]:not(.api-link-locked)::after {
+body.redaction-latched [data-guard="redaction"]:hover { opacity: 0.78; }
+body.redaction-latched [data-guard="redaction"]::after {
   content: "🔒";
   position: absolute;
   inset: 0;

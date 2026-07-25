@@ -101,22 +101,25 @@ def test_redaction_lock_overlay_styles_ship():
 
 
 def test_locked_api_pill_does_not_get_double_padlock():
-    # The API pill renders its own padlock via .api-link-locked::before. The
-    # generic guard overlay (body.redaction-latched [data-guard]::after) also
-    # adds a padlock, so the pill MUST be excluded from that overlay or it shows
-    # two locks. Regression guard for that double-lock visual bug.
-    assert ".api-link-locked::before" in STYLE_CSS, "API pill should own a lock glyph"
-    # Every guard-overlay rule must exclude the api-link-locked pill.
-    overlay_rules = [
-        line for line in STYLE_CSS.splitlines()
-        if 'redaction-latched' in line and 'data-guard="redaction"' in line
-    ]
-    assert overlay_rules, "guard overlay rules not found"
-    for rule in overlay_rules:
-        assert ":not(.api-link-locked)" in rule, (
-            "guard overlay must exclude .api-link-locked to avoid a double "
-            f"padlock: {rule.strip()!r}"
-        )
+    # One uniform lock mechanism: the API pill is just another
+    # [data-guard="redaction"] control, so its single padlock comes from the
+    # generic guard overlay. It must NOT also carry its own ::before padlock
+    # (that was the double-lock bug). Regression guard.
+    css = STYLE_CSS
+    # The pill's ::before must not inject a padlock glyph.
+    start = css.find(".api-link-locked::before")
+    assert start != -1, ".api-link-locked::before rule missing"
+    rule = css[start: css.find("}", start)]
+    assert "🔒" not in rule, (
+        "API pill must not render its own padlock — the generic guard overlay "
+        f"is the single lock source. Offending rule: {rule.strip()!r}"
+    )
+    # And the generic overlay must NOT special-case the pill out (it applies
+    # uniformly to every guarded control now).
+    assert ':not(.api-link-locked)' not in css, (
+        "generic guard overlay should treat .api-link-locked like any other "
+        "[data-guard] control — no special-case exclusion"
+    )
 
 
 def test_redaction_popover_explains_what_is_masked():
