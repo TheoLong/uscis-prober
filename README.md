@@ -9,7 +9,9 @@ response, and diffs consecutive snapshots to surface changes the public
 "Check Case Status" page never shows you — including silent internal
 `updatedAt` bumps and new event codes.
 
-One config file. No SaaS. Runs on your laptop or a cheap VM.
+One config file. No SaaS. **Open source, completely free, and ad-free.**
+Runs on your own laptop, or on a low-cost remote you control (a Raspberry
+Pi is plenty).
 
 **[▶ View the live demo →](https://theolong.github.io/uscis-prober/)**
 — a fully-redacted, read-only snapshot of the dashboard (all case numbers
@@ -107,6 +109,28 @@ unattended:
 3. **An email app password for that inbox.** The server retrieves the MFA
    code over IMAP and sends notifications over SMTP using an app password
    (see [Setup → Obtain an app password](#2-obtain-an-app-password)).
+
+---
+
+## Before you start — is this for you?
+
+USCIS Prober is an **open-source technical project**, not a hosted app.
+Setting it up means cloning a repo, editing a config file, and running a
+server — so it's best suited to people comfortable with a little
+command-line work.
+
+**Not comfortable with that?** You don't have to do it by hand. Point a
+local AI coding agent — [Claude Code](https://www.anthropic.com/claude-code),
+GitHub Copilot, or Codex — at this repository and ask it to set the tool
+up for you; the whole project is structured to be agent-friendly.
+
+**One thing to understand going in:** the tool signs in to your USCIS
+account using an **email app password** that you create and place in your
+own `config.json` on your own machine. That credential never leaves your
+device, but because you're handling a real app password, **the security of
+your account and that password is your own responsibility.** Review
+[Setup → Run it](#4-run-it) before you expose the server beyond
+`localhost`.
 
 ---
 
