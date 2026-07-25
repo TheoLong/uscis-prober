@@ -1,0 +1,8 @@
+{
+  "name": "uscis-prober-frontend-tests",
+  "private": true,
+  "description": "Dev-only: jsdom for headless DOM render tests of src/static/app.js",
+  "devDependencies": {
+    "jsdom": "^24.1.0"
+  }
+}
