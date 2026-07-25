@@ -397,6 +397,50 @@ def test_summarize_case_counts_silent_updates():
     assert s["stage"] == "Received"
 
 
+def test_summarize_case_approval_freezes_days_and_sets_date():
+    # When an approval event (H008) lands, the summary exposes approvedOn (the
+    # earliest approval timestamp) and approvedInDays (received -> approval),
+    # frozen at the approval date regardless of how much later `today` is.
+    entries = [
+        _entry(
+            "2026-07-24T19:00:00Z",
+            updatedAt="2026-07-24",
+            updatedAtTimestamp="2026-07-24T18:14:32Z",
+            events=[
+                {"eventCode": "IAF", "eventId": "a"},
+                # Duplicate H008 events — the earliest timestamp must win.
+                {"eventCode": "H008", "eventId": "b",
+                 "eventTimestamp": "2026-07-24T18:14:32.743Z"},
+                {"eventCode": "H008", "eventId": "c",
+                 "eventTimestamp": "2026-07-24T18:14:32.445Z"},
+            ],
+        ),
+    ]
+    # `today` is well past the approval date; approvedInDays must NOT climb.
+    s = summarize_case(entries, today_iso="2026-08-30")
+    assert s["approvedOn"] == "2026-07-24T18:14:32.445Z"  # earliest of the two
+    assert s["approvedInDays"] == 154  # 2026-02-20 → 2026-07-24, frozen
+    assert s["stage"] == "Approved"
+    # daysPending keeps its raw meaning (received -> today); the UI chooses
+    # which to show based on approvedInDays being non-null.
+    assert s["daysPending"] == 191  # 2026-02-20 → 2026-08-30
+
+
+def test_summarize_case_not_approved_has_no_approval_fields():
+    entries = [
+        _entry(
+            "2026-04-18T12:00:00Z",
+            updatedAt="2026-04-18",
+            updatedAtTimestamp="2026-04-18T12:00:00Z",
+            events=[{"eventCode": "FTA0", "eventId": "a"}],
+        ),
+    ]
+    s = summarize_case(entries, today_iso="2026-04-18")
+    assert s["approvedOn"] is None
+    assert s["approvedInDays"] is None
+    assert s["daysPending"] == 57
+
+
 def test_all_events_counts_events_plus_silent():
     # "All events" is the timeline pill count: every event row on the latest
     # snapshot plus every silent event. Three events on the latest snapshot

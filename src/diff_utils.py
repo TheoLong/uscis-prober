@@ -576,8 +576,30 @@ def summarize_case(entries: list[dict], *, today_iso: str) -> dict:
     # snapshot plus every silent event detected across the capture history.
     all_events = len(events) + silent_update_count
 
+    # Approval detection. Once an approval event (H008 / APR0) lands, the case
+    # has passed the pending window (received -> approval). We surface the
+    # approval date and the received->approval span so the UI can switch the
+    # "Days pending" metric to a frozen "Approved in days" figure. The case is
+    # NOT finished at approval (card production + mailing still follow), so the
+    # monitor keeps running — this only reframes the one bounded metric.
+    _APPROVAL_CODES = ("H008", "APR0")
+    approval_timestamps = sorted(
+        e.get("eventTimestamp")
+        for e in events
+        if e and e.get("eventCode") in _APPROVAL_CODES and e.get("eventTimestamp")
+    )
+    approved_on = approval_timestamps[0] if approval_timestamps else None
+    # Received -> approval, in whole days. Frozen at the approval date, so it
+    # stops climbing even as the monitor keeps polling for the card.
+    approved_in_days = (
+        _days_between(latest_data.get("submissionDate"), approved_on)
+        if approved_on else None
+    )
+
     return {
         "daysPending": _days_between(latest_data.get("submissionDate"), today_iso),
+        "approvedOn": approved_on,
+        "approvedInDays": approved_in_days,
         "daysSinceUpdate": _days_between(latest_data.get("updatedAt"), today_iso),
         "uscisUpdates": len(distinct_updated_at),
         "allEvents": all_events,
