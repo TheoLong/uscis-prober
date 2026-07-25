@@ -126,8 +126,20 @@ function isNameKey(k) {
 // copies. These are USCIS-internal IDs, so they only need hiding on screen —
 // not withholding from the browser, where the timeline still keys on the real
 // eventId. Display-layer only; never applied to data the renderer keys on.
+// URL / URI / link keys carry receipt-bearing paths or opaque access tokens
+// (documentUri). Mirror of redaction.py: match url/uri/link/href as a whole
+// word-segment of the key (split on non-alphanumerics AND camelCase), so
+// `url`, `documentUri`, `url_before`, `pageHref` are caught while lookalikes
+// (`jurisdictionDescription`, `documentCount`) are not.
+const URI_KEY_TOKENS = new Set(["url", "uri", "link", "href"]);
+function isUriKey(k) {
+  if (typeof k !== "string") return false;
+  const segs = k.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
+  return segs.some(s => URI_KEY_TOKENS.has(s.toLowerCase()));
+}
+
 function isRedactKey(k) {
-  return REDACT_KEYS.has(k) || isNameKey(k) || /id$/i.test(k);
+  return REDACT_KEYS.has(k) || isNameKey(k) || isUriKey(k) || /id$/i.test(k);
 }
 
 // A fixed mask — fixed width so it leaks nothing about the original length.

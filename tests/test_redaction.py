@@ -43,11 +43,17 @@ def test_redact_obj_masks_system_log_receipt_key_and_nesting():
 
 def test_redact_obj_scrubs_pii_embedded_in_strings():
     out = redact_obj({
+        # `url` is a URI key -> pseudonymized outright (stronger than scrubbing:
+        # the whole value is replaced, so the receipt can't survive at all).
         "url": "https://egov.uscis.gov/casestatus/IOE0000000000/x",
+        # A non-URI free-text field still gets pattern-scrubbed in place.
+        "statusText": "Receipt Number IOE0000000000 is being processed",
         "note": "no identifiers here",
     })
     assert "IOE0000000000" not in out["url"]
-    assert REDACTION_MASK in out["url"]
+    assert out["url"].startswith("id-")           # pseudonymized
+    assert "IOE0000000000" not in out["statusText"]
+    assert REDACTION_MASK in out["statusText"]     # scrubbed in place
     assert out["note"] == "no identifiers here"
 
 
@@ -118,3 +124,33 @@ def test_name_keys_masked_except_safe_allowlist():
     assert out["fullName"] == REDACTION_MASK
     assert out["formName"] == "I-485"
     assert out["statusName"] == "Pending"
+
+
+def test_uri_keys_pseudonymized_but_lookalikes_untouched():
+    # URL/URI/link/href keys carry receipt-bearing paths or opaque tokens and
+    # must be pseudonymized (never shipped raw). Keys that merely embed the
+    # letters (jurisdictionDescription, documentCount) must pass through.
+    out = redact_obj({
+        "documentUri": "FAKETOKEN_abcdefghijklmnopqrstuvwxyz012345",
+        "url": "https://my.uscis.gov/account/case-service/api/cases/IOE0000000000",
+        "url_before": "https://myaccount.uscis.gov/sign-in",
+        "url_after": "https://myaccount.uscis.gov/dashboard",
+        "pageHref": "https://example.com/x",
+        "jurisdictionDescription": "CHARLOTTE, NC",
+        "documentCount": 0,
+    })
+    for k in ("documentUri", "url", "url_before", "url_after", "pageHref"):
+        assert out[k].startswith("id-"), f"{k} must be pseudonymized"
+    # The receipt embedded in the URL is gone.
+    assert "IOE0000000000" not in out["url"]
+    # Lookalikes untouched.
+    assert out["jurisdictionDescription"] == "CHARLOTTE, NC"
+    assert out["documentCount"] == 0
+
+
+def test_uri_pseudonymize_is_stable():
+    # Same URL -> same token (link overlays still resolve); different -> different.
+    a = redact_obj({"documentUri": "TOKEN_A"})["documentUri"]
+    b = redact_obj({"url": "TOKEN_A"})["url"]
+    c = redact_obj({"documentUri": "TOKEN_B"})["documentUri"]
+    assert a == b and a != c

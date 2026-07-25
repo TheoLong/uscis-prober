@@ -65,6 +65,26 @@ def _is_id_key(key: Any) -> bool:
     return isinstance(key, str) and key.lower().endswith("id") and key not in REDACT_KEYS
 
 
+# URL / URI / link keys carry receipt-bearing paths (…/cases/IOE…) or opaque
+# access tokens (documentUri) that must never reach a shared demo. We can't
+# fixed-mask them (a link overlay may need distinct values), so they are
+# pseudonymized like ids — the real URL/token never ships, uniqueness is kept.
+# Matched when url/uri/link/href appears as a whole word-segment of the key —
+# split on non-alphanumerics AND camelCase — so `url`, `documentUri`,
+# `url_before`, `url_after`, `pageHref`, `sourceLink` are all caught, while
+# lookalikes that merely embed the letters (`jurisdictionDescription`,
+# `documentCount`) are not.
+_URI_KEY_TOKENS = frozenset({"url", "uri", "link", "href"})
+_CAMEL_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _is_uri_key(key: Any) -> bool:
+    if not isinstance(key, str) or key in REDACT_KEYS:
+        return False
+    segments = {s.lower() for s in _CAMEL_SPLIT.split(key) if s}
+    return bool(segments & _URI_KEY_TOKENS)
+
+
 def _pseudonymize(value: Any) -> str:
     token = hmac.new(_ID_SALT, str(value).encode("utf-8"), hashlib.sha256).hexdigest()
     return "id-" + token[:12]
@@ -95,6 +115,8 @@ def redact_obj(value: Any) -> Any:
             elif _is_name_key(k) and scalar:
                 out[k] = REDACTION_MASK
             elif _is_id_key(k) and scalar:
+                out[k] = _pseudonymize(v)
+            elif _is_uri_key(k) and scalar:
                 out[k] = _pseudonymize(v)
             else:
                 out[k] = redact_obj(v)
