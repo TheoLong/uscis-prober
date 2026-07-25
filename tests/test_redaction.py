@@ -74,38 +74,46 @@ def test_redact_keys_cover_both_receipt_spellings():
     assert {"receiptNumber", "receipt", "applicantName", "representativeName"} <= set(redaction.REDACT_KEYS)
 
 
-def test_redact_obj_pseudonymizes_render_critical_ids_masks_the_rest():
+def test_redact_obj_masks_every_identifier_key():
     out = redact_obj({
         "events": [{"eventId": "abc-123", "eventCode": "RFE"}],
         "notices": [{"letterId": "425512420"}],
         "pid": "P-7",
         "noticeId": "94aa58520cdb",
+        "originId": "o-1",
+        "reemitId": "r-1",
+        "id": "case-1",
         "formType": "I485",
     })
-    eid = out["events"][0]["eventId"]
-    # Render-critical id: pseudonymized (unique token, real value withheld).
-    assert eid not in ("abc-123", REDACTION_MASK) and "abc-123" not in eid
-    assert eid.startswith("id-")
-    # Display-only ids: FULLY MASKED — no id-looking token in a shared demo.
+    # EVERY *Id key is fully masked — no id-looking token anywhere.
+    assert out["events"][0]["eventId"] == REDACTION_MASK
     assert out["notices"][0]["letterId"] == REDACTION_MASK
     assert out["pid"] == REDACTION_MASK
     assert out["noticeId"] == REDACTION_MASK
+    assert out["originId"] == REDACTION_MASK
+    assert out["reemitId"] == REDACTION_MASK
+    assert out["id"] == REDACTION_MASK
     # Non-identifier siblings untouched.
     assert out["events"][0]["eventCode"] == "RFE"
     assert out["formType"] == "I485"
 
 
-def test_pseudonymize_is_stable_and_distinct():
-    # Same input → same token (so dedup + link overlay still match); different
-    # input → different token (no collisions merging distinct events).
-    a1 = redact_obj({"eventId": "same"})["eventId"]
-    a2 = redact_obj({"originId": "same"})["originId"]
-    b = redact_obj({"eventId": "other"})["eventId"]
-    assert a1 == a2, "stable across keys/calls for the same real id"
-    assert a1 != b, "distinct ids yield distinct tokens"
-    # reemitId is also render-critical (overlay endpoint).
-    assert redact_obj({"reemitId": "x"})["reemitId"].startswith("id-")
-    assert redact_obj({"id": "x"})["id"].startswith("id-")
+def test_redact_obj_preserves_composite_row_keys():
+    # The reemit overlay wires on originKey/reemitKey (composite natural keys
+    # of code|eventTimestamp|createdAtTimestamp) — these carry no PII and must
+    # SURVIVE redaction so the overlay still renders after ids are masked.
+    out = redact_obj({
+        "links": [{
+            "originId": "o-1", "reemitId": "r-1",
+            "originKey": "FTA0|2026-03-10T16:59:51.837Z|2026-03-10T17:08:49.146Z",
+            "reemitKey": "FTA0|2026-03-10T16:59:51.837Z|2026-06-05T13:37:17.302Z",
+        }],
+    })
+    link = out["links"][0]
+    assert link["originId"] == REDACTION_MASK      # id masked
+    assert link["reemitId"] == REDACTION_MASK
+    assert link["originKey"].startswith("FTA0|")   # composite key preserved
+    assert link["reemitKey"].startswith("FTA0|")
 
 
 def test_name_keys_masked_except_safe_allowlist():

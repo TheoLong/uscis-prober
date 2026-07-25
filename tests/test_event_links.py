@@ -36,6 +36,10 @@ def test_reemit_links_origin_to_later_row():
     assert link["eventCode"] == "FTA0"
     assert link["originId"] == "origin"
     assert link["reemitId"] == "reemit"
+    # Composite natural keys (code|eventTimestamp|createdAtTimestamp) — carry no
+    # PII, so the frontend overlay can wire on them and every *Id can be masked.
+    assert link["originKey"] == "FTA0|2026-03-10T16:59:51.837Z|2026-03-10T17:08:49.146Z"
+    assert link["reemitKey"] == "FTA0|2026-03-10T16:59:51.837Z|2026-06-05T13:37:17.302Z"
     assert link["daysApart"] == 86  # whole-day gap 03/10 17:08 -> 06/05 13:37
 
 

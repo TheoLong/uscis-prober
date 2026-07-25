@@ -43,6 +43,21 @@ def _key(event: dict) -> tuple | None:
     return (code, ts)
 
 
+# A composite NATURAL key that uniquely identifies one event ROW without any
+# identifier value. (eventCode, eventTimestamp, createdAtTimestamp): code+ts
+# groups re-emits together, and createdAtTimestamp separates the origin from
+# each re-emit (they share code+ts but differ in write time). Rendered as a
+# single delimited string so it can live in a DOM data-attribute. Because it
+# contains only fields already shown on the timeline, it is safe to keep in
+# redacted / demo output — letting every *Id be fully masked.
+def _row_key(event: dict) -> str:
+    return "|".join((
+        str(event.get("eventCode") or ""),
+        str(event.get("eventTimestamp") or ""),
+        str(event.get("createdAtTimestamp") or ""),
+    ))
+
+
 def event_links(events: list[dict] | None) -> list[dict]:
     """Return the re-emit links among `events` (one snapshot's event array).
 
@@ -97,6 +112,13 @@ def event_links(events: list[dict] | None) -> list[dict]:
                 "eventTimestamp": ts,
                 "originId": origin.get("eventId"),
                 "reemitId": reemit.get("eventId"),
+                # Composite NATURAL keys for the two endpoints — (code,
+                # eventTimestamp, createdAtTimestamp). These carry no PII, so
+                # the frontend can wire the overlay off them and every *Id can
+                # be fully masked in redaction / demo mode. createdAtTimestamp
+                # disambiguates the origin from its re-emit (same code+ts).
+                "originKey": _row_key(origin),
+                "reemitKey": _row_key(reemit),
                 "daysApart": _days_apart(
                     origin.get("createdAtTimestamp"),
                     reemit.get("createdAtTimestamp"),

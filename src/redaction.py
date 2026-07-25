@@ -13,10 +13,7 @@ redactSnapshot) so both layers agree on what counts as PII.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
-import secrets
 from typing import Any
 
 # Object keys whose values are PII, masked outright wherever they appear: the
@@ -52,34 +49,21 @@ _PATTERNS = (
     re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
 )
 
-# A very small set of identifier keys are load-bearing for RENDERING: the
-# frontend dedups the event timeline on `eventId` and the update stream on the
-# synthetic `id`, and draws the reemit link overlay between `originId` and
-# `reemitId` rows. If these collapsed to one constant mask, distinct events
-# would merge and the overlay would mis-wire. For ONLY these we pseudonymize —
-# swap each real value for a stable opaque token so uniqueness survives while
-# the real id never ships. Every OTHER identifier/URI key is display-only and
-# gets fully masked (••••••••) — a shared demo should surface no id-looking
-# tokens at all. The salt is per-process and random, so tokens can't be
-# reversed.
-_ID_SALT = secrets.token_bytes(16)
-
-# Render-critical id keys that MUST stay unique (pseudonymized, not masked).
-_PSEUDONYMIZE_KEYS = frozenset({"eventId", "originId", "reemitId", "id"})
-
-
-def _is_pseudonymize_key(key: Any) -> bool:
-    return key in _PSEUDONYMIZE_KEYS
+# Every identifier is fully MASKED in redacted / demo output — no id-looking
+# token (not even a pseudonym) should appear anywhere a case is shared. The
+# frontend no longer keys on any id VALUE: the event timeline dedups on a
+# composite natural row key (eventCode|eventTimestamp|createdAtTimestamp) and
+# the reemit overlay wires on the same key (see event_links._row_key), so
+# masking every id can't collapse the timeline or mis-wire the overlay.
 
 
 def _is_id_key(key: Any) -> bool:
-    # Any *Id key (noticeId, letterId, pid, cmsContentId, …) that is NOT one of
-    # the render-critical keys above — these get fully masked.
+    # ANY key ending in "id" (eventId, originId, reemitId, id, noticeId,
+    # letterId, pid, cmsContentId, …) is masked. No exceptions.
     return (
         isinstance(key, str)
         and key.lower().endswith("id")
         and key not in REDACT_KEYS
-        and key not in _PSEUDONYMIZE_KEYS
     )
 
 
@@ -99,11 +83,6 @@ def _is_uri_key(key: Any) -> bool:
         return False
     segments = {s.lower() for s in _CAMEL_SPLIT.split(key) if s}
     return bool(segments & _URI_KEY_TOKENS)
-
-
-def _pseudonymize(value: Any) -> str:
-    token = hmac.new(_ID_SALT, str(value).encode("utf-8"), hashlib.sha256).hexdigest()
-    return "id-" + token[:12]
 
 
 def scrub_text(value: Any) -> Any:
@@ -130,11 +109,8 @@ def redact_obj(value: Any) -> Any:
                 out[k] = REDACTION_MASK
             elif _is_name_key(k) and scalar:
                 out[k] = REDACTION_MASK
-            elif _is_pseudonymize_key(k) and scalar:
-                # Render-critical ids: keep unique via an opaque token.
-                out[k] = _pseudonymize(v)
             elif _is_id_key(k) and scalar:
-                # Display-only ids (noticeId, letterId, pid, …): fully masked.
+                # ANY identifier key (eventId, noticeId, letterId, pid, …).
                 out[k] = REDACTION_MASK
             elif _is_uri_key(k) and scalar:
                 # URLs / tokens (documentUri, url, …): fully masked.

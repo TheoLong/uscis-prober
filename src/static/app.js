@@ -122,25 +122,11 @@ function isNameKey(k) {
   return lk.endsWith("name") && !NAME_KEY_ALLOW.has(lk) && !REDACT_KEYS.has(k);
 }
 
-// A very small set of id keys are render-critical: the timeline dedups on
-// `eventId`, the update stream on `id`, and the reemit overlay wires
-// `originId`→`reemitId`. Masking these to one constant would merge distinct
-// rows, so they are PSEUDONYMIZED (stable opaque token, uniqueness kept).
-// Mirror of redaction.py _PSEUDONYMIZE_KEYS.
-const PSEUDONYMIZE_KEYS = new Set(["eventId", "originId", "reemitId", "id"]);
-function isPseudonymizeKey(k) {
-  return PSEUDONYMIZE_KEYS.has(k);
-}
-
-// Stable opaque token for a render-critical id (uniqueness preserved, value
-// hidden). Not cryptographic — the demo ships server-redacted data already;
-// this only keeps the live-site redaction toggle from collapsing the timeline.
-function pseudonymize(value) {
-  const s = String(value);
-  let h = 0;
-  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
-  return "id-" + (h >>> 0).toString(16).padStart(8, "0");
-}
+// Every identifier is fully MASKED in redacted / demo output — no id-looking
+// token appears anywhere a case is shared. The renderer no longer keys on any
+// id VALUE: the timeline dedups and the reemit overlay wire on a composite
+// natural row key (rowKeyOf / event_links._row_key), so masking all ids is
+// safe. Mirror of redaction.py.
 
 // URL / URI / link keys carry receipt-bearing paths or opaque access tokens
 // (documentUri). Mirror of redaction.py: match url/uri/link/href as a whole
@@ -154,12 +140,9 @@ function isUriKey(k) {
   return segs.some(s => URI_KEY_TOKENS.has(s.toLowerCase()));
 }
 
-// True when a key's value must be MASKED (••••••••). Excludes the
-// render-critical pseudonymize keys, which are handled separately so the
-// timeline/overlay keep working. Display-only ids (noticeId, letterId, pid,
-// …), name keys, URI/token keys, and explicit REDACT_KEYS all mask.
+// True when a key's value must be MASKED (••••••••): every *Id key, name key,
+// URI/token key, and explicit REDACT_KEYS.
 function isRedactKey(k) {
-  if (isPseudonymizeKey(k)) return false;
   return REDACT_KEYS.has(k) || isNameKey(k) || isUriKey(k) || /id$/i.test(k);
 }
 
@@ -189,13 +172,9 @@ function redactSnapshot(value) {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
       const scalar = v != null && typeof v !== "object";
-      if (isPseudonymizeKey(k) && scalar) {
-        out[k] = pseudonymize(v);            // keep unique for rendering
-      } else if (isRedactKey(k) && scalar) {
-        out[k] = REDACTION_MASK;             // display-only id / uri / name / PII
-      } else {
-        out[k] = redactSnapshot(v);
-      }
+      out[k] = (isRedactKey(k) && scalar)
+        ? REDACTION_MASK                    // every id / uri / name / PII key
+        : redactSnapshot(v);
     }
     return out;
   }
@@ -3163,7 +3142,17 @@ function renderUpdateRecord(u) {
 // which is backdated by weeks for re-emits) and NOT our detection time (which
 // is an accident of pull cadence). So events and silent updates interleave in
 // true chronological order, and a re-emit lands when observed, not buried at
-// its stale claimed date. Events are deduped by eventId.
+// its stale claimed date. Events are deduped by their composite ROW KEY.
+
+// Composite natural key for an event row — mirror of event_links.py _row_key:
+// (eventCode, eventTimestamp, createdAtTimestamp). Uniquely identifies a row
+// using only already-visible fields, so it survives redaction and lets every
+// *Id be fully masked. Used for timeline dedup and the reemit link overlay.
+function rowKeyOf(ev) {
+  if (!ev) return "";
+  return [ev.eventCode || "", ev.eventTimestamp || "", ev.createdAtTimestamp || ""].join("|");
+}
+
 function buildTimelineRows(events, changes, entries) {
   const rows = [];
   const seen = new Set();
@@ -3182,23 +3171,23 @@ function buildTimelineRows(events, changes, entries) {
     const data = entry.data || entry;
     const evs = Array.isArray(data && data.events) ? data.events : [];
     for (const ev of evs) {
-      const eid = ev.eventId;
-      if (eid && !detectedByEventId.has(eid)) {
-        detectedByEventId.set(eid, entry.capturedAt || null);
+      const rk = rowKeyOf(ev);
+      if (rk && !detectedByEventId.has(rk)) {
+        detectedByEventId.set(rk, entry.capturedAt || null);
       }
     }
   }
   for (const e of events || []) {
-    const eid = e.eventId;
-    if (eid) {
-      if (seen.has(eid)) continue;
-      seen.add(eid);
+    const rk = rowKeyOf(e);
+    if (rk) {
+      if (seen.has(rk)) continue;
+      seen.add(rk);
     }
     // Write-time fields first; fall back to claimed-time only if absent.
     const ts = e.createdAtTimestamp || e.createdAt || e.eventTimestamp || e.eventDateTime || "";
     rows.push({ date: (ts || "").slice(0, 10) || "—", ts, code: e.eventCode || "?",
-                event: e, eventId: eid || null,
-                detectedAt: (eid && detectedByEventId.get(eid)) || null });
+                event: e, rowKey: rk || null,
+                detectedAt: (rk && detectedByEventId.get(rk)) || null });
   }
   for (const ch of changes || []) {
     if (ch.kind !== "silent_update") continue;
@@ -3264,7 +3253,7 @@ function renderObservedEventCodes(c) {
   for (const r of rows) {
     const item = document.createElement("li");
     item.className = "events-item";
-    if (r.eventId) item.dataset.eventId = r.eventId;
+    if (r.rowKey) item.dataset.rowKey = r.rowKey;
     const tooltip = r.silent
       ? buildSilentUpdateTooltip(r.change, r.detectedAt)
       : buildEventTooltip(r.event, r.detectedAt);
@@ -3323,8 +3312,8 @@ function drawEventLinks(wrap, list, links) {
   if (!wrapBox.width) return;
   wrap.querySelectorAll(".events-link-overlay").forEach((el) => el.remove());
 
-  const rowFor = (eid) =>
-    list.querySelector(`.events-item[data-event-id="${CSS.escape(eid)}"]`);
+  const rowFor = (key) =>
+    list.querySelector(`.events-item[data-row-key="${CSS.escape(key)}"]`);
   // .events-item uses `display: contents`, so the <li> has no box of its own
   // and getBoundingClientRect() returns zeros. Measure the code cell (2nd
   // child) — its right edge is where a right-gutter bracket should anchor.
@@ -3339,7 +3328,7 @@ function drawEventLinks(wrap, list, links) {
     // seq = stable index in the engine's (appearance-ordered) output, so a
     // link's color is fixed by its position in that sequence and never shifts
     // when a newer link is appended or an unmappable one is filtered out.
-    .map((l, seq) => ({ link: l, seq, o: rowFor(l.originId), r: rowFor(l.reemitId) }))
+    .map((l, seq) => ({ link: l, seq, o: rowFor(l.originKey), r: rowFor(l.reemitKey) }))
     .filter((d) => d.o && d.r)
     .map((d) => {
       const yReemit = midY(d.r);

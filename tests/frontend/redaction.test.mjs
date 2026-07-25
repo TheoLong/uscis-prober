@@ -78,27 +78,45 @@ test("REDACT_KEYS covers both receipt key spellings + the two names", () => {
   assert.deepEqual(keys, ["applicantName", "receipt", "receiptNumber", "representativeName"]);
 });
 
-test("redactSnapshot pseudonymizes render-critical ids, masks display-only ids", () => {
+test("redactSnapshot masks every identifier key (eventId, letterId, pid, originId)", () => {
   const { T } = load();
   const out = T.redactSnapshot({
     events: [{ eventId: "abc-123", eventCode: "RFE", eventDateTime: "2026-03-01" }],
     notices: [{ letterId: "L-998877", actionType: "ISSUED" }],
     pid: "P-42",
     noticeId: "94aa58520cdb",
+    originId: "o-1",
+    reemitId: "r-1",
+    id: "case-1",
     formType: "I485",
   });
-  // Render-critical: pseudonymized (unique token, real value withheld).
-  assert.ok(out.events[0].eventId.startsWith("id-"), "eventId pseudonymized");
-  assert.notEqual(out.events[0].eventId, "abc-123");
-  assert.notEqual(out.events[0].eventId, MASK);
-  // Display-only ids: fully masked (no id-token in a shared demo).
+  // EVERY *Id key masked — no id-looking token anywhere.
+  assert.equal(out.events[0].eventId, MASK, "eventId masked");
   assert.equal(out.notices[0].letterId, MASK, "letterId masked");
   assert.equal(out.pid, MASK, "pid masked");
   assert.equal(out.noticeId, MASK, "noticeId masked");
+  assert.equal(out.originId, MASK, "originId masked");
+  assert.equal(out.reemitId, MASK, "reemitId masked");
+  assert.equal(out.id, MASK, "id masked");
   // Non-identifier siblings are untouched.
   assert.equal(out.events[0].eventCode, "RFE");
   assert.equal(out.notices[0].actionType, "ISSUED");
   assert.equal(out.formType, "I485");
+});
+
+test("redactSnapshot preserves composite originKey/reemitKey (overlay survives)", () => {
+  const { T } = load();
+  const out = T.redactSnapshot({
+    links: [{
+      originId: "o-1", reemitId: "r-1",
+      originKey: "FTA0|2026-03-10T16:59:51.837Z|2026-03-10T17:08:49.146Z",
+      reemitKey: "FTA0|2026-03-10T16:59:51.837Z|2026-06-05T13:37:17.302Z",
+    }],
+  });
+  assert.equal(out.links[0].originId, MASK);
+  assert.equal(out.links[0].reemitId, MASK);
+  assert.ok(out.links[0].originKey.startsWith("FTA0|"), "composite key preserved");
+  assert.ok(out.links[0].reemitKey.startsWith("FTA0|"));
 });
 
 test("redactDetailValue masks a display-only id row when redaction is on", () => {

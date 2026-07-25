@@ -70,19 +70,28 @@ test("buildTimelineRows dedups events by eventId and tolerates empties", () => {
 test("detectedAt comes from the first snapshot containing the event, for ALL cases", () => {
   // Case where BOTH events exist at the baseline snapshot (no post-baseline
   // additions at all — the 765/131 situation). Detection must still resolve.
+  // Snapshot events carry the same eventTimestamp/createdAtTimestamp as the
+  // EVENTS fixture so their composite row keys match (real snapshots always
+  // carry these; detection is keyed on the composite row key, not eventId).
   const entries = [
     { capturedAt: "2026-03-05T17:00:00Z",
-      data: { events: [{ eventCode: "FTA0", eventId: "fta0-old" }] } },
+      data: { events: [{ eventCode: "FTA0", eventId: "fta0-old",
+                         eventTimestamp: "2026-03-10T16:59:51.837Z",
+                         createdAtTimestamp: "2026-03-10T17:08:49.146Z" }] } },
     { capturedAt: "2026-06-25T15:00:00Z",
-      data: { events: [{ eventCode: "FTA0", eventId: "fta0-old" },
-                       { eventCode: "FTA1", eventId: "fta1-new" }] } },
+      data: { events: [{ eventCode: "FTA0", eventId: "fta0-old",
+                         eventTimestamp: "2026-03-10T16:59:51.837Z",
+                         createdAtTimestamp: "2026-03-10T17:08:49.146Z" },
+                       { eventCode: "FTA1", eventId: "fta1-new",
+                         eventTimestamp: "2026-06-25T14:26:50.949Z",
+                         createdAtTimestamp: "2026-06-25T14:26:52.215Z" }] } },
   ];
   const rows = T.buildTimelineRows(EVENTS, [], entries);
-  const byId = Object.fromEntries(Array.from(rows, r => [r.eventId, r.detectedAt]));
+  const byCode = Object.fromEntries(Array.from(rows, r => [r.code, r.detectedAt]));
   // FTA0 was present at the first capture → detected then.
-  assert.equal(byId["fta0-old"], "2026-03-05T17:00:00Z");
+  assert.equal(byCode["FTA0"], "2026-03-05T17:00:00Z");
   // FTA1 first appeared at the second capture → detected then.
-  assert.equal(byId["fta1-new"], "2026-06-25T15:00:00Z");
+  assert.equal(byCode["FTA1"], "2026-06-25T15:00:00Z");
 });
 
 test("detectedAt is null when there's no capture history to source it from", () => {
