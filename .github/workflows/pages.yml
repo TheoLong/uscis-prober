@@ -1,0 +1,61 @@
+# Publish the redacted demo (demo/) to GitHub Pages.
+#
+# Branch-based Pages can only serve from / or /docs, so this uses the
+# Actions deployment path to publish the demo/ folder instead.
+#
+# Self-skipping: if Pages isn't enabled on the repo yet (e.g. the repo is
+# still private on the Free plan, where Pages is unavailable), the preflight
+# step below detects that and the deploy steps are skipped — the job goes
+# green instead of red. The moment Pages is enabled (Settings -> Pages ->
+# Source: GitHub Actions), this workflow starts publishing automatically.
+name: Deploy demo to Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["demo/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Preflight: is Pages actually enabled? If not, skip the rest so the
+      # job succeeds instead of failing on configure-pages.
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages is not enabled for this repo yet — skipping deploy. Enable it at Settings → Pages → Source: GitHub Actions (requires a public repo on the Free plan)."
+          fi
+
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/configure-pages@v5
+
+      - if: steps.check.outputs.enabled == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo
+
+      - id: deployment
+        if: steps.check.outputs.enabled == 'true'
+        uses: actions/deploy-pages@v4
