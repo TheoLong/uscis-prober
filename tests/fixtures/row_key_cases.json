@@ -1,0 +1,14 @@
+{
+  "_comment": "Shared fixture for the row-key parity contract. Each item is an event dict fed to BOTH event_links._row_key (Python) and rowKeyOf (JS). The two implementations must return byte-identical strings for every case, or the reemit overlay silently mis-wires. Covers: normal rows, missing fields, empty strings, unicode, and re-emit pairs (same code+eventTimestamp, different createdAtTimestamp).",
+  "cases": [
+    { "eventCode": "FTA0", "eventTimestamp": "2026-03-10T16:59:51.837Z", "createdAtTimestamp": "2026-03-10T17:08:49.146Z" },
+    { "eventCode": "FTA0", "eventTimestamp": "2026-03-10T16:59:51.837Z", "createdAtTimestamp": "2026-06-05T13:37:17.302Z" },
+    { "eventCode": "H008", "eventTimestamp": "2026-07-24T18:14:32.445Z", "createdAtTimestamp": "2026-07-24T18:15:00.000Z" },
+    { "eventCode": "IAF", "eventTimestamp": "", "createdAtTimestamp": "2026-01-01T00:00:00.000Z" },
+    { "eventCode": "APR0", "eventTimestamp": "2026-07-24T18:14:32.445Z" },
+    { "eventCode": "", "eventTimestamp": "", "createdAtTimestamp": "" },
+    { "eventTimestamp": "2026-05-05T05:05:05.005Z", "createdAtTimestamp": "2026-05-06T06:06:06.006Z" },
+    { "eventCode": "RFE", "eventTimestamp": "2026-04-01T12:00:00.000Z", "createdAtTimestamp": "2026-04-01T12:00:00.000Z", "extraIgnored": "must-not-affect-key" },
+    { "eventCode": "N400", "eventTimestamp": "2026-09-09T09:09:09.999Z", "createdAtTimestamp": null }
+  ]
+}
