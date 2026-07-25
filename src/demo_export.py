@@ -251,6 +251,45 @@ def build_demo_html(app) -> tuple[str, str]:
         f"{shim}\n<script>\n{app_js}\n</script>",
     )
 
+    # --- Demo-only chrome (never touches the live app) --------------------
+    # 1. Retitle the shared artifact so the browser tab / bookmark reads as the
+    #    demo, not the live tracker.
+    html = html.replace("<title>USCIS Prober</title>",
+                        "<title>uscis-prober-demo</title>", 1)
+
+    # 2. Pin a red banner to the very top of the page announcing that this is a
+    #    static, share-only snapshot with no interactive features. The banner is
+    #    part of normal document flow (not position:fixed) so it ALWAYS pushes
+    #    the page down by its true height — even when the text wraps to 2–3
+    #    lines on narrow screens — and never overlaps the sticky topbar. The
+    #    topbar's sticky `top:0` then sticks it just under the banner on scroll.
+    #    Styles inlined to keep the artifact self-contained.
+    demo_banner = (
+        '<div class="demo-static-banner" role="alert">'
+        "This is a static demo site for sharing case data \u2014 "
+        "interactive functions are not available."
+        "</div>"
+    )
+    demo_banner_css = (
+        "<style>\n"
+        ".demo-static-banner{background:#c0392b;color:#fff;text-align:center;"
+        "font:600 0.82rem/1.4 var(--font-mono,ui-monospace,monospace);"
+        "letter-spacing:0.01em;padding:8px 16px;width:100%;box-sizing:border-box;"
+        "box-shadow:0 1px 6px rgba(0,0,0,0.25);}\n"
+        "</style>"
+    )
+    html = html.replace("</head>", f"{demo_banner_css}\n</head>", 1)
+    # Inject the banner as the first thing inside the REAL document body. We
+    # anchor on the topbar header rather than "<body>" because the inlined CSS
+    # contains the literal string "<body>" too (in selectors/comments), so a
+    # positional <body> replace can land in a dead zone. The topbar is always
+    # the first real body element, so this puts the banner directly above it.
+    html = html.replace(
+        '<header class="topbar">',
+        f'{demo_banner}\n  <header class="topbar">',
+        1,
+    )
+
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-UTC")
     filename = f"uscis-prober-demo-{stamp}.html"
     return filename, html

@@ -1369,13 +1369,27 @@ function renderOverview(panel, c) {
   panel.innerHTML = "";
 
   // --- Hero metrics: raw data signals only (no inference) ---
+  // Once the case is approved (H008/APR0), the pending window is over:
+  // "Days pending" (received -> today, still climbing) is replaced by a
+  // frozen, green "Approved in days" (received -> approval date). The monitor
+  // keeps running because the case isn't done until the card is produced and
+  // mailed — this only reframes the one bounded metric.
+  const isApproved = s.approvedInDays != null;
+  const pendingMetric = isApproved
+    ? {
+        label: "Approved in days",
+        value: s.approvedInDays,
+        sub: s.approvedOn ? `approved ${formatDate(s.approvedOn)}` : "",
+        tone: "approved",
+      }
+    : {
+        label: "Days pending",
+        value: s.daysPending ?? "—",
+        sub: latest.submissionDate ? `since ${formatDate(latest.submissionDate)}` : "",
+        tone: "",
+      };
   const metrics = [
-    {
-      label: "Days pending",
-      value: s.daysPending ?? "—",
-      sub: latest.submissionDate ? `since ${formatDate(latest.submissionDate)}` : "",
-      tone: "",
-    },
+    pendingMetric,
     {
       label: "Days since last activity",
       value: s.daysSinceUpdate ?? "—",

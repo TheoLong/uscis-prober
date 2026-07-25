@@ -955,6 +955,14 @@ main[hidden] { display: none; }
   letter-spacing: 0;
 }
 
+/* Approved state: when the case has passed approval, the pending metric is
+   reframed as a frozen "Approved in days" figure lit green — the value, the
+   label, and the accent bar all go green so it reads as a resolved milestone,
+   not just another neutral count. */
+.metric.approved::before { background: var(--ok); }
+.metric.approved .metric-value { color: var(--ok); }
+.metric.approved .metric-label { color: var(--ok); }
+
 /* ---------- inferred insights section ------------------------------------ */
 /* Visually distinct so a reader cannot mistake this for raw USCIS data.     */
 /* Dashed border + a loud "INFERRED" badge + disclaimer banner carry the     */
