@@ -1,0 +1,19 @@
+{
+  "cases": [
+    { "id": "IOE0000000001", "label": "I-485" },
+    { "id": "IOE0000000002", "label": "I-765" },
+    { "id": "IOE0000000003", "label": "I-131" }
+  ],
+  "auth": {
+    "uscis_email": "USCIS account email",
+    "uscis_password": "USCIS account password",
+    "uscis_mfa_email": "USCIS MFA email",
+    "uscis_mfa_app_password": "USCIS MFA Email 16-char-app-password",
+    "admin_password": "set-your-admin-password-here",
+    "notification_email": "Optional: override the recipient address for diff-update emails. Defaults to uscis_mfa_email.",
+    "notification_from_name": "Optional: display name shown as the sender of diff-update emails. Defaults to 'USCIS Prober'."
+  },
+  "pull_hours": [0, 6, 10, 14, 18],
+  "retry": 2,
+  "retry_wait_seconds": 180
+}
