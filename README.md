@@ -136,33 +136,43 @@ your account and that password is your own responsibility.** Review
 
 ## Setup
 
-The fast path — clone, install, configure, run:
+Four steps, in order: **install → get an app password → fill in the config
+→ run.** Each is expanded below. First make sure you've met the
+[account prerequisites](#account-prerequisites).
+
+If you just want the commands at a glance:
 
 ```bash
+# 1. Install
 git clone https://github.com/<you>/uscis-prober.git && cd uscis-prober
 python3 -m venv venv && source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 playwright install chromium
 
-cp config.example.json config.json
-# fill in config.json — see step 3 below
+# 2. Get an email app password (see step 2) — you'll paste it in step 3.
 
+# 3. Configure
+cp config.example.json config.json
+# edit config.json — receipts, email, app password (see step 3)
+
+# 4. Run
 python src/server.py
 # open http://127.0.0.1:8080
 ```
 
-After cloning, **one file** is all you touch: `config.json` (gitignored).
-Make sure you've met the [account prerequisites](#account-prerequisites)
-first; the steps below install it, get an app password, fill in the
-config, and run it exposed vs. local.
+The only file you ever edit is `config.json` (gitignored). The sections
+below walk through each step in detail.
 
 ### 1. Install
 
 System requirements: Python 3.10+, a system that can run headless
 Chromium (macOS, Linux, WSL), and outbound network to `my.uscis.gov` and
-your email provider's IMAP (993) + SMTP (587). Install with:
+your email provider's IMAP (993) + SMTP (587). Clone the repo, create a
+virtualenv, and install the dependencies:
 
 ```bash
+git clone https://github.com/<you>/uscis-prober.git && cd uscis-prober
 python3 -m venv venv && source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
