@@ -1,0 +1,3111 @@
+/* Copyright (C) 2026 the USCIS Prober contributors
+   SPDX-License-Identifier: AGPL-3.0-or-later */
+:root {
+  --bg: #f4f7fc;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #f0f4fb;
+  --bg-gradient-top: #e8eefb;
+  --border: #d7dfee;
+  --border-soft: #e4eaf4;
+  --text: #1a2240;
+  --muted: #5a678a;
+  --muted-2: #7e8aab;
+  --accent: #3a5cd8;
+  --accent-hot: #2c48b8;
+  --ok: #1e9b6d;
+  --warn: #b07826;
+  --bad: #c24444;
+  --pill-bg: #eaefff;
+  --topbar-bg: rgba(255, 255, 255, 0.85);
+  --ok-tint: rgba(30, 155, 109, 0.12);
+  --warn-tint: rgba(176, 120, 38, 0.14);
+  --bad-tint: rgba(194, 68, 68, 0.12);
+  --ok-tint-soft: rgba(30, 155, 109, 0.10);
+  --bad-tint-soft: rgba(194, 68, 68, 0.08);
+  --shadow: 0 4px 16px rgba(25, 35, 70, 0.08);
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Inter, "Helvetica Neue", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  background: radial-gradient(ellipse at top, var(--bg-gradient-top) 0%, var(--bg) 60%) fixed;
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+/* ---------- top bar ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 28px;
+  background: var(--topbar-bg);
+  backdrop-filter: saturate(150%) blur(10px);
+  border-bottom: 1px solid var(--border-soft);
+  /* Wrap rows when content overflows — at intermediate widths
+     (between desktop and the 900px tablet breakpoint) topbar-right's
+     countdown + buttons would otherwise squeeze topbar-left's title
+     and version chip into a too-narrow column. With wrap, topbar-right
+     drops to its own row instead of squishing. */
+  flex-wrap: wrap;
+  row-gap: 12px;
+  column-gap: 16px;
+}
+/* Two clusters: brand + pull-btn on the LEFT, three info pills on
+   the RIGHT. Each cluster is its own flex container that wraps
+   internally when its boxes don't fit on a single line.
+
+   Alignment is handled entirely by .topbar's `justify-content:
+   space-between`: when both clusters share row 1, they push to
+   opposite ends; when the right cluster wraps to its own row,
+   `space-between` with a single item per row degenerates to
+   flex-start, so BOTH clusters end up left-aligned in the wrapped
+   state. No `margin-left: auto` — that would force right-alignment
+   even when alone on a row, which the user explicitly doesn't want.
+
+   The h1 collapses to `display: contents` so the brand pill
+   becomes a direct flex child of .topbar-left alongside the pull
+   button — both visible to the cluster's wrapping behaviour. */
+/* Each of the two clusters keeps its two boxes locked together —
+   nowrap so brand+pull-btn never split, and same for LAST+NEXT.
+   The wrap point lives at the .topbar level (cluster vs cluster),
+   so the topbar either fits all four on one row or splits into
+   exactly two rows of two. */
+.topbar-left {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.topbar-right {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.topbar-pull-pair {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.topbar-left h1 { display: contents; }
+
+/* Split-row layout: when the natural single-row width can't fit
+   all four boxes, the layout breaks into 2 rows of 2. The two
+   rows have different design goals:
+
+   ROW 1 (brand + pull-btn): each box keeps its NATURAL width
+     and content is flattened to one line. Brand sits at the left
+     edge, pull button at the right — the row reads as a compact
+     header strip, not two stretched-to-50% banners.
+
+   ROW 2 (LAST PULL + NEXT PULL): each pill DOES stretch to 50/50,
+     and the content stays in its natural 3-line column stack
+     (label / value / sub) centred inside the wider pill. This
+     avoids the broken "label+value on top, sub stranded below"
+     wrap that flex-wrap produced in the previous iteration. */
+.topbar-left.is-isolated,
+.topbar-right.is-isolated {
+  flex: 1 1 100%;
+}
+
+/* ---- Row 1 — natural width, flattened content, edge-anchored.
+       Pills are flex-shrinkable (flex: 0 1 auto + min-width: 0) so
+       at extreme phone widths they collapse to fit instead of
+       overflowing the topbar. The brand-name and pull-btn-line
+       spans flex-wrap: wrap inside their pills as a fallback —
+       "USCIS Prober" → "USCIS / Prober" stack, "Manual Pull
+       Update" → "Manual / Pull Update" stack — when the flat row
+       doesn't fit. ---- */
+.topbar-left.is-isolated {
+  justify-content: space-between;
+  /* `stretch` so the shorter pill (button text) grows vertically
+     to match the taller pill (brand with logo). Without this the
+     brand sits at ~48px while the button sits at ~37px and the
+     row reads as two unequal cards. */
+  align-items: stretch;
+}
+.topbar-left.is-isolated .brand,
+.topbar-left.is-isolated > .pull-btn {
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  padding: 10px 16px;
+  border-radius: 12px;
+}
+.topbar-left.is-isolated .brand .brand-name {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 6px;
+}
+/* Shrink the logo in split mode so the brand pill stays thin —
+   without this the 34px default logo forces the brand pill ~48px
+   tall while the flattened button is naturally ~37px. Pairing
+   the smaller logo with align-items: stretch lets both pills
+   land at the same compact height. */
+.topbar-left.is-isolated .brand-logo {
+  width: 20px;
+  height: 20px;
+}
+.topbar-left.is-isolated > .pull-btn {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 6px;
+}
+.topbar-left.is-isolated > .pull-btn .pull-btn-line {
+  /* Flex items in the wrapping pull-btn — at wide split widths
+     both fit on one row ("Manual Pull Update"); at narrow they
+     stack vertically. */
+  flex: 0 0 auto;
+}
+
+/* ---- Row 2 — 50/50 stretch, natural 3-line stack centred ---- */
+.topbar-right.is-isolated > .topbar-pull-pair {
+  flex: 1 1 100%;
+  width: 100%;
+  align-items: stretch;
+  /* LAST PULL anchors to the left, NEXT PULL anchors to the right —
+     same edge-anchored pattern as row 1 (brand + pull-btn). The
+     pills only consume the width their content actually needs;
+     when the row is wider than that, the leftover sits in the
+     middle as breathing room rather than being absorbed by the
+     pills (which would just be stretching for the sake of it). */
+  justify-content: space-between;
+}
+.topbar-right.is-isolated .topbar-pull-pair > .subtitle,
+.topbar-right.is-isolated .topbar-pull-pair > .countdown {
+  /* Natural content width — don't grow. Shrink if the row is
+     genuinely too narrow (flex-shrink: 1 + min-width: 0 lets the
+     value wrap inside the pill at very narrow phone widths). */
+  flex: 0 1 auto;
+  min-width: 0;
+  /* Column-stacked content; alignment preserves the wide-width
+     intent: LAST PULL hugs the LEFT edge, NEXT PULL hugs the
+     RIGHT edge — same as before the split — so a row's content
+     orientation doesn't flip when the layout reflows. */
+  flex-direction: column;
+  justify-content: center;
+  padding: 10px 16px;
+  border-radius: 12px;
+  /* Drop the legacy overflow-clip on subtitle so info doesn't
+     get truncated when the pill is wider than the natural text. */
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.topbar-right.is-isolated .topbar-pull-pair > .subtitle {
+  align-items: flex-start;
+  text-align: left;
+}
+.topbar-right.is-isolated .topbar-pull-pair > .countdown {
+  align-items: flex-end;
+  text-align: right;
+}
+/* Allow values to wrap at whitespace if the pill is narrower than
+   the natural token. "04/25/2026 7:00AM" wraps at the space to
+   become "04/25/2026 / 7:00AM" rather than overflow the pill.
+   `word-break: keep-all` keeps tokens like "04/25/2026" intact —
+   only the inter-token whitespace breaks. */
+.topbar-right.is-isolated .topbar-pull-pair .chip-value,
+.topbar-right.is-isolated .topbar-pull-pair .chip-sub,
+.topbar-right.is-isolated .topbar-pull-pair .countdown .value,
+.topbar-right.is-isolated .topbar-pull-pair .countdown .when {
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+.brand {
+  /* Brand block — logo + title bundled in a soft-square pill that
+     stands out from the supporting metadata pills around it. White
+     surface + accent-colored border + accent-tinted text gives the
+     brand visual primacy without going dark. Padding sized to match
+     the height of the 3-line info pills (subtitle, countdown) at
+     wide widths so the topbar reads as a row of equal-height cards.
+     The same media query that collapses those pills to thin variants
+     also reduces brand padding (see ≤1320px rule). */
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-elev);
+  color: var(--accent-hot);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 14px 20px 14px 12px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(58, 92, 216, 0.12);
+  text-decoration: none;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.brand:hover,
+.brand:focus-visible {
+  border-color: var(--accent-hot);
+  box-shadow: 0 2px 8px rgba(58, 92, 216, 0.22);
+}
+.brand-name {
+  /* Stacks "USCIS / Prober" on two lines at wide widths so the brand
+     pill fills the topbar's vertical space matching the LAST PULL /
+     NEXT PULL boxes. The narrow-width media query collapses it back
+     to a single inline line. */
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.05;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: inherit;
+}
+.brand-name-line { display: block; }
+.brand-logo {
+  /* Logo sits flush on the white brand-pill surface. */
+  display: block;
+  flex-shrink: 0;
+}
+
+/* Thin attribution pill under the banner. Deliberately minimal: small
+   muted text + inline GitHub mark, tight padding, so it occupies the
+   least vertical space possible while staying a clear tap target. */
+.byline-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Left-align with the brand pill above: the topbar has 28px side padding,
+     so the brand's left edge sits at 28px. Match it here (this pill lives
+     outside .topbar). The narrow-width override below tracks the topbar's
+     reduced 16px padding. */
+  margin: 6px 0 0 28px;
+  padding: 2px 9px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+  background: var(--bg-elev);
+  border: 1px solid var(--border, #dde3f0);
+  border-radius: 999px;
+  text-decoration: none;
+  width: fit-content;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.byline-pill:hover,
+.byline-pill:focus-visible {
+  color: var(--accent-hot);
+  border-color: var(--accent);
+}
+.byline-mark {
+  display: block;
+  flex-shrink: 0;
+}
+
+/* Build-version chip — the short SHA of the currently deployed commit,
+   rendered next to the title. Click to copy the full SHA; hover for the
+   commit + boot metadata in the tooltip. */
+.version-chip {
+  /* Single-line pill, lives in the System tab's Actions row alongside
+     DEBUG and Export-data. Sized to read as reference info next to
+     those action buttons — same height + padding so the row reads as
+     a coordinated cluster. */
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 14px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.version-chip:hover {
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border-color: var(--border);
+}
+.version-chip[hidden] { display: none; }
+
+.subtitle {
+  color: var(--text);
+  font-size: 0.85rem;
+  /* 3-line stacked layout (label / value / sub) mirrors the NEXT PULL
+     countdown box. */
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 8px 16px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* System tab — three stacked card sections (Actions / Storage /
+   System log). All share the same surface treatment + a
+   `.sys-card-title` header so each box self-identifies. Outer main
+   uses flex with a tight gap so cards almost touch — the box
+   outlines themselves are sufficient separators. */
+#systemlog-feed {
+  gap: 8px;
+}
+.sys-card,
+.system-actions,
+.storage-bar-wrap,
+#systemlog-content {
+  margin: 0;
+  background: var(--bg-elev, #fff);
+  border: 1px solid var(--border-soft, #e5e7eb);
+  border-radius: var(--radius-sm, 8px);
+  padding: 12px 14px;
+}
+/* The System log card title + subtitle are now direct children of
+   the section (so card collapse can keep the title visible while
+   hiding the body). The subtitle gets a small top margin so it
+   doesn't crowd the title baseline. */
+#systemlog-content .syslog-card-sub {
+  margin-top: -2px;
+  margin-bottom: 8px;
+}
+/* Section-title styling for every System-tab card. */
+.sys-card-title {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-2, #7e8aab);
+  /* Title doubles as a click-target to collapse / expand the card.
+     A small chevron is injected by JS as the first child of the
+     title so every card collapses with the same affordance. */
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sys-card-title:hover { color: var(--text); }
+.sys-card-title .sys-card-toggle {
+  /* Disclosure chevron — rotates between collapsed (▶) and
+     expanded (▼) state. Sized to match the title's font-size so
+     it sits on the same baseline. */
+  display: inline-block;
+  width: 0.7em;
+  font-size: 0.85em;
+  line-height: 1;
+  text-align: center;
+  color: var(--muted-2);
+  transition: transform 0.15s ease;
+}
+.sys-card.is-collapsed .sys-card-toggle { transform: rotate(-90deg); }
+.sys-card.is-collapsed > *:not(.sys-card-title) { display: none; }
+/* When the card is collapsed, drop the h2's bottom margin so every
+   card compresses to the same height regardless of whether its
+   parent uses block layout (System info / Actions / System log,
+   where the h2 margin contributes to height) or flex layout
+   (Storage uses display: flex + gap, which ignores child margins).
+   Without this rule the Storage card lands ~8px shorter. */
+.sys-card.is-collapsed .sys-card-title { margin-bottom: 0; }
+/* The size suffix sitting inside the System-log title shouldn't
+   inherit uppercase / tracking — it's a value, not a label. */
+.sys-card-title .syslog-storage-line {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  margin-left: 8px;
+}
+
+/* Actions row inside the Actions card. Each button is wrapped in a
+   .action-with-info container so the small `i` info badge can sit at
+   the top-right corner of the button it describes (instead of as a
+   separate sibling competing for row space). */
+.sys-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.action-with-info {
+  position: relative;
+  display: inline-flex;
+}
+
+/* System info card — read-only metadata (build version etc.). Not
+   actions; styled to read as muted reference info, distinct from
+   the Actions card next to it. */
+.sys-info-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sys-info-row .version-chip {
+  height: 34px;
+  padding: 0 14px;
+  font-size: 0.78rem;
+}
+/* Unified style for every System-tab action button so the row reads
+   as ONE consistent cluster — same height, padding, border, font
+   weight, and font case. Variants (.debug-pill, .pull-btn-secondary,
+   etc.) keep their own colour / glyph identity via overrides below
+   but inherit the box geometry from this rule. */
+.action-btn,
+.action-btn.debug-pill,
+.action-btn.pull-btn,
+.action-btn.pull-btn-secondary {
+  height: 34px !important;
+  min-height: 0 !important;
+  padding: 0 14px !important;
+  font-size: 0.82rem !important;
+  font-weight: 500 !important;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  border-radius: var(--radius-sm) !important;
+  border: 1px solid var(--border) !important;
+  background: transparent !important;
+  color: var(--text) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  box-sizing: border-box;
+  line-height: 1;
+  flex-direction: row !important;
+  cursor: pointer;
+}
+.action-btn:hover,
+.action-btn.debug-pill:hover,
+.action-btn.pull-btn-secondary:hover {
+  background: var(--bg-elev) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+/* DEBUG keeps its toggle visual (the coloured dot indicator on the
+   left + the red active-state treatment) but its label matches the
+   other action buttons — same font case, weight, size, no
+   letterspacing — so the row reads as four uniform buttons. */
+.action-btn.debug-pill .debug-pill-label {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+.action-btn.debug-pill[aria-checked="true"] {
+  background: var(--bad-tint) !important;
+  color: var(--bad) !important;
+  border-color: var(--bad) !important;
+}
+/* Clear log: destructive cue (red border + red text) preserved on
+   top of the unified .action-btn geometry. */
+.action-btn.clear-log-btn {
+  color: var(--bad) !important;
+  border-color: var(--bad) !important;
+}
+.action-btn.clear-log-btn:hover {
+  background: var(--bad-tint) !important;
+  color: var(--bad) !important;
+  border-color: var(--bad) !important;
+}
+
+/* Corner-positioned info badge: sits at the top-right of its host
+   button, overlapping by a few pixels so it reads as an annotation
+   on the button rather than its own row item. Combined selector
+   specificity (`.info-badge.info-badge-corner`) wins over the base
+   `.info-badge { background: transparent }` rule below — without
+   this we'd see the host button's color bleed through. */
+.info-badge.info-badge-corner {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 18px;
+  height: 18px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(26, 34, 64, 0.08);
+  z-index: 1;
+}
+.info-badge.info-badge-corner:hover,
+.info-badge.info-badge-corner[aria-expanded="true"] {
+  background: var(--pill-bg);
+}
+
+.countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+  /* Boxed to match the subtitle / version chip — three discrete info
+     zones in the topbar that all share the same surface treatment.
+     Three-line content (label + value + when) inherently makes this
+     box taller than the single-line pills, anchoring the right edge
+     of the topbar at wide widths. Below 1100px we collapse to a thin
+     single-row variant (see media query) so it doesn't dwarf the
+     other pills when the topbar has to wrap. */
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 8px 16px;
+}
+/* Shared typography for the 3-line info pills (version chip,
+   subtitle, countdown). Each pill renders as:
+     LABEL   ← small uppercase tracking-wide muted
+     value   ← primary value, larger / bolder
+     sub     ← supporting metadata, small + muted */
+.chip-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+.chip-value {
+  /* Mono + accent-blue to match the NEXT PULL countdown value. The
+     accent colour itself carries the emphasis — no bold needed,
+     since bold + colour is double-stamping. */
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  color: var(--accent-hot);
+  font-weight: 400;
+}
+.chip-sub {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-weight: 400;
+}
+
+/* No flatten variant. Boxes always render as multi-line stacks
+   (column flex direction). When the topbar runs out of width, the
+   parent flex containers wrap rows naturally — no pill ever
+   collapses its inner stack into a single line. Layout is purely
+   CSS-driven via flex-wrap; no JS observer needed. */
+/* NEXT PULL countdown uses different element class names (.label /
+   .value / .when) than the new TIMEZONE / LAST PULL pills (which use
+   .chip-label / .chip-value / .chip-sub). Mirror the typography
+   exactly so the three info pills are visually identical. */
+.countdown .label {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+.countdown .value {
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  color: var(--accent-hot);
+  font-weight: 400;
+}
+.countdown .when {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-weight: 400;
+}
+
+.pull-btn {
+  /* Box model is shared between <button> and <a> variants so the two
+     visually match: both reserve a 1px border (transparent on primary,
+     coloured on secondary) and the same explicit height. Sized tall
+     at wide widths to match the LAST PULL / NEXT PULL info boxes —
+     same vertical footprint, so the topbar reads as a row of equal-
+     height cards. The narrow-width media query collapses it back to
+     a regular 36px button when the topbar wraps. */
+  box-sizing: border-box;
+  height: auto;
+  min-height: 60px;
+  padding: 10px 22px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.1;
+  color: var(--bg);
+  background: var(--accent-hot);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+  /* Two-line label stacks vertically at wide widths
+     ("Manual" / "pull update"). The narrow-width override flips this
+     back to row layout so the button reads as a single inline label. */
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  transition: transform 0.08s ease, background 0.2s ease,
+              border-color 0.2s ease, color 0.2s ease;
+}
+.pull-btn-line { display: block; }
+.pull-btn:hover { background: #a7c4ff; }
+.pull-btn:active { transform: translateY(1px); }
+.pull-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* Secondary button variant — used for the export link. */
+.pull-btn-secondary {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--border);
+}
+.pull-btn-secondary:hover {
+  background: var(--pill-bg);
+  color: var(--accent-hot);
+  border-color: var(--accent);
+}
+
+/* "Export data" + its info popover live in a positioning context. */
+.export-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.info-badge {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: 600 11px/1 var(--font-sans);
+  font-style: italic;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.info-badge:hover,
+.info-badge[aria-expanded="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--pill-bg);
+}
+
+.info-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  /* Cap the natural 320px width to the viewport (minus 56px = 28px
+     of breathing room each side, matching the .main horizontal
+     padding at wide widths and giving plenty of clearance from
+     the browser edge at any viewport). JS in positionPopover()
+     then nudges the popover back inside if either edge spills out. */
+  width: min(320px, calc(100vw - 56px));
+  max-width: calc(100vw - 56px);
+  padding: 12px 14px;
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+/* Left-anchored variant: used when the trigger badge sits on the LEFT of
+   its container. The default right-anchored placement would push the
+   popover off the card/viewport in that case. */
+.info-popover.popover-left {
+  right: auto;
+  left: 0;
+}
+.info-popover code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  background: var(--bg-elev-2);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.info-popover strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--accent);
+}
+
+.pull-indicator {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  font-size: 0.82rem; color: var(--muted);
+}
+.spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent-hot);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- top-level view tabs ---------- */
+.view-tabs {
+  max-width: 1100px;
+  margin: 24px auto 0;
+  padding: 0 28px;
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.view-tab {
+  position: relative;
+  padding: 10px 16px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: -1px;
+}
+.view-tab:hover { color: var(--text); }
+.view-tab.active {
+  color: var(--accent-hot);
+  border-bottom-color: var(--accent-hot);
+}
+.view-tab-count {
+  background: var(--pill-bg);
+  color: var(--muted);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.view-tab.active .view-tab-count {
+  background: var(--accent-hot);
+  color: var(--bg);
+}
+
+/* ---------- case list ---------- */
+main {
+  max-width: 1100px;
+  margin: 16px auto 64px;
+  padding: 0 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+main[hidden] { display: none; }
+
+.case-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  /* No overflow clipping — popovers and tooltips inside must be able to
+     extend past the card bounds. None of the card's children use a
+     background that bleeds into the rounded corners, so allowing overflow
+     is visually safe. */
+}
+.case-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 18px 22px 12px;
+  gap: 16px;
+}
+.case-title { display: flex; flex-direction: column; gap: 2px; }
+.case-label { font-size: 1.1rem; font-weight: 700; letter-spacing: 0.02em; }
+.case-receipt {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.case-meta {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  font-size: 0.82rem; color: var(--muted);
+}
+.case-meta .big {
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 500;
+}
+
+.case-badges {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 0 22px 14px;
+}
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px;
+  background: var(--pill-bg); border-radius: 999px;
+  font-size: 0.76rem; color: var(--muted);
+}
+.badge strong { color: var(--text); font-weight: 600; }
+.badge.ok { background: var(--ok-tint); color: var(--ok); }
+.badge.warn { background: var(--warn-tint); color: var(--warn); }
+.badge.bad { background: var(--bad-tint); color: var(--bad); }
+
+/* ---------- tabs ---------- */
+.tabs {
+  display: flex; gap: 2px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-elev-2);
+}
+.tab {
+  padding: 10px 14px;
+  font: inherit; font-size: 0.82rem;
+  color: var(--muted); background: transparent;
+  border: 0; border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent-hot); border-bottom-color: var(--accent-hot); }
+.tab-count {
+  background: var(--pill-bg);
+  color: var(--muted);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.tab.active .tab-count {
+  background: var(--accent-hot);
+  color: var(--bg);
+}
+
+.tab-panels { padding: 18px 22px 22px; min-height: 100px; }
+
+/* ---------- overview: hero metrics ---------- */
+.hero-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+.metric {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+  /* Uniform internal layout so every card has matching label / value /
+     sub slots — keeps the numbers on a shared baseline across a row,
+     even when one label wraps or a sub-line is missing. */
+  display: flex;
+  flex-direction: column;
+}
+.metric::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--border);
+}
+.metric.ok::before   { background: var(--ok); }
+.metric.warn::before { background: var(--warn); }
+.metric.bad::before  { background: var(--bad); }
+.metric-label {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--muted-2);
+  line-height: 1.25;
+  /* Reserve 2 label lines so a wrapped label ('DAYS SINCE LAST ACTIVITY')
+     doesn't push its value below a single-line neighbour. */
+  min-height: 2.5em;
+  display: flex;
+  align-items: flex-start;
+}
+.metric-value {
+  margin-top: 4px;
+  font-size: 1.65rem; font-weight: 700; letter-spacing: -0.02em;
+  color: var(--text);
+  line-height: 1.1;
+}
+.metric-value.metric-value-sm {
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* Approved state: when the case has passed approval, the pending metric is
+   reframed as a frozen "Approved in days" figure lit green — the value, the
+   label, and the accent bar all go green so it reads as a resolved milestone,
+   not just another neutral count. */
+.metric.approved::before { background: var(--ok); }
+.metric.approved .metric-value { color: var(--ok); }
+.metric.approved .metric-label { color: var(--ok); }
+
+/* ---------- inferred insights section ------------------------------------ */
+/* Visually distinct so a reader cannot mistake this for raw USCIS data.     */
+/* Dashed border + a loud "INFERRED" badge + disclaimer banner carry the     */
+/* semantic load.                                                            */
+
+/* Observed event codes — dedicated, factual-only box. One row per
+ * event returned by the USCIS API: date + code + friendly label. No
+ * stage inference, no happy-path stepper, no community folklore. */
+.events-section {
+  margin-top: 18px;
+  padding: 14px 16px 16px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.events-heading {
+  margin: 0 0 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+/* Heading row that carries an inline "API" link on its right edge
+   (Current Status, Timeline). Keeps the label left, the pill right. */
+.section-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+/* Small pill linking to the raw USCIS API endpoint a section is sourced
+   from. Neutral by default, accent on hover so it reads as actionable. */
+.api-link {
+  flex: none;
+  padding: 2px 9px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+  background: var(--pill-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.api-link::before {
+  content: "↗ ";
+  opacity: 0.7;
+}
+/* Locked variant shown while redaction is latched — a padlock signals the
+   receipt is masked and the real URL is behind the admin password. */
+.api-link-locked::before {
+  content: "🔒 ";
+  opacity: 0.85;
+}
+.api-link:hover,
+.api-link:focus-visible {
+  color: var(--accent-hot);
+  border-color: var(--accent-hot);
+  background: var(--bg-elev-2);
+}
+.events-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 6px 16px;
+  align-items: baseline;
+  justify-content: start;
+}
+.events-item {
+  display: contents;
+  font-size: 0.84rem;
+}
+.events-date {
+  font-family: var(--font-mono);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.events-code {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+  padding: 1px 8px;
+  background: var(--pill-bg);
+  border-radius: var(--radius-sm);
+  justify-self: start;
+}
+/* Silent-update rows get a de-emphasised variant — same shape, muted
+ * palette — so the factual event codes remain the visual anchor. */
+.events-code-silent {
+  color: var(--muted);
+  background: transparent;
+  border: 1px dashed var(--border);
+  font-weight: 500;
+}
+
+/* Event-link overlay: an analytical layer that draws a bracket from a
+ * re-emitted event back to its origin (same eventTimestamp, new eventId).
+ * Brackets sit in the RIGHT gutter; each link gets its own color + lane. */
+/* Positioned wrapper: the SVG overlay is absolutely placed over the grid,
+ * and the right padding opens a gutter for the staggered brackets. */
+.events-list-wrap {
+  position: relative;
+  padding-right: 40px;
+}
+.events-link-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+.events-link-path {
+  fill: none;
+  stroke-width: 1.5;
+  opacity: 1;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+/* Casing drawn under each colored line: a thicker stroke in the card's own
+ * background, so where two lines pass within a pixel the upper one cleanly
+ * breaks the lower instead of the colors smearing together. */
+.events-link-casing {
+  fill: none;
+  stroke: var(--card, #fff);
+  stroke-width: 4;
+  opacity: 1;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+/* Invisible wide hit-area: carries the group's pointer events so hovering
+ * anywhere near a line (not pixel-perfect on the 1.5px stroke) selects it. */
+.events-link-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  vector-effect: non-scaling-stroke;
+}
+/* Inspect-on-hover: hovering any one link fades all the OTHERS so the user can
+ * trace a single relationship through the tangle. The hovered link stays full
+ * opacity and thickens slightly; everything else drops to a faint ghost. */
+.events-link-group {
+  pointer-events: auto;
+  transition: opacity 0.12s ease;
+}
+.events-link-overlay:has(.events-link-group:hover) .events-link-group:not(:hover) {
+  opacity: 0.12;
+}
+.events-link-overlay .events-link-group:hover {
+  opacity: 1;
+}
+.events-link-overlay .events-link-group:hover .events-link-path {
+  stroke-width: 2.5;
+}
+
+/* ---------- system log view ----------
+ * Event rows shown on the System log tab. Each row is a pill-headed
+ * block with a timestamp, event name, source, and any detail fields
+ * flattened out underneath. */
+.syslog-block {
+  display: block;
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.syslog-ok   { border-left: 3px solid var(--ok); }
+.syslog-bad  { border-left: 3px solid var(--bad); background: var(--bad-tint-soft); }
+.syslog-warn { border-left: 3px solid var(--warn); background: var(--warn-tint); }
+.syslog-info { border-left: 3px solid var(--accent); }
+/* Content band between the header grid and the kv strip.
+ * Houses the per-row summary ("343 entries cleared", or a pull's
+ * "manual · 29.16s · 3 case · …") and — for pull envelopes — the
+ * trace-open buttons. Keeps these out of the header grid so
+ * columns line up cleanly across rows. */
+.syslog-envelope-content {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 0 14px 10px;
+  /* Visual cue: slight left-inset matching the kv details strip.
+   * Stacked layout (column) keeps the summary line on top and each
+   * attempt's trace-button row below it on its own line — avoids the
+   * old "summary centered between two rows" awkwardness. */
+}
+.syslog-envelope-content .syslog-summary {
+  /* Override the margin-left:auto from the old header styling —
+   * summary sits at the start of the content band now, not pushed
+   * to the right. */
+  margin-left: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.syslog-envelope-content .trace-open-group {
+  flex: 0 0 auto;
+}
+
+/* ---------- diff_recomputed per-case breakdown ----------
+   Replaces a raw JSON dump of the `cases` array with a compact,
+   aligned mini-table: one row per case, mono label + a metric
+   column (case changes). Zero-valued metrics are dimmed so the eye
+   lands on the cases that actually moved. */
+.diffrc-table {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  font-size: 0.78rem;
+}
+.diffrc-row {
+  display: grid;
+  grid-template-columns: minmax(48px, auto) minmax(90px, 1fr);
+  gap: 16px;
+  align-items: baseline;
+  padding: 5px 12px;
+  background: var(--bg-elev);
+}
+.diffrc-label {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+}
+.diffrc-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+.diffrc-num {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.diffrc-unit {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.diffrc-metric.is-zero .diffrc-num,
+.diffrc-metric.is-zero .diffrc-unit {
+  color: var(--muted-2);
+  font-weight: 500;
+}
+/* Five-column grid so every row aligns regardless of pill length:
+ *   col 1 — disclosure triangle OR invisible spacer of same width
+ *   col 2 — pill (natural width, left-aligned inside a fixed cell)
+ *   col 3 — source badge (e.g. `server`, `session_fetch`, `auth`)
+ *   col 4 — event identifier (flex-grow so it consumes slack)
+ *   col 5 — timestamp, right-aligned
+ * Each syslog-head is its own grid; the column widths are fixed in
+ * CSS so every row lands on the same invisible rails.
+ */
+.syslog-head {
+  display: grid;
+  /* No leading column for the disclosure triangle anymore — the
+     triangle now lives in the envelope-content row below. Pills
+     align flush-left across both flat rows and expandable envelopes,
+     so a pull row's "PULL" pill starts at the same X as a flat row's
+     "SERVER STARTED" pill. */
+  grid-template-columns: 220px 110px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.84rem;
+}
+.syslog-head > .kind-tag { justify-self: start; }
+.syslog-head > .syslog-source { justify-self: start; }
+.syslog-head > .syslog-event { justify-self: start; min-width: 0; }
+.syslog-head > .syslog-ts { justify-self: end; }
+.syslog-source {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--muted);
+}
+.syslog-ts {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.syslog-event {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--muted-2);
+}
+.syslog-details {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 14px;
+  align-items: baseline;
+  font-size: 0.78rem;
+}
+.syslog-detail { display: contents; }
+.syslog-detail-k {
+  font-family: var(--font-mono);
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+/* ---------- nested system-log entries (pull envelope + steps) ----------
+   A pull's 15+ internal events are attached as a `steps[]` array on a
+   single envelope row. The row gets a disclosure triangle and a summary
+   strip so the default view stays compact; clicking expands the sub-log
+   with one indented line per step. */
+
+/* Nested envelopes need higher specificity than the plain `.syslog-block`
+   rule — otherwise the shorthand `padding: 10px 14px` wins the cascade tie
+   and the pill column drifts 14px rightward relative to flat rows. */
+.syslog-block.syslog-nested {
+  padding: 0;          /* head + body handle their own padding */
+  overflow: hidden;    /* keep the rounded corners when children paint */
+}
+
+.syslog-head-expandable {
+  /* Layout comes from .syslog-head (display: grid).  This rule
+   * only adds the button-specific chrome on top. */
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.syslog-head-expandable:hover {
+  background: var(--pill-bg);
+}
+/* The "attempts" row in the envelope-kv strip gets a special inline
+   layout: `▶ attempts  2` on a single horizontal band. The default
+   `.syslog-detail` uses `display: contents` so its children flow into
+   the parent grid; the disclosure variant overrides with flex so the
+   chevron sits flush-left of the key. */
+.syslog-detail.syslog-detail-with-disclosure {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  grid-column: 1 / -1;
+}
+.syslog-detail.syslog-detail-with-disclosure .syslog-detail-k {
+  /* Match the default kv key column width so this row aligns with
+     the kv pairs above (e.g. started_at, finished_at). */
+  min-width: 120px;
+}
+.syslog-disclosure {
+  /* Reset default <button> chrome and render as a small chevron
+     glyph that reads as the expand affordance. */
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  transition: color 0.12s;
+  line-height: 1;
+}
+.syslog-disclosure:hover { color: var(--text); }
+.syslog-disclosure:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+.syslog-event-envelope {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-family: var(--font-sans);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.syslog-summary {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+  /* Allow the summary to shrink so trace buttons on the right
+   * don't get pushed off the row when the pull has many steps. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.syslog-envelope-kv {
+  padding: 0 14px 10px;
+  border-bottom: 1px dashed var(--border-soft);
+}
+
+.syslog-steps {
+  padding: 6px 10px 10px 28px;   /* indent so nesting is obvious */
+  background: var(--bg);
+  border-top: 1px solid var(--border-soft);
+}
+.syslog-step {
+  padding: 6px 10px;
+  margin: 4px 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-left-width: 2px;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+}
+.syslog-step.syslog-ok   { border-left-color: var(--ok); }
+.syslog-step.syslog-bad  { border-left-color: var(--bad); background: var(--bad-tint-soft); }
+.syslog-step.syslog-warn { border-left-color: var(--warn); background: var(--warn-tint); }
+.syslog-step.syslog-info { border-left-color: var(--accent); }
+.syslog-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+}
+.syslog-step-details {
+  margin-top: 4px;
+  font-size: 0.74rem;
+}
+.syslog-controls,
+#syslog-controls-mount {
+  /* Both the mount point in HTML and the wrapper inserted from JS
+     are purely structural — their children should sit directly
+     inside the parent .sys-actions-row flex container so the
+     buttons line up with DEBUG / Export data and inherit the row's
+     12px gap. `display: contents` makes them invisible to layout. */
+  display: contents;
+}
+
+.syslog-export-btn {
+  /* Matches .debug-pill / .clear-log-btn / .pull-btn-secondary on
+     height + padding + radius + font so the System actions row
+     reads as one consistent button cluster. */
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  height: 32px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+.syslog-export-btn:hover {
+  background: var(--bg-elev);
+  border-color: var(--accent);
+}
+
+/* Pagination bar — one bar above and one below the 100-row list so the
+   user doesn't have to scroll either direction to flip pages. */
+.syslog-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px 0;
+}
+.syslog-pagination-top { margin-bottom: 4px; }
+.syslog-pagination-bottom { margin-top: 8px; }
+.syslog-page-btn {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  min-width: 32px;
+  line-height: 1.2;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.syslog-page-btn:hover:not(:disabled):not(.active) {
+  background: var(--bg-elev);
+  color: var(--text);
+  border-color: var(--border);
+}
+.syslog-page-btn.active {
+  color: var(--bg);
+  background: var(--accent-hot);
+  border-color: var(--accent-hot);
+  font-weight: 600;
+  cursor: default;
+}
+.syslog-page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.syslog-page-ellipsis {
+  padding: 0 4px;
+  color: var(--muted-2);
+  font-size: 0.82rem;
+}
+
+.clear-log-control { display: inline-flex; }
+
+.clear-log-btn {
+  /* Matches .debug-pill / .syslog-export-btn / .pull-btn-secondary
+     on height + padding + radius + font. Border colour stays --bad
+     to preserve the destructive cue. */
+  font: inherit;
+  background: transparent;
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  border-radius: var(--radius-sm);
+  height: 32px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: background 0.12s;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+.clear-log-btn:hover { background: var(--bad-tint); }
+
+/* ---------- modal dialog (shared) ---------- */
+/* The overlay is position:fixed so opening it does NOT reflow the page
+   underneath — event rows, header, and other controls stay exactly
+   where they were. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 30, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+  animation: modal-fade-in 0.12s ease-out;
+}
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.18);
+  max-width: 480px;
+  width: 100%;
+  padding: 20px 22px;
+  animation: modal-pop-in 0.14s ease-out;
+}
+@keyframes modal-pop-in {
+  from { transform: scale(0.96); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.modal-card-danger { border-top: 3px solid var(--bad); }
+
+.modal-title {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.modal-card-danger .modal-title { color: var(--bad); }
+
+.modal-body {
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.modal-body p { margin: 0 0 10px; }
+.modal-body p:last-child { margin-bottom: 0; }
+.modal-body strong { color: var(--bad); }
+.modal-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  font-size: 0.88rem;
+}
+.modal-list li { margin-bottom: 4px; }
+.modal-list code {
+  font-size: 0.82rem;
+  background: #f3f4f6;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.modal-hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+.modal-btn {
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  line-height: 1.2;
+}
+.modal-btn-cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.modal-btn-cancel:hover { background: var(--bg-elev); }
+.modal-btn-danger {
+  background: var(--bad);
+  border: 1px solid var(--bad);
+  color: #fff;
+}
+.modal-btn-danger:hover { filter: brightness(0.92); }
+.modal-btn-danger:focus-visible { outline: 2px solid var(--bad); outline-offset: 2px; }
+.modal-btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+/* ---------- admin-password prompt ---------- */
+.admin-pw-input {
+  width: 100%;
+  margin-top: 14px;
+  padding: 9px 12px;
+  font: inherit;
+  font-family: var(--font-mono);
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  box-sizing: border-box;
+}
+.admin-pw-input:focus { border-color: var(--accent-hot); }
+
+/* ---------- redaction lock: grayed action buttons with a faded padlock ----------
+   While redaction is latched, every [data-guard="redaction"] action stays
+   clickable (clicking prompts for the admin password) but reads as locked:
+   desaturated and dimmed, with a faded padlock centered over it. The overlay
+   is pointer-transparent so the click still lands on the button beneath. */
+body.redaction-latched [data-guard="redaction"] {
+  position: relative;
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+body.redaction-latched [data-guard="redaction"]:hover { opacity: 0.78; }
+body.redaction-latched [data-guard="redaction"]::after {
+  content: "🔒";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.syslog-detail-v {
+  font-family: var(--font-mono);
+  color: var(--text);
+  word-break: break-word;
+}
+
+.metric-sub {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-top: 3px;
+  /* Reserve a sub line even on metrics that don't have one — keeps
+     card heights identical in the 2x2 mobile grid. */
+  min-height: 1.1em;
+}
+
+/* ---------- callouts ---------- */
+.callouts { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.callout {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elev-2);
+  display: flex; flex-direction: column; gap: 2px;
+  border-left-width: 3px;
+}
+.callout-ok   { border-left-color: var(--ok); }
+.callout-warn { border-left-color: var(--warn); }
+.callout-bad  { border-left-color: var(--bad); }
+.callout-info { border-left-color: var(--accent-hot); }
+.callout-title { font-weight: 600; font-size: 0.88rem; }
+.callout-ok   .callout-title { color: var(--ok); }
+.callout-warn .callout-title { color: var(--warn); }
+.callout-bad  .callout-title { color: var(--bad); }
+.callout-info .callout-title { color: var(--accent-hot); }
+.callout-body { color: var(--muted); font-size: 0.82rem; }
+
+/* ---------- current-status block ----------
+ * The plain-English USCIS status headline + paragraph, shown at the top of
+ * the overview so the human-readable status sits above the raw signals. */
+.status-block {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent-hot);
+  background: var(--bg-elev-2);
+}
+.status-head {
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.status-title {
+  font-weight: 600;
+  font-size: 0.98rem;
+  color: var(--text);
+  line-height: 1.3;
+}
+.status-text {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+.status-raw {
+  margin: 8px 0 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  font-size: 0.74rem;
+}
+.status-raw dt {
+  color: var(--muted);
+  opacity: 0.85;
+}
+.status-raw dd {
+  margin: 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.status-history {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+.status-history > summary {
+  cursor: pointer;
+  font-size: 0.64rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+.status-history > summary:hover { color: var(--text); }
+.status-history-item {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-soft);
+}
+.status-history-when {
+  font-size: 0.72rem;
+  color: var(--accent-hot);
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.status-history-title {
+  font-size: 0.8rem;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+/* ---------- secondary facts ----------
+ * Grid of equal-width cells so labels and values line up vertically
+ * regardless of individual content length. `auto-fit` plus a minmax
+ * floor keeps it responsive on narrow viewports. */
+.sub-facts {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.sub-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;   /* allow long values to shrink instead of forcing reflow */
+}
+.sub-fact-k {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+.sub-fact-v {
+  font-size: 0.88rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sub-fact-v.mono { font-family: var(--font-mono); font-size: 0.82rem; }
+
+/* ---------- timeline ---------- */
+.timeline {
+  position: relative;
+  padding: 8px 0;
+}
+.timeline-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.timeline-row:last-child { border-bottom: 0; }
+.timeline-date {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.timeline-items { display: flex; flex-wrap: wrap; gap: 6px; }
+.event-chip {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--pill-bg);
+  color: var(--accent-hot);
+  border: 1px solid var(--border);
+}
+.event-chip.notice { color: var(--warn); }
+.event-chip.updated { color: var(--ok); border-color: var(--ok); }
+.event-chip.stale { color: var(--muted-2); opacity: 0.7; }
+.event-chip.silent {
+  color: var(--accent-hot);
+  border-color: var(--accent-hot);
+  position: relative;
+  padding-left: 20px;
+}
+.event-chip.silent::before {
+  content: "";
+  position: absolute;
+  left: 7px; top: 50%; transform: translateY(-50%);
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent-hot);
+  box-shadow: 0 0 0 0 var(--accent-hot);
+  animation: silent-pulse 1.6s infinite;
+}
+@keyframes silent-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(138,178,255,0.55); }
+  70%  { box-shadow: 0 0 0 8px rgba(138,178,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(138,178,255,0); }
+}
+.timeline-caption {
+  font-size: 0.78rem; color: var(--muted); margin-left: 4px;
+}
+
+.activity-scroller {
+  margin-top: 8px;
+  padding: 14px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.activity-scroller h4 {
+  margin: 0 0 10px 0; font-size: 0.78rem;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-2);
+}
+
+/* ---------- changes ---------- */
+.change-block {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.change-block-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-bottom: 10px;
+  gap: 10px;
+}
+.change-range { font-family: var(--font-mono); }
+
+.kind-tag {
+  font-size: 0.7rem;
+  padding: 2px 9px;
+  border-radius: 999px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  background: var(--pill-bg);
+  color: var(--muted);
+  border: 1px solid var(--border-soft);
+}
+.kind-tag.kind-ok     { color: var(--ok);         border-color: var(--ok);         background: var(--ok-tint-soft); }
+.kind-tag.kind-warn   { color: var(--warn);       border-color: var(--warn);       background: var(--warn-tint); }
+.kind-tag.kind-bad    { color: var(--bad);        border-color: var(--bad);        background: var(--bad-tint-soft); }
+.kind-tag.kind-silent { color: var(--accent-hot); border-color: var(--accent-hot); background: rgba(138,178,255,0.12); }
+.change-section { margin-top: 8px; }
+.change-section h5 {
+  margin: 0 0 6px 0; font-size: 0.72rem;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted-2);
+  font-weight: 700;
+}
+.change-scalar {
+  display: grid; grid-template-columns: 180px 1fr 1fr;
+  column-gap: 8px; padding: 4px 0;
+  font-family: var(--font-mono); font-size: 0.8rem;
+}
+.change-scalar .field { color: var(--muted); }
+/* `from` side is faded to "before" by a muted color — NOT by `opacity`.
+ * CSS opacity cascades into pseudo-elements, which would drag the UTC
+ * tooltip's ::after down to the same alpha and make it look translucent
+ * on hover. Use color-mix so the strikethrough text still reads as
+ * de-emphasised while the tooltip box stays fully opaque. */
+.change-scalar .from {
+  color: color-mix(in srgb, var(--bad) 75%, var(--muted) 25%);
+  text-decoration: line-through;
+}
+.change-scalar .to { color: var(--ok); }
+
+/* Tooltip palette — consumed by the one site-wide popup (.events-popup),
+ * which _wireTooltips() drives for every hover tooltip on the site. */
+:root {
+  --utc-tooltip-bg: #1f2330;
+  --utc-tooltip-fg: #e8ecf3;
+}
+/* UTC ISO timestamps inside a scalar diff row get a subtle dotted underline so
+ * the operator knows the value is hoverable; the tooltip itself comes from the
+ * shared popup (fed by `data-tooltip`), not a per-element pseudo-element. */
+.utc-ts {
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
+}
+.change-scalar .from .utc-ts { text-decoration: none; } /* avoid double underline w/ line-through */
+
+/* Timeline-event popup. Driven by _wireEventsTooltipTap — a real DOM
+ * node parented to <body> so it can be repositioned by JS (CSS pseudos
+ * can't) and never gets clipped by an ancestor's overflow. The pill
+ * itself just keeps a help-cursor and a hover-tap target. */
+.events-tooltip {
+  cursor: help;
+}
+.events-popup {
+  position: absolute;
+  /* Width clamped to the viewport with an 8px gutter on each side, so
+   * even on a 360px-wide phone the popup never touches the screen edge
+   * before positionPopover adjusts. 360px is enough for the longest
+   * silent-update scalar diff. */
+  max-width: min(calc(100vw - 16px), 360px);
+  width: max-content;
+  padding: 6px 10px;
+  background: var(--utc-tooltip-bg);
+  color: var(--utc-tooltip-fg);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  /* Honour explicit newlines from buildXxxTooltip; wrap long
+   * scalar diffs at word boundaries on narrow widths. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+  line-height: 1.3;
+  pointer-events: none;
+  z-index: 1000;
+}
+.events-popup[hidden] {
+  display: none;
+}
+.change-item-added, .change-item-removed {
+  font-family: var(--font-mono); font-size: 0.78rem;
+  padding: 3px 8px; border-radius: 4px; display: inline-block;
+  margin: 2px 4px 2px 0;
+}
+.change-item-added { background: var(--ok-tint-soft); color: var(--ok); }
+.change-item-removed { background: var(--bad-tint-soft); color: var(--bad); }
+/* Pretty key/value block for an added/removed collection entry (e.g. a whole
+ * evidenceRequest object) — rendered as rows, not a one-line JSON clump. */
+.change-item-added-block, .change-item-removed-block {
+  border-radius: 5px; padding: 6px 10px; margin: 4px 0;
+  border-left: 3px solid var(--ok);
+  background: var(--ok-tint-soft);
+}
+.change-item-removed-block {
+  border-left-color: var(--bad);
+  background: var(--bad-tint-soft);
+}
+.change-item-added-block .dict-item-head,
+.change-item-removed-block .dict-item-head {
+  font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem;
+  line-height: 1; margin-bottom: 4px;
+}
+.change-item-added-block .dict-item-head { color: var(--ok); }
+.change-item-removed-block .dict-item-head { color: var(--bad); }
+/* Within a pretty block, key/value rows are two-column (key + value). */
+.change-item-added-block .change-scalar,
+.change-item-removed-block .change-scalar {
+  grid-template-columns: 180px 1fr;
+}
+.change-item-added-block .change-scalar .to,
+.change-item-removed-block .change-scalar .to { color: var(--text); }
+/* Long unbroken values (e.g. documentUri, cmsContentId) must wrap instead of
+ * overflowing the viewport on narrow screens. break-word keeps normal words
+ * intact but breaks a long token when it would otherwise blow past the edge. */
+.change-item-added-block .change-scalar .field,
+.change-item-removed-block .change-scalar .field,
+.change-item-added-block .change-scalar .to,
+.change-item-removed-block .change-scalar .to {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.dict-nested {
+  margin: 2px 0 0; padding: 6px 8px; white-space: pre-wrap; word-break: break-word;
+  background: var(--code-bg, rgba(127,127,127,0.10)); border-radius: 4px;
+  font-family: var(--font-mono); font-size: 0.75rem; color: var(--text);
+}
+.no-changes {
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: 24px;
+}
+
+/* ---------- raw ---------- */
+.raw-controls {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.raw-controls select {
+  padding: 6px 10px;
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit; font-size: 0.85rem;
+}
+.raw-actions {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+}
+.raw-btn {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--bg);
+  background: var(--accent-hot);
+  border: 1px solid var(--accent-hot);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.raw-btn:hover { background: var(--accent); border-color: var(--accent); }
+.raw-btn-ghost {
+  color: var(--accent-hot);
+  background: transparent;
+}
+.raw-btn-ghost:hover {
+  background: var(--pill-bg);
+  color: var(--text);
+}
+.raw-btn-copied,
+.raw-btn-copied:hover {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: transparent;
+}
+/* Redaction mode grays out the snapshot download/copy actions so full
+   unmasked data can't be exported while sharing. */
+.raw-btn:disabled,
+.raw-btn.is-disabled,
+.raw-btn.is-disabled:hover {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--bg-elev-2);
+  color: var(--muted);
+  border-color: var(--border);
+}
+
+/* Redaction: a locked pull envelope can't be expanded (its steps hold the
+   most PII). Gray the chevron and drop the header's interactive affordance. */
+.syslog-nested-locked .syslog-head-expandable {
+  cursor: default;
+}
+.syslog-nested-locked .syslog-disclosure.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Redaction bar: hides the masked value behind a solid block so a value is
+   visibly struck out (and screenshot-safe) rather than just hidden text. */
+.redacted-text {
+  background: var(--muted);
+  color: transparent;
+  border-radius: 3px;
+  padding: 0 0.35em;
+  user-select: none;
+  letter-spacing: 0.05em;
+}
+
+pre.raw {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  max-height: 520px;
+  overflow: auto;
+  white-space: pre;
+  tab-size: 4;
+}
+pre.raw .json-key     { color: var(--accent);   font-weight: 600; }
+pre.raw .json-string  { color: #0d7047; }   /* muted green for string values */
+pre.raw .json-number  { color: #b25510; }   /* warm ochre for numbers */
+pre.raw .json-bool    { color: #7a3fbd; font-weight: 600; }
+pre.raw .json-null    { color: var(--muted); font-style: italic; }
+
+/* ---------- updates feed ---------- */
+/* Single-block header (title + subtitle stacked, flush left). The
+   old layout used `flex + space-between + align-items: flex-end` for
+   a side-by-side title/meta pair; once the meta moved into a subtitle
+   row that flex setup left a single child being pushed to flex-end on
+   the cross axis whenever the @media rule flipped direction to column,
+   right-aligning the whole block. Plain block-flow keeps it flush left
+   at every width. */
+.updates-head {
+  padding: 6px 4px 4px;
+}
+.updates-head h2 { margin: 0; font-size: 1.2rem; font-weight: 600; }
+.updates-sub { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+
+.updates-empty {
+  padding: 48px 32px;
+  text-align: center;
+  background: var(--bg-elev);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+}
+.updates-empty h3 { margin: 0 0 8px; color: var(--text); font-weight: 600; }
+.updates-empty p { margin: 0; max-width: 600px; margin-inline: auto; font-size: 0.88rem; }
+
+.update-record {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.update-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.update-head-left {
+  display: flex; align-items: baseline; gap: 10px;
+}
+.update-case {
+  font-weight: 700;
+  font-size: 1rem;
+  color: var(--text);
+}
+.update-receipt {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.update-dates {
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+/* ---------- toast ---------- */
+#toast {
+  position: fixed;
+  bottom: 24px; right: 24px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.84rem;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 30;
+}
+#toast.show { opacity: 1; transform: translateY(0); }
+#toast.ok { border-color: var(--ok); }
+#toast.bad { border-color: var(--bad); }
+
+/* ====================================================================== */
+/* Responsive: the desktop layout above is the default; overrides below   */
+/* kick in at tablet/phone widths. Breakpoints:                            */
+/*   ≤ 900px : tablet — main padding shrinks, case-header stacks          */
+/*   ≤ 640px : phone — topbar stacks, metrics 2-col, stepper scrolls      */
+/* ====================================================================== */
+
+@media (max-width: 900px) {
+  main,
+  .view-tabs {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  /* Topbar tightens at ≤900px but does NOT stack vertically anymore
+     — the ≤1320px override (end of file) flattens topbar-left and
+     topbar-right via `display: contents` and reorders children so
+     brand + Pull update share row 1, info pills wrap below. Setting
+     flex-direction:column or align-items:stretch here would override
+     that flat layout and force every pill onto its own full-width
+     row. Just trim padding and rely on the wrap behaviour. */
+  .topbar {
+    padding: 14px 16px;
+    gap: 10px;
+  }
+  /* Keep the byline left-aligned with the brand at the ≤900px topbar
+     padding (16px). Applies down through the narrower breakpoints too. */
+  .byline-pill { margin-left: 16px; }
+
+  .case-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .case-meta {
+    align-items: flex-start;
+    font-size: 0.8rem;
+  }
+  .case-meta .big { font-size: 0.88rem; }
+
+  /* 2x2 metrics at tablet so the 4th tile never hangs as an orphan. */
+  .hero-metrics { grid-template-columns: 1fr 1fr; }
+
+  .change-block-head { flex-wrap: wrap; }
+  .change-scalar,
+  .change-item-added-block .change-scalar,
+  .change-item-removed-block .change-scalar {
+    grid-template-columns: 1fr;
+    gap: 2px 0;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--border-soft);
+  }
+  .change-scalar .field {
+    grid-column: 1 / -1;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted-2);
+    margin-bottom: 2px;
+  }
+  .change-scalar .from,
+  .change-scalar .to { padding-left: 4px; }
+}
+
+@media (max-width: 640px) {
+  .syslog-summary {
+    /* Let summary wrap (not ellipsis-truncate) on mobile since
+     * there's plenty of vertical room. */
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .trace-open-btn { font-size: 0.7rem; padding: 4px 10px; }
+
+  /* Storage card inherits the shared `.sys-card` 12px/14px padding
+     at every width — keeping the override would make the card
+     shorter than its siblings (especially when collapsed). */
+
+  /* ---------- MFA modal mobile ----------
+   * Full-viewport to maximise readable area on phones. */
+  .mfa-modal-overlay { padding: 0; }
+  .mfa-modal {
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+  }
+  .mfa-modal-header {
+    /* Header now flows over multiple lines if needed: title row,
+       trace-dir code row, tabs row. The close button sticks to the
+       top-right via absolute positioning so it never gets pushed
+       off-screen by a long trace-dir name. */
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 44px 10px 12px;
+    position: relative;
+  }
+  .mfa-modal-header h3 { font-size: 0.88rem; }
+  .mfa-modal-header code {
+    /* The trace-dir is long (`20260424T180012Z_fail_scheduled`) — wrap
+       it gracefully on narrow viewports instead of stretching the
+       header off-screen. */
+    word-break: break-all;
+    font-size: 0.72rem;
+  }
+  .mfa-modal-tabs { margin-left: 0; flex-basis: 100%; }
+  .mfa-modal-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    margin-left: 0;
+  }
+
+  /* Events: drop the table layout, render each event as a stacked
+     card so the `details` column doesn't get cut off the right edge.
+     `display: block` on tbody/tr/td turns each row into a column of
+     labelled lines that fits any width. */
+  .mfa-events-table { font-size: 0.74rem; display: block; }
+  .mfa-events-table thead { display: none; }
+  .mfa-events-table tbody,
+  .mfa-events-table tr,
+  .mfa-events-table td {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+  }
+  .mfa-events-table tr {
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #fff;
+  }
+  .mfa-events-table td.mfa-ts {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: #6b7280;
+    margin-bottom: 2px;
+  }
+  .mfa-events-table td.mfa-cycle {
+    display: inline-block;
+    width: auto;
+    font-size: 0.68rem;
+    color: #6b7280;
+    margin-right: 6px;
+  }
+  .mfa-events-table td.mfa-cycle:not(:empty)::before {
+    content: "cycle ";
+  }
+  .mfa-events-table td.mfa-event {
+    display: inline-block;
+    width: auto;
+    font-weight: 600;
+    color: #111827;
+    margin-bottom: 4px;
+  }
+  .mfa-events-table td.mfa-details {
+    word-break: break-word;
+    margin-top: 2px;
+  }
+  .mfa-events-table .mfa-kv {
+    display: inline-block;
+    margin-right: 8px;
+    margin-bottom: 2px;
+  }
+
+  /* Emails — keep the iframe usable but trim its min-height so it
+     doesn't dwarf the modal on phone-height viewports. */
+  .mfa-email-iframe {
+    min-height: 340px;
+    height: 60vh;
+  }
+  .mfa-email-raw {
+    height: 60vh;
+  }
+
+  /* The kv detail strip uses a 2-column grid (label | value) with
+     auto+1fr — at narrow widths the value column wraps fine, but the
+     label column can dominate when keys are short. Keep as-is, just
+     trim font-size. */
+  .syslog-details { font-size: 0.74rem; }
+
+  /* Topbar at phone widths: trim sizes only — every box keeps its
+     3-line stacked layout so TIMEZONE / LAST PULL / NEXT PULL stay
+     visually identical at every width. They rearrange among
+     themselves via flex-wrap, never flatten their content. */
+  .topbar { padding: 12px 16px; gap: 10px; }
+  .brand { padding: 8px 14px 8px 10px; gap: 8px; }
+  .brand-name { font-size: 0.95rem; }
+  .brand-logo { width: 26px; height: 26px; }
+  .version-chip { padding: 3px 10px; font-size: 0.72rem; }
+  .countdown { padding: 6px 12px; }
+  .countdown .label { font-size: 0.62rem; letter-spacing: 0.1em; }
+  .countdown .when { font-size: 0.68rem; }
+  .countdown .value { font-size: 0.86rem; }
+  .subtitle { font-size: 0.78rem; padding: 6px 12px; }
+  .pull-btn {
+    /* Keep the multi-line stack ("Manual / Pull Update"); just trim
+       the wide-width minimum height + paddings so it nests cleanly
+       with the LAST PULL / NEXT PULL boxes at phone widths. */
+    min-height: 50px;
+    padding: 8px 16px;
+    font-size: 0.88rem;
+  }
+  .pull-indicator { font-size: 0.76rem; padding: 5px 9px; }
+
+  /* ---------- view tabs ---------- */
+  .view-tab { padding: 9px 12px; font-size: 0.85rem; }
+
+  /* ---------- case card header ---------- */
+  .case-card { border-radius: 10px; }
+  .case-header { padding: 14px 16px 10px; gap: 6px; }
+  .case-label { font-size: 1rem; }
+  .case-badges { padding: 0 16px 12px; }
+  .badge { font-size: 0.72rem; padding: 2px 8px; }
+
+  /* Per-case tab bar — scrolls horizontally if needed, no wrap. */
+  .tabs {
+    padding: 0 8px;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { padding: 10px 12px; font-size: 0.8rem; white-space: nowrap; }
+
+  .tab-panels { padding: 14px 16px 18px; }
+
+  /* ---------- overview metrics: 2 columns on phone ---------- */
+  .hero-metrics { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .metric { padding: 11px 12px; }
+  .metric-value { font-size: 1.35rem; }
+  .metric-value.metric-value-sm { font-size: 0.9rem; }
+  .metric-label { font-size: 0.64rem; letter-spacing: 0.1em; }
+  .metric-sub { font-size: 0.7rem; }
+
+  /* ---------- timeline box ---------- */
+  .events-section { padding: 12px 14px; }
+  .events-list { gap: 4px 12px; }
+
+  /* ---------- callouts + sub-facts ---------- */
+  .callout { padding: 10px 12px; }
+  .callout-title { font-size: 0.84rem; }
+  .callout-body { font-size: 0.78rem; }
+
+  .sub-facts {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px 14px;
+    padding-top: 12px;
+    margin-top: 12px;
+  }
+  .sub-fact-k { font-size: 0.62rem; }
+  .sub-fact-v { font-size: 0.82rem; }
+
+  /* ---------- timeline ---------- */
+  .activity-scroller { padding: 12px; }
+  .timeline-row {
+    grid-template-columns: 100px 1fr;
+    padding: 6px 0;
+  }
+  .timeline-date { font-size: 0.72rem; word-break: break-all; }
+  .event-chip { font-size: 0.68rem; padding: 2px 6px; }
+  .timeline-caption { font-size: 0.72rem; }
+
+  /* ---------- changes blocks ---------- */
+  .change-block { padding: 12px 14px; }
+  .change-block-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 0.78rem;
+  }
+
+  /* ---------- raw JSON tab ---------- */
+  .raw-controls { flex-direction: column; align-items: stretch; gap: 8px; }
+  .raw-actions { margin-left: 0; flex-wrap: wrap; }
+  .raw-btn { flex: 1 1 auto; }
+  pre.raw { font-size: 0.72rem; padding: 12px; }
+
+  /* ---------- updates feed ---------- */
+  .update-record { padding: 14px 14px; }
+  .update-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .update-head-left { flex-wrap: wrap; }
+  .update-case { font-size: 0.95rem; white-space: nowrap; }
+  .update-dates { font-size: 0.76rem; word-break: break-all; }
+  .kind-tag { font-size: 0.64rem; padding: 2px 7px; }
+
+  /* ---------- login gate ---------- */
+  .gate {
+    width: 100%;
+    margin: 16px;
+    padding: 22px 22px 20px;
+  }
+}
+
+/* Extra-narrow screens (e.g. 320px iPhone SE 1st gen) */
+@media (max-width: 380px) {
+  .hero-metrics { grid-template-columns: 1fr; }
+  .sub-facts { grid-template-columns: 1fr; }
+  .case-meta .big { font-size: 0.8rem; }
+}
+
+/* ========== storage bar ==========
+ * Thin stacked bar under the topbar showing disk usage per category.
+ * Designed to be unobtrusive when usage is low and visibly urgent
+ * when it crosses the warn/critical thresholds. Poll cadence is 30s
+ * (see updateStorageBar() in app.js). */
+/* Storage section inside the System tab. Rendered as a card
+ * matching the rest of the page's section styling, above the
+ * system-log feed content. */
+.storage-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* margin / padding / surface are now defined by the shared
+     `.sys-card` rule above so all System-tab cards line up. The
+     legacy 12px bottom margin was creating an inconsistent gap
+     between Storage and System log. */
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+}
+.storage-bar-wrap .storage-bar-title {
+  font-size: 0.95rem;
+}
+.storage-bar-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.storage-bar-title { font-weight: 600; color: var(--text, #111827); }
+.storage-bar-total { font-variant-numeric: tabular-nums; }
+.storage-bar-track {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #eef0f3;
+  cursor: default;
+}
+.storage-bar-seg {
+  height: 100%;
+  /* No min-width — segments must scale strictly proportionally with
+     the track. A 2px floor was previously distorting layout at
+     narrow widths (a tiny category was forced to 2px regardless of
+     its true share, throwing the whole bar's proportions off).
+     Animate the basis instead of grow since segments are sized via
+     `flex: 0 0 X%`. */
+  flex-shrink: 0;
+  transition: flex-basis 0.4s ease;
+}
+.storage-bar-seg:hover { filter: brightness(1.1); }
+/* Per-category colours — consistent hue per key across renders. */
+/* Per-category colours. Per-case buckets (key="case_<num>") share
+ * a small palette that rotates by form number so each case keeps
+ * a stable colour across renders. */
+.storage-bar-seg[data-key="system_log"],
+.storage-bar-label-swatch[data-key="system_log"]      { background: #10b981; }
+.storage-bar-seg[data-key="full_traces"],
+.storage-bar-label-swatch[data-key="full_traces"]     { background: #f59e0b; }
+.storage-bar-seg[data-key="session_state"],
+.storage-bar-label-swatch[data-key="session_state"]   { background: #8b5cf6; }
+.storage-bar-seg[data-key="config"],
+.storage-bar-label-swatch[data-key="config"]          { background: #64748b; }
+.storage-bar-seg[data-key="other"],
+.storage-bar-label-swatch[data-key="other"]           { background: #94a3b8; }
+
+/* Per-case colour rotation. Key is `case_<num>`. We match by the
+ * last digit of the form number so I-485 / I-765 / I-131 each get
+ * distinct hues. More cases → palette repeats, which is fine. */
+.storage-bar-seg[data-key$="_485"],
+.storage-bar-label-swatch[data-key$="_485"]           { background: #3b82f6; }
+.storage-bar-seg[data-key$="_765"],
+.storage-bar-label-swatch[data-key$="_765"]           { background: #06b6d4; }
+.storage-bar-seg[data-key$="_131"],
+.storage-bar-label-swatch[data-key$="_131"]           { background: #ec4899; }
+/* Fallback for any other case number. */
+.storage-bar-seg[data-key^="case_"],
+.storage-bar-label-swatch[data-key^="case_"]          { background: #6366f1; }
+/* Re-assert the explicit ones above this fallback. */
+.storage-bar-seg[data-key="case_485"],
+.storage-bar-label-swatch[data-key="case_485"]        { background: #3b82f6; }
+.storage-bar-seg[data-key="case_765"],
+.storage-bar-label-swatch[data-key="case_765"]        { background: #06b6d4; }
+.storage-bar-seg[data-key="case_131"],
+.storage-bar-label-swatch[data-key="case_131"]        { background: #ec4899; }
+
+/* ------- legend beneath the stacked bar -------
+ * Wrapped row of colour-swatched labels. Ordered largest-first,
+ * matching segment order on the bar. Swatch colour === segment
+ * colour so readers can visually tie each entry back to its slice
+ * without needing alignment. */
+.storage-bar-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding-top: 6px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.storage-bar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.storage-bar-label-swatch {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+.storage-bar-label-name {
+  color: var(--text, #111827);
+  font-weight: 600;
+}
+.storage-bar-label-pct {
+  color: var(--muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+.storage-bar-seg[title] { cursor: help; }
+
+/* Compact storage indicator inside the System log tab header so
+ * operators can decide "should I clear this?" without leaving the
+ * tab. */
+.syslog-storage-line {
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+  margin-left: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Linkified trace artefacts (screenshot paths, trace_dir, etc.) */
+.syslog-detail-link {
+  color: #2563eb;
+  text-decoration: underline;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+.syslog-detail-link:hover { color: #1d4ed8; }
+
+/* One-line event summary rendered inline next to the pill, used by
+ * events with a `summarize` hook in SYSTEMLOG_EVENT_INFO. */
+.syslog-summary {
+  font-size: 0.78rem;
+  color: var(--muted, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ========== debug-mode pill ==========
+ * Toggle next to the version chip. Visually loud when ON so the
+ * operator can't forget the disk cost of full-trace-on-success. */
+.debug-pill {
+  /* Sized identically to .syslog-export-btn / .clear-log-btn / the
+     secondary .pull-btn so the System actions row reads as one
+     consistent button cluster. The dot + uppercase label keep the
+     toggle visually distinct from the regular outlined buttons. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.debug-pill:hover {
+  background: var(--bg-elev);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.debug-pill:focus-visible {
+  outline: 2px solid var(--accent-hot);
+  outline-offset: 1px;
+}
+.debug-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.debug-pill[aria-checked="true"] {
+  background: var(--bad-tint);
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.debug-pill[aria-checked="true"] .debug-pill-dot {
+  background: var(--bad);
+  box-shadow: 0 0 0 3px var(--bad-tint);
+  animation: debug-pulse 1.4s ease-in-out infinite;
+}
+@keyframes debug-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2); }
+  50%      { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.0); }
+}
+
+/* ========== open-trace buttons ==========
+ * Right-edge cluster inside a pull envelope header when the pull
+ * persisted a trace. Primary button opens the full Playwright zip
+ * in trace.playwright.dev; secondary opens the MFA-events sidecar. */
+.trace-open-group {
+  display: inline-flex;
+  gap: 6px;
+  flex: 0 0 auto;
+  align-self: center;
+}
+/* Per-attempt trace rows. A single-attempt pull renders one row with no
+ * attempt label; a multi-attempt pull renders one row per preserved
+ * attempt so the operator can open each trace independently.
+ *
+ * Each row uses a 3-column grid with FIXED column widths so that
+ * successive rows line up visually regardless of outcome-pill length:
+ *
+ *   col 1 — attempt label ("Attempt N")
+ *   col 2 — outcome pill  (fixed min-width so OK / FAIL / … all occupy
+ *                           the same horizontal space)
+ *   col 3 — button cluster (Open trace + optional MFA events)
+ */
+.trace-open-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+/* Multi-attempt grid: fixed columns so outcome pills line up across
+   rows and the button cluster starts at the same X regardless of
+   OK / FAIL width. Single-attempt row collapses to a plain inline-
+   flex so there's no ghost cell reserving space. */
+.trace-open-row-multi {
+  display: grid;
+  grid-template-columns: 72px 56px auto;
+  align-items: center;
+  gap: 10px;
+}
+.trace-open-row-single {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.trace-attempt-label {
+  font-size: 0.72rem;
+  color: #374151;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.trace-outcome {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  min-width: 44px;     /* FAIL is widest; forces OK to the same footprint */
+  box-sizing: border-box;
+  /* Ensure the pill sits inside its grid column without stretching. */
+  justify-self: start;
+}
+.trace-outcome-ok {
+  background: #dcfce7;
+  color: #166534;
+}
+.trace-outcome-fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.trace-open-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+.trace-open-btn:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
+}
+.trace-open-btn-sub {
+  background: #f3f4f6;
+  color: #374151;
+  border-color: #d1d5db;
+  font-weight: 500;
+}
+.trace-open-btn-sub:hover {
+  background: #e5e7eb;
+  border-color: #9ca3af;
+}
+
+/* ========== MFA trace modal ==========
+ * Pop-out overlay with Events + Emails tabs. Opens from the "MFA
+ * events" button on any pull envelope that persisted a trace. */
+.mfa-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: rgba(10, 14, 25, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: mfa-fade-in 0.12s ease-out;
+}
+@keyframes mfa-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.mfa-modal {
+  background: #fff;
+  border-radius: 10px;
+  /* Scale with viewport — no hard pixel cap so 4K monitors get the
+   * full benefit while phones still collapse gracefully. The
+   * `vmin`-free approach keeps the modal tall on narrow-but-long
+   * windows like a split screen too. */
+  width: 96vw;
+  height: 92vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+.mfa-modal-overlay {
+  /* Reduce outer padding on mobile so we're not wasting 20px
+   * each side of a narrow viewport. */
+  padding: 4vh 2vw;
+}
+.mfa-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+.mfa-modal-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #111827;
+}
+.mfa-modal-header code {
+  font-size: 0.82rem;
+  color: #374151;
+  background: #e5e7eb;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.mfa-modal-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: 12px;
+}
+.mfa-tab {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #4b5563;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.mfa-tab.active {
+  background: #e0e7ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+.mfa-modal-close {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  font-size: 1.4rem;
+  color: #6b7280;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.mfa-modal-close:hover { background: #e5e7eb; }
+.mfa-modal-body {
+  overflow: auto;
+  padding: 14px 16px;
+  flex: 1 1 auto;
+}
+.mfa-modal-loading, .mfa-empty, .mfa-modal-error {
+  padding: 40px;
+  text-align: center;
+  color: #6b7280;
+}
+.mfa-modal-error { color: #b91c1c; }
+
+.mfa-events-sub, .mfa-emails-sub {
+  font-size: 0.78rem;
+  color: #6b7280;
+  margin-bottom: 10px;
+}
+.mfa-events-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mfa-events-table th,
+.mfa-events-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+.mfa-events-table th {
+  font-weight: 600;
+  color: #6b7280;
+  background: #fafbfc;
+  position: sticky;
+  top: -14px;
+}
+.mfa-events-table .mfa-ts { color: #6b7280; white-space: nowrap; }
+.mfa-events-table .mfa-cycle {
+  text-align: right;
+  color: #9ca3af;
+  width: 2ch;
+}
+.mfa-events-table .mfa-event {
+  font-weight: 600;
+  color: #111827;
+  white-space: nowrap;
+}
+.mfa-events-table .mfa-details {
+  color: #374151;
+  word-break: break-word;
+}
+.mfa-events-table .mfa-kv {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 0.72rem;
+}
+.mfa-events-table .mfa-kv b { color: #6b7280; font-weight: 600; }
+.mfa-events-table tr.mfa-row-ok td.mfa-event { color: #065f46; }
+.mfa-events-table tr.mfa-row-error {
+  background: #fef2f2;
+}
+.mfa-events-table tr.mfa-row-error td.mfa-event { color: #b91c1c; }
+
+.mfa-emails-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mfa-email-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mfa-email-card summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  background: #fafbfc;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mfa-email-card summary::-webkit-details-marker { display: none; }
+.mfa-email-card[open] summary {
+  background: #eff6ff;
+  border-bottom: 1px solid #e5e7eb;
+}
+.mfa-email-subject {
+  font-weight: 600;
+  color: #111827;
+  font-size: 0.88rem;
+}
+.mfa-email-meta {
+  font-size: 0.7rem;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mfa-email-body-placeholder {
+  padding: 10px 8px;
+  color: #6b7280;
+  font-size: 0.82rem;
+}
+.mfa-email-headers {
+  background: #fafbfc;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #111827;
+  margin-bottom: 10px;
+}
+.mfa-email-headers b { color: #6b7280; font-weight: 600; }
+.mfa-email-raw {
+  margin: 0;
+  padding: 10px 14px;
+  background: #fafbfc;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* Match the rendered-iframe's vertical footprint so toggling
+     between Rendered and Raw source doesn't reflow the modal. */
+  height: 70vh;
+  overflow: auto;
+  color: #111827;
+}
+.mfa-email-no-html {
+  padding: 40px;
+  text-align: center;
+  color: #9ca3af;
+  font-style: italic;
+  background: #fafbfc;
+  border-radius: 4px;
+}
+.mfa-email-view-switch {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px 0;
+  background: #fff;
+}
+.mfa-email-view-btn {
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  color: #4b5563;
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.mfa-email-view-btn.active {
+  background: #e0e7ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+.mfa-email-view-wrap {
+  background: #fff;
+  /* Zero lateral padding so the iframe + raw-source pre spread edge-
+     to-edge of the email card. We already have breathing room from
+     the modal body + email card paddings above this. */
+  padding: 0;
+}
+.mfa-email-view-pane { display: none; }
+.mfa-email-view-pane.active { display: block; }
+.mfa-email-iframe {
+  display: block;
+  width: 100%;
+  /* Use most of the pop-out's vertical space. The modal itself is
+     92vh tall; reserving ~23vh for the modal header + tabs + email
+     card header + view-switch row leaves ~69vh for the iframe.
+     Short emails show at the top of a roomy canvas; long emails get
+     their own internal scrollbar without crushing the modal chrome. */
+  height: 70vh;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #fff;
+}
+
+
+/* ====================================================================== */
+/* JS-driven system-log row reflow. Replaces the old static                */
+/* @media(max-width:640px) trigger so the row only flattens when its       */
+/* natural single-row content would actually overflow the available        */
+/* width. _wireSyslogFit() in app.js measures every .syslog-head's content */
+/* against the container width and toggles `.syslog-rows-wrapped` on the   */
+/* feed when any row would collide.                                        */
+/*                                                                        */
+/* Wrapped layout (3 cells × 2 rows):                                     */
+/*   row 1: pill (auto) | .   (1fr) | timestamp (auto, right-aligned)     */
+/*   row 2: source         | event   (spans 2 cells)                     */
+/* ====================================================================== */
+.syslog-rows-wrapped .syslog-head {
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "pill .   ts"
+    "src  ev  ev";
+  row-gap: 4px;
+  column-gap: 8px;
+  font-size: 0.78rem;
+}
+.syslog-rows-wrapped .syslog-head > .kind-tag { grid-area: pill; }
+.syslog-rows-wrapped .syslog-head > .syslog-source { grid-area: src; }
+.syslog-rows-wrapped .syslog-head > .syslog-event { grid-area: ev; min-width: 0; }
+.syslog-rows-wrapped .syslog-head > .syslog-ts {
+  grid-area: ts;
+  justify-self: end;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
