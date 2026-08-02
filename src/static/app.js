@@ -310,15 +310,138 @@ async function guardedDownload(evt, url) {
   }
 }
 
+// Download an export from inside the Export modal. Unlike guardedDownload
+// (which is an <a>-click interceptor), this is invoked directly by a button.
+// When redaction is latched it challenges for the admin password and sends it
+// as a header; otherwise it fetches the blob plainly. Returns true on a
+// successful download, false on cancel/failure so the caller can restore UI.
+async function downloadExport(url, label) {
+  let pw = "";
+  if (state.redacted === true) {
+    pw = await adminChallenge({ always: true, action: `export ${label}` });
+    if (pw === null) return false;  // cancelled
+  }
+  try {
+    const res = await fetch(url, withAdminHeader({}, pw));
+    if (res.status === 401) { toast("Wrong password — export blocked.", "bad"); return false; }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="?([^"]+)"?/.exec(cd);
+    const name = (m && m[1]) || (url.split("/").pop() + ".zip");
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(href);
+    return true;
+  } catch (e) {
+    toast(`Export failed: ${e.message}`, "bad");
+    return false;
+  }
+}
+
+// The three export options, shown as rows in the Export modal. Each has a
+// title, a description, a button label, and the endpoint to download from.
+const EXPORT_OPTIONS = [
+  {
+    key: "data",
+    title: "Case data",
+    button: "Download",
+    url: "/api/export",
+    desc: "Zip of every case's full snapshot history. Contains PII.",
+  },
+  {
+    key: "demo",
+    title: "Shareable demo",
+    button: "Download",
+    url: "/api/export-demo",
+    desc: "Static, redacted copy of this dashboard. Safe to share.",
+  },
+  {
+    key: "log",
+    title: "System log",
+    button: "Download",
+    url: "/api/system-log/export",
+    desc: "Activity log as JSON. No case data.",
+  },
+];
+
+function closeExportModal() {
+  const existing = document.querySelector(".export-modal-overlay");
+  if (!existing) return;
+  const h = existing._escHandler;
+  existing.remove();
+  if (h) document.removeEventListener("keydown", h);
+}
+
+function openExportModal() {
+  closeExportModal();
+  const overlay = document.createElement("div");
+  // Reuse the MFA/schedule modal overlay + panel styling.
+  overlay.className = "mfa-modal-overlay export-modal-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Export");
+
+  const rows = EXPORT_OPTIONS.map(o =>
+    `<div class="export-option">` +
+      `<div class="export-option-text">` +
+        `<div class="export-option-title">${escapeHtml(o.title)}</div>` +
+        `<div class="export-option-desc">${escapeHtml(o.desc)}</div>` +
+      `</div>` +
+      `<button type="button" class="action-btn pull-btn export-option-btn" ` +
+        `data-export-key="${escapeHtml(o.key)}">${escapeHtml(o.button)}</button>` +
+    `</div>`
+  ).join("");
+
+  overlay.innerHTML =
+    `<div class="mfa-modal export-modal">` +
+      `<header class="mfa-modal-header">` +
+        `<h3>Export</h3>` +
+        `<button type="button" class="mfa-modal-close" aria-label="Close">×</button>` +
+      `</header>` +
+      `<div class="mfa-modal-body">` +
+        `<div class="export-options">${rows}</div>` +
+      `</div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener("click", e => { if (e.target === overlay) closeExportModal(); });
+  overlay.querySelector(".mfa-modal-close").addEventListener("click", closeExportModal);
+  const escHandler = (e) => { if (e.key === "Escape") closeExportModal(); };
+  document.addEventListener("keydown", escHandler);
+  overlay._escHandler = escHandler;
+
+  overlay.querySelectorAll("[data-export-key]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const opt = EXPORT_OPTIONS.find(o => o.key === btn.getAttribute("data-export-key"));
+      if (!opt) return;
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Preparing…";
+      try {
+        const ok = await downloadExport(opt.url, opt.title);
+        if (ok) toast(`${opt.title} exported.`, "ok");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    });
+  });
+}
+
 // ---------- boot ----------
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("pull-btn").addEventListener("click", triggerPull);
-  // Export data is an <a href> — intercept for the guarded blob path.
+  // Export is now a single button that opens a chooser modal (case data /
+  // demo / system log), each option with its own description + download.
   document.getElementById("export-btn")
-    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export"));
-  document.getElementById("export-demo-btn")
-    ?.addEventListener("click", (e) => guardedDownload(e, "/api/export-demo"));
+    ?.addEventListener("click", () => openExportModal());
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
@@ -443,7 +566,6 @@ function wireExportInfo() {
   // others so they can't visually block each other.
   const pairs = [
     ["export-info-btn",         "export-info-popover"],
-    ["export-demo-info-btn",    "export-demo-info-popover"],
     ["debug-info-btn",          "debug-info-popover"],
     ["recompute-info-btn",      "recompute-info-popover"],
     ["schedule-info-btn",       "schedule-info-popover"],
@@ -2326,84 +2448,16 @@ function renderSystemLogPagination(page, totalPages, position) {
   return wrap;
 }
 
-// Render the two System-log tab controls: "Export log" (one-click download
-// of the current log as JSON) and "Clear log" (two-step destructive wipe).
-// Both are deliberately scoped to the System log view so they can't be
-// confused with the "Export data" button in the topbar (which exports
-// cases only — not the log).
+// Render the System-log tab control: "Clear Log" (two-step destructive wipe).
+// Scoped to the System log view. The log DOWNLOAD lives in the Export modal
+// (Export button → "System log") alongside the case-data and demo exports.
 function renderSystemLogControls() {
-  // Wrap as `display: contents` so the buttons sit as direct
-  // siblings inside the parent `.sys-actions-row` flex container
-  // (matching DEBUG + Export data placement).
+  // Wrap as `display: contents` so the button sits as a direct
+  // sibling inside the parent `.sys-actions-row` flex container.
   const wrap = document.createElement("span");
   wrap.className = "syslog-controls";
   wrap.style.display = "contents";
 
-  const exportBtn = document.createElement("a");
-  exportBtn.href = "/api/system-log/export";
-  exportBtn.dataset.guard = "redaction";
-  // .action-btn for unified action-button geometry; the .syslog-export-btn
-  // class is preserved for any specialised rules (none currently).
-  exportBtn.className = "action-btn syslog-export-btn";
-  exportBtn.textContent = "Export Log";
-  exportBtn.title = "Download this log as JSON";
-  exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
-
-  // Wrap Export log with an `i` info badge + popover so it matches every
-  // other action (Export data / Debug / Recompute / Schedule). This control
-  // is rendered lazily (after the boot-time popover wiring), so its toggle is
-  // wired inline here rather than via wireInfoPopovers().
-  const exportWrap = document.createElement("div");
-  exportWrap.className = "action-with-info";
-  exportWrap.appendChild(exportBtn);
-
-  const infoBtn = document.createElement("button");
-  infoBtn.type = "button";
-  infoBtn.className = "info-badge info-badge-corner";
-  infoBtn.setAttribute("aria-label", "About the Export log button");
-  infoBtn.setAttribute("aria-expanded", "false");
-  infoBtn.setAttribute("aria-controls", "export-log-info-popover");
-  infoBtn.textContent = "i";
-
-  const infoPop = document.createElement("div");
-  infoPop.id = "export-log-info-popover";
-  infoPop.className = "info-popover popover-left";
-  infoPop.hidden = true;
-  infoPop.setAttribute("role", "tooltip");
-  infoPop.innerHTML =
-    `<strong>Exports the system log.</strong> ` +
-    `Downloads the current <code>data/system_log.json</code> as a single ` +
-    `JSON file — every scheduler fire, pull envelope, notification, and ` +
-    `error, newest first. This is the activity log only; it does <em>not</em> ` +
-    `include case snapshots (use <em>Export data</em> for those). While ` +
-    `redaction is on the download is password-gated.`;
-
-  // Inline toggle: mirror the boot popover behaviour (click to open, click
-  // outside / Escape to close, snap inside the viewport).
-  infoBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const willOpen = infoPop.hidden;
-    infoPop.hidden = !willOpen;
-    infoBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
-    if (willOpen) requestAnimationFrame(() => positionPopover(infoPop));
-  });
-  document.addEventListener("click", (e) => {
-    if (!infoPop.hidden && !infoPop.contains(e.target) && e.target !== infoBtn) {
-      infoPop.hidden = true;
-      infoBtn.setAttribute("aria-expanded", "false");
-    }
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !infoPop.hidden) {
-      infoPop.hidden = true;
-      infoBtn.setAttribute("aria-expanded", "false");
-    }
-  });
-
-  exportWrap.appendChild(infoBtn);
-  exportWrap.appendChild(infoPop);
-
-  wrap.appendChild(exportWrap);
   wrap.appendChild(renderClearLogControl());
   return wrap;
 }
