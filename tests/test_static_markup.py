@@ -27,8 +27,8 @@ def test_recompute_button_present_with_secondary_styling():
 
 
 def test_action_buttons_in_expected_order():
-    # Actions row order: Redaction, Access Lock, Recompute, Debug, Export data,
-    # then the Export log / Clear log mount slot.
+    # Actions row order: Redaction, Access Lock, Recompute, Debug, Export,
+    # then the Clear log mount slot.
     order = [
         'id="redaction-pill"',
         'id="access-lockout-pill"',
@@ -86,8 +86,10 @@ def test_access_lock_pill_present_as_switch_labelled():
 
 def test_guarded_action_buttons_marked_for_redaction_lock():
     # Every action button the redaction lock grays out carries data-guard so
-    # the CSS overlay + the JS challenge can find it.
-    for token in ('id="pull-btn"', 'id="debug-mode-pill"', 'id="export-btn"',
+    # the CSS overlay + the JS challenge can find it. (The Export button is NOT
+    # in this set: it opens a chooser modal and each download inside gates
+    # itself via downloadExport(), rather than being a direct guarded link.)
+    for token in ('id="pull-btn"', 'id="debug-mode-pill"',
                   'id="recompute-btn"'):
         start = INDEX_HTML.find(token)
         assert start != -1, f"{token} missing"
