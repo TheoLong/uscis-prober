@@ -1522,6 +1522,14 @@ main[hidden] { display: none; }
   padding: 24px;
   animation: modal-fade-in 0.12s ease-out;
 }
+
+/* The admin-password prompt must sit ABOVE every other overlay — including
+   the MFA/Schedule modals (z-index 9500), which can trigger it. If it renders
+   underneath, the input is unclickable (the modal that launched it blocks it).
+   Keep this the highest layer in the app so the password is always reachable. */
+.modal-overlay[data-modal='admin-pw'] {
+  z-index: 10000;
+}
 @keyframes modal-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
