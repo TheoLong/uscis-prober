@@ -2993,37 +2993,38 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 }
 
 /* Export modal — one row per export option (case data / demo / system log),
-   each with a title, description, and its own download button. Reuses the
+   each with a title, a one-line description, and a Download button. Reuses the
    .mfa-modal overlay/panel. */
-.export-modal { max-width: 480px; }
+.export-modal { max-width: 440px; }
 .export-options {
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 .export-option {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 14px;
-  padding: 14px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  padding: 14px 2px;
 }
-.export-option-text { flex: 1 1 auto; }
+.export-option + .export-option {
+  border-top: 1px solid #eef0f3;
+}
+.export-option-text { flex: 1 1 auto; min-width: 0; }
 .export-option-title {
   font-weight: 600;
   font-size: 0.9rem;
   color: #111827;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .export-option-desc {
   font-size: 0.78rem;
-  line-height: 1.4;
+  line-height: 1.35;
   color: #6b7280;
 }
 .export-option-btn {
   flex: 0 0 auto;
-  align-self: center;
+  min-width: 104px;
+  text-align: center;
   white-space: nowrap;
 }
 

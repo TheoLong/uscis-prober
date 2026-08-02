@@ -350,31 +350,23 @@ const EXPORT_OPTIONS = [
   {
     key: "data",
     title: "Case data",
-    button: "Download data",
+    button: "Download",
     url: "/api/export",
-    desc: "A single zip of every case's full snapshot history " +
-      "(data/{form}_case.json) plus a manifest with each case's label, " +
-      "receipt number, and entry count. Each snapshot is the raw USCIS API " +
-      "response — contains applicant info, letter IDs, etc. Treat as PII.",
+    desc: "Zip of every case's full snapshot history. Contains PII.",
   },
   {
     key: "demo",
     title: "Shareable demo",
-    button: "Download demo",
+    button: "Download",
     url: "/api/export-demo",
-    desc: "A single static HTML file that looks exactly like this dashboard " +
-      "with redaction on — case/receipt numbers and names masked. All data " +
-      "is frozen in and every action is inert, so it needs no server and " +
-      "leaks no private data. Safe to share.",
+    desc: "Static, redacted copy of this dashboard. Safe to share.",
   },
   {
     key: "log",
     title: "System log",
-    button: "Download log",
+    button: "Download",
     url: "/api/system-log/export",
-    desc: "The current activity log (data/system_log.json) as JSON — every " +
-      "scheduler fire, pull envelope, notification, and error, newest first. " +
-      "This is the log only; it does not include case snapshots.",
+    desc: "Activity log as JSON. No case data.",
   },
 ];
 
