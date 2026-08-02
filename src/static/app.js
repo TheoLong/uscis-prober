@@ -2417,7 +2417,7 @@ function renderClearLogControl() {
   idle.type = "button";
   idle.className = "action-btn clear-log-btn";
   idle.dataset.guard = "redaction";
-  idle.textContent = "Clear log";
+  idle.textContent = "Clear Log";
   idle.title = "Permanently delete every event in this log";
   idle.addEventListener("click", () => requestClearLog(idle));
   return idle;
