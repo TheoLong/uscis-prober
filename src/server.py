@@ -308,6 +308,76 @@ def load_access_lockout_enabled(config: dict | None = None) -> bool:
     return config.get("access_lockout_enabled", False) is True
 
 
+def load_schedule_disabled_ids(config: dict | None = None) -> list[str]:
+    """Read `schedule_disabled_ids` (list[str]) from config.json.
+
+    Case receipt numbers (the `id` of each entry in `cases`) in this list are
+    EXCLUDED from automatic (scheduler) pulls. The `id` is the unique USCIS
+    receipt number — the stable identifier. `label` is only a display nickname
+    and is NOT used for gating (it can be renamed and isn't guaranteed unique).
+
+    Every configured case whose id is not in the list stays active on the
+    schedule. Manual pulls (POST /api/pull) ignore this entirely and always
+    fetch every case — the list only gates the cron-triggered pull.
+
+    Persistent by design: the selection lives in config.json (not APScheduler
+    state) so it survives a restart. Toggled per-case from the UI via
+    /api/schedule. Missing/invalid = [] (defensive: a bad value must never
+    silently disable a case the operator still expects on the schedule). Only
+    string entries are kept; everything else is dropped.
+
+    Backward compatibility: if the new `schedule_disabled_ids` key is absent but
+    the legacy `schedule_disabled_labels` key is present, its labels are
+    resolved to ids against the current `cases` list so an old config keeps
+    working until it's rewritten (the next /api/schedule POST persists the new
+    key). Unknown/stale labels are dropped.
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            return []
+
+    raw = config.get("schedule_disabled_ids")
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, str)]
+
+    # Legacy migration: map old label-based disables to ids.
+    legacy = config.get("schedule_disabled_labels")
+    if isinstance(legacy, list):
+        legacy_labels = {x for x in legacy if isinstance(x, str)}
+        ids: list[str] = []
+        for c in config.get("cases", []):
+            label = c.get("label") or c.get("type") or ""
+            cid = c.get("id") or ""
+            if cid and label in legacy_labels:
+                ids.append(cid)
+        return ids
+
+    return []
+
+
+def _scheduled_active_ids(config: dict | None = None) -> list[str]:
+    """Case ids (receipt numbers) the automatic (scheduler) pull should fetch.
+
+    All configured case ids minus `schedule_disabled_ids`, order preserved from
+    config. An empty result means every case is disabled and the scheduled pull
+    should be skipped entirely (the caller checks this).
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            return []
+    disabled = set(load_schedule_disabled_ids(config))
+    ids: list[str] = []
+    for c in config.get("cases", []):
+        cid = c.get("id") or ""
+        if cid and cid not in disabled:
+            ids.append(cid)
+    return ids
+
+
 def admin_password(config: dict | None = None) -> str:
     """The single site admin password, or "" when password gating is disabled.
 
@@ -818,6 +888,23 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
     (from APScheduler). Recorded on the entry for later filtering.
     """
     global _pull_state
+    # Per-case schedule gate: if cases ARE configured but every one is
+    # disabled for the schedule, a scheduled pull has nothing to fetch —
+    # skip it before touching the running flag or acquiring locks. When no
+    # cases are configured at all, fall through to the normal pipeline (it
+    # logs `cli_run_no_cases`), preserving prior behaviour. Manual pulls are
+    # never gated here.
+    if trigger == "scheduled":
+        try:
+            _cfg = load_config()
+        except Exception:
+            _cfg = {}
+        _has_cases = bool(_cfg.get("cases"))
+        if _has_cases and not _scheduled_active_ids(_cfg):
+            logger.info("Scheduled pull skipped: all cases disabled for the schedule.")
+            sys_log("pull_skipped_all_cases_disabled", source="server",
+                    trigger=trigger)
+            return
     with _pull_lock:
         if _pull_state.running:
             logger.info("Pull already running; skipping trigger.")
@@ -1031,6 +1118,17 @@ def _run_pull_subprocess_inner(
             # from a scheduled pull vs a manual click.
             "USCIS_PULL_TRIGGER": trigger or "pull",
         }
+        # Per-case schedule gating applies to the AUTOMATIC trigger only.
+        # On a scheduled pull we hand session_fetch an allowlist of the
+        # currently-active case ids (all configured cases minus the operator's
+        # disabled set). A manual pull leaves this unset, so it always fetches
+        # every case. Read fresh each attempt so a live edit in the Schedule
+        # modal takes effect on the next retry/run without a restart.
+        # `_scheduled_active_ids()` already short-circuits the whole pull when
+        # nothing is active, so here the list is non-empty.
+        if trigger == "scheduled":
+            active = _scheduled_active_ids()
+            child_env["USCIS_ACTIVE_IDS"] = ",".join(active)
         try:
             proc = subprocess.run(
                 PULL_CMD,
@@ -1298,6 +1396,32 @@ def _setup_scheduler() -> None:
             timezone=SCHEDULER_TZ, hours=list(PULL_HOURS))
 
 
+def _reschedule_pull_jobs(hours: tuple[int, ...]) -> None:
+    """Re-register the scheduler's pull jobs for a new set of hours, live.
+
+    Removes every existing `pull-*` job and adds one per hour in `hours`, so a
+    schedule edit from the UI takes effect without a server restart. Updates the
+    `PULL_HOURS` module global (read by the status payload and the next-run
+    calc). Safe to call before `_setup_scheduler` has started the scheduler —
+    `add_job` on a not-yet-started BackgroundScheduler just queues the jobs.
+    """
+    global PULL_HOURS
+    for job in scheduler.get_jobs():
+        if job.id and job.id.startswith("pull-"):
+            scheduler.remove_job(job.id)
+    for hour in hours:
+        scheduler.add_job(
+            _spawn_pull_async,
+            CronTrigger(hour=hour, minute=0, timezone=SCHEDULER_TZ),
+            id=f"pull-{hour:02d}",
+            name=f"Daily pull @ {hour:02d}:00 {SCHEDULER_TZ}",
+            replace_existing=True,
+        )
+    PULL_HOURS = tuple(hours)
+    sys_log("scheduler_rescheduled", source="server",
+            timezone=SCHEDULER_TZ, hours=list(PULL_HOURS))
+
+
 def _next_run_iso() -> str | None:
     jobs = scheduler.get_jobs()
     times = [j.next_run_time for j in jobs if j.next_run_time]
@@ -1341,6 +1465,7 @@ def _no_cache(resp):
 _GUARDED_ACTION_POSTS = frozenset({
     "/api/pull",
     "/api/debug-mode",
+    "/api/schedule",
     "/api/system-log/clear",
     "/api/system-log/recompute",
 })
@@ -2206,6 +2331,136 @@ def api_access_lockout():
         return jsonify({"ok": False, "error": "config_write_failed", "type": type(e).__name__}), 500
 
     return jsonify({"ok": True, "enabled": desired})
+
+
+@app.route("/api/schedule", methods=["GET", "POST"])
+def api_schedule():
+    """Read / update the automatic-pull schedule.
+
+    GET → {
+      "hours": [int, ...],              # current pull_hours (24h, ET)
+      "timezone": "America/New_York",
+      "cases": [ {"label", "id", "enabled"} ],  # per-case schedule state
+    }
+
+    POST {"hours": [int...], "disabled_ids": [str...]} + `X-Admin-Password`
+    persists both to config.json (atomic tmp + os.replace) and live-reschedules
+    the pull jobs — no restart needed. Either field may be omitted to leave that
+    part unchanged. `disabled_ids` are case receipt numbers (the unique `id`),
+    NOT labels. The per-case selection gates the AUTOMATIC pull only; manual
+    "Pull Update" always fetches every case. Password-gated in both directions
+    (when an admin password is configured), same as the other action controls.
+    """
+    if request.method == "GET":
+        try:
+            hours = list(load_pull_hours())
+        except ConfigError:
+            hours = list(PULL_HOURS)
+        disabled = set(load_schedule_disabled_ids())
+        cfg = load_config()
+        cases = []
+        for c in cfg.get("cases", []):
+            cid = c.get("id") or ""
+            cases.append({
+                "label": c.get("label") or c.get("type") or "",
+                "id": cid,
+                "enabled": cid not in disabled,
+            })
+        return jsonify({
+            "hours": hours,
+            "timezone": SCHEDULER_TZ,
+            "cases": cases,
+        })
+
+    body = request.get_json(silent=True) or {}
+
+    blocked = _toggle_password_block()
+    if blocked is not None:
+        return blocked
+
+    try:
+        cfg = load_config()
+    except Exception as e:  # pragma: no cover — defensive
+        return jsonify({"ok": False, "error": "config_load_failed", "type": type(e).__name__}), 500
+
+    # ---- validate hours (optional) ----
+    new_hours: tuple[int, ...] | None = None
+    if "hours" in body:
+        raw = body.get("hours")
+        if not isinstance(raw, list) or not raw:
+            return jsonify({"ok": False, "error": "hours_must_be_nonempty_list"}), 400
+        seen: set[int] = set()
+        for item in raw:
+            if isinstance(item, bool) or not isinstance(item, int):
+                return jsonify({"ok": False, "error": "hours_must_be_integers"}), 400
+            if item < 0 or item > 23:
+                return jsonify({"ok": False, "error": "hours_out_of_range"}), 400
+            seen.add(item)
+        new_hours = tuple(sorted(seen))
+
+    # ---- validate disabled_ids (optional) ----
+    # Keyed on the unique case `id` (receipt number), not the display label.
+    new_disabled: list[str] | None = None
+    if "disabled_ids" in body:
+        raw = body.get("disabled_ids")
+        if not isinstance(raw, list):
+            return jsonify({"ok": False, "error": "disabled_ids_must_be_list"}), 400
+        valid_ids = {(c.get("id") or "") for c in cfg.get("cases", [])}
+        cleaned: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                return jsonify({"ok": False, "error": "disabled_ids_must_be_strings"}), 400
+            if item not in valid_ids:
+                return jsonify({"ok": False, "error": "unknown_case_id", "id": item}), 400
+            if item not in cleaned:
+                cleaned.append(item)
+        new_disabled = cleaned
+
+    if new_hours is None and new_disabled is None:
+        return jsonify({"ok": False, "error": "nothing_to_update"}), 400
+
+    if new_hours is not None:
+        cfg["pull_hours"] = list(new_hours)
+    if new_disabled is not None:
+        cfg["schedule_disabled_ids"] = new_disabled
+        # Drop the legacy label-keyed field if present so the two can't drift.
+        cfg.pop("schedule_disabled_labels", None)
+
+    try:
+        tmp = CONFIG_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:  # pragma: no cover — filesystem should not fail
+        return jsonify({"ok": False, "error": "config_write_failed", "type": type(e).__name__}), 500
+
+    # Live-reschedule only when the hours actually changed. Wrapped so a
+    # scheduler hiccup can't lose the persisted config write above.
+    if new_hours is not None:
+        try:
+            _reschedule_pull_jobs(new_hours)
+        except Exception as e:  # pragma: no cover — defensive
+            sys_log("scheduler_reschedule_failed", level="error", source="server",
+                    error=f"{type(e).__name__}: {e}"[:200])
+            return jsonify({
+                "ok": False, "error": "reschedule_failed",
+                "type": type(e).__name__, "persisted": True,
+            }), 500
+
+    disabled = set(load_schedule_disabled_ids(cfg))
+    cases = []
+    for c in cfg.get("cases", []):
+        cid = c.get("id") or ""
+        cases.append({
+            "label": c.get("label") or c.get("type") or "",
+            "id": cid,
+            "enabled": cid not in disabled,
+        })
+    return jsonify({
+        "ok": True,
+        "hours": list(new_hours) if new_hours is not None else list(PULL_HOURS),
+        "timezone": SCHEDULER_TZ,
+        "cases": cases,
+    })
 
 
 @app.route("/api/debug-mode", methods=["GET", "POST"])

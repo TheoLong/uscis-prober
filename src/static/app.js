@@ -322,6 +322,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
+  wireScheduleButton();
   wireRedactionPill();
   wireAccessLockoutPill();
   wireMfaModal();
@@ -445,6 +446,7 @@ function wireExportInfo() {
     ["export-demo-info-btn",    "export-demo-info-popover"],
     ["debug-info-btn",          "debug-info-popover"],
     ["recompute-info-btn",      "recompute-info-popover"],
+    ["schedule-info-btn",       "schedule-info-popover"],
     ["redaction-info-btn",      "redaction-info-popover"],
     ["access-lockout-info-btn", "access-lockout-info-popover"],
   ];
@@ -501,6 +503,200 @@ function wireExportInfo() {
     if (e.key === "Escape") closeAll();
   });
 }
+
+// Schedule button (System tab). Opens a modal to edit the automatic-pull
+// hours and pick which cases are included in the scheduled pull. Manual
+// "Pull Update" always fetches every case — this gates the schedule only.
+// Reuses the .mfa-modal-* overlay styling for a consistent popup look.
+function wireScheduleButton() {
+  const btn = document.getElementById("schedule-btn");
+  if (!btn) return;
+  btn.addEventListener("click", () => openScheduleModal());
+}
+
+function closeScheduleModal() {
+  const existing = document.querySelector(".schedule-modal-overlay");
+  if (!existing) return;
+  const h = existing._escHandler;
+  existing.remove();
+  if (h) document.removeEventListener("keydown", h);
+}
+
+async function openScheduleModal() {
+  closeScheduleModal();
+  const overlay = document.createElement("div");
+  // Piggy-back on the MFA modal's overlay + panel styling.
+  overlay.className = "mfa-modal-overlay schedule-modal-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Schedule");
+  overlay.innerHTML =
+    `<div class="mfa-modal schedule-modal">` +
+      `<header class="mfa-modal-header">` +
+        `<h3>Schedule</h3>` +
+        `<button type="button" class="mfa-modal-close" aria-label="Close">×</button>` +
+      `</header>` +
+      `<div class="mfa-modal-body">` +
+        `<div class="mfa-modal-loading">Loading…</div>` +
+      `</div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener("click", e => {
+    if (e.target === overlay) closeScheduleModal();
+  });
+  overlay.querySelector(".mfa-modal-close")
+    .addEventListener("click", closeScheduleModal);
+  const escHandler = (e) => { if (e.key === "Escape") closeScheduleModal(); };
+  document.addEventListener("keydown", escHandler);
+  overlay._escHandler = escHandler;
+
+  let data;
+  try {
+    const r = await fetch("/api/schedule");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    overlay.querySelector(".mfa-modal-body").innerHTML =
+      `<div class="mfa-modal-error">Failed to load schedule: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  _renderScheduleForm(overlay, data);
+}
+
+function _renderScheduleForm(overlay, data) {
+  const body = overlay.querySelector(".mfa-modal-body");
+  const hours = Array.isArray(data.hours) ? data.hours.slice().sort((a, b) => a - b) : [];
+  const tz = data.timezone || "America/New_York";
+  const cases = Array.isArray(data.cases) ? data.cases : [];
+
+  const caseRows = cases.map(c => {
+    const label = escapeHtml(c.label || "");
+    const cid = escapeHtml(c.id || "");
+    const idChip = c.id ? `<span class="schedule-case-id">${cid}</span>` : "";
+    return (
+      `<label class="schedule-case-row">` +
+        `<input type="checkbox" class="schedule-case-cb" ` +
+          `data-id="${cid}" ${c.enabled ? "checked" : ""}>` +
+        `<span class="schedule-case-name">${label}</span>${idChip}` +
+      `</label>`
+    );
+  }).join("");
+
+  body.innerHTML =
+    `<div class="schedule-form">` +
+      `<div class="schedule-field">` +
+        `<label class="schedule-label" for="schedule-hours-input">Pull hours` +
+          `<span class="schedule-hint">Comma-separated, no spaces, each 0–23 (24h, ${escapeHtml(tz)}). e.g. 0,6,10,14,18</span>` +
+        `</label>` +
+        `<input type="text" id="schedule-hours-input" class="schedule-hours-input" ` +
+          `inputmode="numeric" autocomplete="off" spellcheck="false" ` +
+          `value="${hours.join(",")}" placeholder="0,6,10,14,18">` +
+        `<span class="schedule-error" id="schedule-hours-error" role="alert" hidden></span>` +
+      `</div>` +
+      `<div class="schedule-field">` +
+        `<div class="schedule-label">Cases on the schedule` +
+          `<span class="schedule-hint">Unticked = held out of the automatic pull. Manual Pull Update always fetches every case.</span>` +
+        `</div>` +
+        `<div class="schedule-cases">${caseRows || '<div class="schedule-hint">No cases configured.</div>'}</div>` +
+      `</div>` +
+      `<div class="schedule-actions">` +
+        `<button type="button" class="action-btn pull-btn pull-btn-secondary" data-schedule-cancel>Cancel</button>` +
+        `<button type="button" class="action-btn pull-btn" data-schedule-save>Save schedule</button>` +
+      `</div>` +
+    `</div>`;
+
+  const input = body.querySelector("#schedule-hours-input");
+  const errEl = body.querySelector("#schedule-hours-error");
+  const saveBtn = body.querySelector("[data-schedule-save]");
+
+  // Live validation: re-check on every keystroke, show the first error and
+  // disable Save while the hours string is invalid.
+  const validate = () => {
+    const res = parseScheduleHours(input.value);
+    if (res.ok) {
+      input.classList.remove("invalid");
+      errEl.hidden = true;
+      errEl.textContent = "";
+      saveBtn.disabled = false;
+    } else {
+      input.classList.add("invalid");
+      errEl.textContent = res.error;
+      errEl.hidden = false;
+      saveBtn.disabled = true;
+    }
+  };
+  input.addEventListener("input", validate);
+  validate();
+
+  body.querySelector("[data-schedule-cancel]")
+    .addEventListener("click", closeScheduleModal);
+  saveBtn.addEventListener("click", () => _saveSchedule(overlay));
+}
+
+// Parse + validate the pull-hours string. Contract: comma-separated with NO
+// spaces, each token an integer 0–23, at least one, no duplicates. Returns
+// {ok:true, hours:[...]} (sorted, de-duped) or {ok:false, error:"..."}.
+// Shared by the live input validator and the save path so they can't diverge.
+function parseScheduleHours(value) {
+  const raw = String(value == null ? "" : value);
+  if (raw.trim() === "") return { ok: false, error: "Enter at least one hour (0–23)." };
+  if (/\s/.test(raw)) return { ok: false, error: "No spaces — comma-separated only, e.g. 0,6,10,14,18" };
+  const parts = raw.split(",");
+  const hours = [];
+  for (const p of parts) {
+    if (p === "") return { ok: false, error: "Empty slot — remove the extra comma." };
+    if (!/^\d{1,2}$/.test(p)) return { ok: false, error: `Invalid hour "${p}" — use whole numbers 0–23.` };
+    const n = parseInt(p, 10);
+    if (n < 0 || n > 23) return { ok: false, error: `Hour ${n} out of range — use 0–23.` };
+    if (hours.includes(n)) return { ok: false, error: `Duplicate hour ${n}.` };
+    hours.push(n);
+  }
+  hours.sort((a, b) => a - b);
+  return { ok: true, hours };
+}
+
+async function _saveSchedule(overlay) {
+  const input = overlay.querySelector("#schedule-hours-input");
+  const parsed = parseScheduleHours(input ? input.value : "");
+  if (!parsed.ok) { toast(parsed.error, "bad"); return; }
+  const hours = parsed.hours;
+
+  // A case is disabled when its checkbox is unticked. Keyed on the case id
+  // (receipt number) — the unique identifier, not the display label.
+  const disabled_ids = Array.from(overlay.querySelectorAll(".schedule-case-cb"))
+    .filter(cb => !cb.checked)
+    .map(cb => cb.getAttribute("data-id"));
+
+  const pw = await adminChallenge({ always: true, action: "edit the Schedule" });
+  if (pw === null) return;
+
+  const saveBtn = overlay.querySelector("[data-schedule-save]");
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+  try {
+    const r = await fetch("/api/schedule", withAdminHeader({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hours, disabled_ids }),
+    }, pw));
+    if (r.status === 401) { toast("Wrong password — schedule unchanged.", "bad"); return; }
+    if (r.status === 429) { toast("Too many attempts — try again shortly.", "bad"); return; }
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || out.ok === false) {
+      throw new Error(out.error || `HTTP ${r.status}`);
+    }
+    closeScheduleModal();
+    // Refresh the next-run countdown immediately so the new schedule shows.
+    try { await pollPullStatus(); } catch (_e) { /* countdown updates on next poll */ }
+    toast("Schedule saved — applies live, no restart.", "ok");
+  } catch (e) {
+    console.error("Schedule save failed:", e);
+    toast(`Schedule save failed: ${e.message}`, "bad");
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save schedule"; }
+  }
+}
+
 
 // Recompute diff button (System tab). POSTs to the recompute endpoint, which
 // regenerates the diff feed across every case and appends a diff_recomputed
@@ -2149,11 +2345,65 @@ function renderSystemLogControls() {
   // .action-btn for unified action-button geometry; the .syslog-export-btn
   // class is preserved for any specialised rules (none currently).
   exportBtn.className = "action-btn syslog-export-btn";
-  exportBtn.textContent = "Export log";
+  exportBtn.textContent = "Export Log";
   exportBtn.title = "Download this log as JSON";
   exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
 
-  wrap.appendChild(exportBtn);
+  // Wrap Export log with an `i` info badge + popover so it matches every
+  // other action (Export data / Debug / Recompute / Schedule). This control
+  // is rendered lazily (after the boot-time popover wiring), so its toggle is
+  // wired inline here rather than via wireInfoPopovers().
+  const exportWrap = document.createElement("div");
+  exportWrap.className = "action-with-info";
+  exportWrap.appendChild(exportBtn);
+
+  const infoBtn = document.createElement("button");
+  infoBtn.type = "button";
+  infoBtn.className = "info-badge info-badge-corner";
+  infoBtn.setAttribute("aria-label", "About the Export log button");
+  infoBtn.setAttribute("aria-expanded", "false");
+  infoBtn.setAttribute("aria-controls", "export-log-info-popover");
+  infoBtn.textContent = "i";
+
+  const infoPop = document.createElement("div");
+  infoPop.id = "export-log-info-popover";
+  infoPop.className = "info-popover popover-left";
+  infoPop.hidden = true;
+  infoPop.setAttribute("role", "tooltip");
+  infoPop.innerHTML =
+    `<strong>Exports the system log.</strong> ` +
+    `Downloads the current <code>data/system_log.json</code> as a single ` +
+    `JSON file — every scheduler fire, pull envelope, notification, and ` +
+    `error, newest first. This is the activity log only; it does <em>not</em> ` +
+    `include case snapshots (use <em>Export data</em> for those). While ` +
+    `redaction is on the download is password-gated.`;
+
+  // Inline toggle: mirror the boot popover behaviour (click to open, click
+  // outside / Escape to close, snap inside the viewport).
+  infoBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const willOpen = infoPop.hidden;
+    infoPop.hidden = !willOpen;
+    infoBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    if (willOpen) requestAnimationFrame(() => positionPopover(infoPop));
+  });
+  document.addEventListener("click", (e) => {
+    if (!infoPop.hidden && !infoPop.contains(e.target) && e.target !== infoBtn) {
+      infoPop.hidden = true;
+      infoBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !infoPop.hidden) {
+      infoPop.hidden = true;
+      infoBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  exportWrap.appendChild(infoBtn);
+  exportWrap.appendChild(infoPop);
+
+  wrap.appendChild(exportWrap);
   wrap.appendChild(renderClearLogControl());
   return wrap;
 }
@@ -2167,7 +2417,7 @@ function renderClearLogControl() {
   idle.type = "button";
   idle.className = "action-btn clear-log-btn";
   idle.dataset.guard = "redaction";
-  idle.textContent = "Clear log";
+  idle.textContent = "Clear Log";
   idle.title = "Permanently delete every event in this log";
   idle.addEventListener("click", () => requestClearLog(idle));
   return idle;

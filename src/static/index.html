@@ -164,6 +164,27 @@
           </div>
         </div>
         <div class="action-with-info">
+          <!-- Schedule: opens a modal to edit the automatic-pull hours and
+               choose, per case, which are included in the scheduled pull.
+               Manual "Pull Update" always fetches every case regardless. -->
+          <button id="schedule-btn" class="action-btn pull-btn pull-btn-secondary"
+                  data-guard="redaction" type="button">Schedule</button>
+          <button id="schedule-info-btn" class="info-badge info-badge-corner"
+                  type="button"
+                  aria-label="About the Schedule button"
+                  aria-expanded="false"
+                  aria-controls="schedule-info-popover">i</button>
+          <div id="schedule-info-popover" class="info-popover popover-left" hidden role="tooltip">
+            <strong>Schedule</strong> controls the automatic pull. Set the
+            hours of day it runs (24h, America/New_York) and tick which cases
+            are included — untick a case to hold it out of the scheduled pull
+            without removing it from the site. A <em>manual</em>
+            <em>Pull Update</em> always fetches every case, so per-case
+            selection here affects the schedule only. Changes apply live, no
+            restart. Editing requires the admin password.
+          </div>
+        </div>
+        <div class="action-with-info">
           <!-- Recompute diff: forces a fresh chronological diff trace
                on the backend and logs a diff_recomputed event. -->
           <button id="recompute-btn" class="action-btn pull-btn pull-btn-secondary"
@@ -212,7 +233,7 @@
         <div class="action-with-info">
           <!-- Export data: zip of every data/{form}_case.json + manifest. -->
           <a id="export-btn" class="action-btn pull-btn pull-btn-secondary"
-             data-guard="redaction" href="/api/export">Export data</a>
+             data-guard="redaction" href="/api/export">Export Data</a>
           <button id="export-info-btn" class="info-badge info-badge-corner"
                   type="button"
                   aria-label="About the Export data button"
