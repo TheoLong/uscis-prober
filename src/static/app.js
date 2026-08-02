@@ -2349,7 +2349,61 @@ function renderSystemLogControls() {
   exportBtn.title = "Download this log as JSON";
   exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
 
-  wrap.appendChild(exportBtn);
+  // Wrap Export log with an `i` info badge + popover so it matches every
+  // other action (Export data / Debug / Recompute / Schedule). This control
+  // is rendered lazily (after the boot-time popover wiring), so its toggle is
+  // wired inline here rather than via wireInfoPopovers().
+  const exportWrap = document.createElement("div");
+  exportWrap.className = "action-with-info";
+  exportWrap.appendChild(exportBtn);
+
+  const infoBtn = document.createElement("button");
+  infoBtn.type = "button";
+  infoBtn.className = "info-badge info-badge-corner";
+  infoBtn.setAttribute("aria-label", "About the Export log button");
+  infoBtn.setAttribute("aria-expanded", "false");
+  infoBtn.setAttribute("aria-controls", "export-log-info-popover");
+  infoBtn.textContent = "i";
+
+  const infoPop = document.createElement("div");
+  infoPop.id = "export-log-info-popover";
+  infoPop.className = "info-popover popover-left";
+  infoPop.hidden = true;
+  infoPop.setAttribute("role", "tooltip");
+  infoPop.innerHTML =
+    `<strong>Exports the system log.</strong> ` +
+    `Downloads the current <code>data/system_log.json</code> as a single ` +
+    `JSON file — every scheduler fire, pull envelope, notification, and ` +
+    `error, newest first. This is the activity log only; it does <em>not</em> ` +
+    `include case snapshots (use <em>Export data</em> for those). While ` +
+    `redaction is on the download is password-gated.`;
+
+  // Inline toggle: mirror the boot popover behaviour (click to open, click
+  // outside / Escape to close, snap inside the viewport).
+  infoBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const willOpen = infoPop.hidden;
+    infoPop.hidden = !willOpen;
+    infoBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    if (willOpen) requestAnimationFrame(() => positionPopover(infoPop));
+  });
+  document.addEventListener("click", (e) => {
+    if (!infoPop.hidden && !infoPop.contains(e.target) && e.target !== infoBtn) {
+      infoPop.hidden = true;
+      infoBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !infoPop.hidden) {
+      infoPop.hidden = true;
+      infoBtn.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  exportWrap.appendChild(infoBtn);
+  exportWrap.appendChild(infoPop);
+
+  wrap.appendChild(exportWrap);
   wrap.appendChild(renderClearLogControl());
   return wrap;
 }
