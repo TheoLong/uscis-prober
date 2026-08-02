@@ -589,35 +589,35 @@ def test_schedule_get_lists_cases_all_enabled_by_default(admin_client):
     assert r.status_code == 200
     body = r.get_json()
     assert body["timezone"] == "America/New_York"
-    labels = {c["label"]: c["enabled"] for c in body["cases"]}
-    assert labels == {"I-485": True}
+    # Keyed on id, but label is echoed for display.
+    assert body["cases"] == [{"label": "I-485", "id": "IOE1", "enabled": True}]
 
 
-def test_schedule_post_disables_a_case_and_persists(admin_client, tmp_path, monkeypatch):
+def test_schedule_post_disables_a_case_by_id_and_persists(admin_client, tmp_path, monkeypatch):
     # Avoid touching the real scheduler in-process.
     monkeypatch.setattr(server, "_reschedule_pull_jobs", lambda hours: None)
     r = admin_client.post(
         "/api/schedule",
-        json={"hours": [6, 18], "disabled_labels": ["I-485"]},
+        json={"hours": [6, 18], "disabled_ids": ["IOE1"]},
         headers=_pw(),
     )
     assert r.status_code == 200
     body = r.get_json()
     assert body["ok"] is True and body["hours"] == [6, 18]
-    assert {c["label"]: c["enabled"] for c in body["cases"]} == {"I-485": False}
+    assert {c["id"]: c["enabled"] for c in body["cases"]} == {"IOE1": False}
     cfg = json.loads((tmp_path / "config.json").read_text())
     assert cfg["pull_hours"] == [6, 18]
-    assert cfg["schedule_disabled_labels"] == ["I-485"]
+    assert cfg["schedule_disabled_ids"] == ["IOE1"]
     # GET reflects the persisted disabled state.
-    assert {c["label"]: c["enabled"]
-            for c in admin_client.get("/api/schedule").get_json()["cases"]} == {"I-485": False}
+    assert {c["id"]: c["enabled"]
+            for c in admin_client.get("/api/schedule").get_json()["cases"]} == {"IOE1": False}
 
 
 def test_schedule_post_requires_password_when_configured(admin_client, tmp_path):
     assert admin_client.post("/api/schedule", json={"hours": [6]}).status_code == 401
     # Config untouched.
     cfg = json.loads((tmp_path / "config.json").read_text())
-    assert "schedule_disabled_labels" not in cfg
+    assert "schedule_disabled_ids" not in cfg
 
 
 def test_schedule_rejects_bad_hours(admin_client, monkeypatch):
@@ -627,26 +627,67 @@ def test_schedule_rejects_bad_hours(admin_client, monkeypatch):
     assert admin_client.post("/api/schedule", json={"hours": ["6"]}, headers=_pw()).status_code == 400
 
 
-def test_schedule_rejects_unknown_case_label(admin_client, monkeypatch):
+def test_schedule_rejects_unknown_case_id(admin_client, monkeypatch):
     monkeypatch.setattr(server, "_reschedule_pull_jobs", lambda hours: None)
     r = admin_client.post("/api/schedule",
-                          json={"disabled_labels": ["I-999"]}, headers=_pw())
-    assert r.status_code == 400 and r.get_json()["error"] == "unknown_case_label"
+                          json={"disabled_ids": ["IOE-NOPE"]}, headers=_pw())
+    assert r.status_code == 400 and r.get_json()["error"] == "unknown_case_id"
 
 
-def test_scheduled_active_labels_excludes_disabled(monkeypatch, tmp_path):
+def test_scheduled_active_ids_excludes_disabled(monkeypatch, tmp_path):
     cfg = {
         "cases": [
-            {"id": "A", "label": "I-485"},
-            {"id": "B", "label": "I-765"},
-            {"id": "C", "label": "I-131"},
+            {"id": "IOE_A", "label": "I-485"},
+            {"id": "IOE_B", "label": "I-765"},
+            {"id": "IOE_C", "label": "I-131"},
         ],
-        "schedule_disabled_labels": ["I-765"],
+        "schedule_disabled_ids": ["IOE_B"],
     }
-    assert server._scheduled_active_labels(cfg) == ["I-485", "I-131"]
+    assert server._scheduled_active_ids(cfg) == ["IOE_A", "IOE_C"]
     # All disabled → empty (caller skips the scheduled pull).
-    cfg["schedule_disabled_labels"] = ["I-485", "I-765", "I-131"]
-    assert server._scheduled_active_labels(cfg) == []
+    cfg["schedule_disabled_ids"] = ["IOE_A", "IOE_B", "IOE_C"]
+    assert server._scheduled_active_ids(cfg) == []
+
+
+def test_scheduled_active_ids_duplicate_labels_gate_independently(monkeypatch, tmp_path):
+    # Two cases sharing a label must be gated independently by id — the whole
+    # point of keying on id instead of label.
+    cfg = {
+        "cases": [
+            {"id": "IOE_X", "label": "I-485"},
+            {"id": "IOE_Y", "label": "I-485"},
+        ],
+        "schedule_disabled_ids": ["IOE_X"],
+    }
+    assert server._scheduled_active_ids(cfg) == ["IOE_Y"]
+
+
+def test_schedule_migrates_legacy_disabled_labels(monkeypatch, tmp_path):
+    # An old config with label-keyed disables resolves to ids for reads.
+    cfg = {
+        "cases": [
+            {"id": "IOE_A", "label": "I-485"},
+            {"id": "IOE_B", "label": "I-765"},
+        ],
+        "schedule_disabled_labels": ["I-485"],
+    }
+    assert server.load_schedule_disabled_ids(cfg) == ["IOE_A"]
+    assert server._scheduled_active_ids(cfg) == ["IOE_B"]
+
+
+def test_schedule_post_drops_legacy_labels_key(admin_client, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_reschedule_pull_jobs", lambda hours: None)
+    # Seed the live config with the legacy key.
+    cfg_path = tmp_path / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["schedule_disabled_labels"] = ["I-485"]
+    cfg_path.write_text(json.dumps(cfg))
+    # A save writes the new id-keyed field and removes the legacy one.
+    r = admin_client.post("/api/schedule", json={"disabled_ids": ["IOE1"]}, headers=_pw())
+    assert r.status_code == 200
+    out = json.loads(cfg_path.read_text())
+    assert out["schedule_disabled_ids"] == ["IOE1"]
+    assert "schedule_disabled_labels" not in out
 
 
 def test_guarded_action_needs_password_only_while_redacted(admin_client):

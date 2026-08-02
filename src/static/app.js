@@ -572,12 +572,13 @@ function _renderScheduleForm(overlay, data) {
 
   const caseRows = cases.map(c => {
     const label = escapeHtml(c.label || "");
-    const id = c.id ? `<span class="schedule-case-id">${escapeHtml(c.id)}</span>` : "";
+    const cid = escapeHtml(c.id || "");
+    const idChip = c.id ? `<span class="schedule-case-id">${cid}</span>` : "";
     return (
       `<label class="schedule-case-row">` +
         `<input type="checkbox" class="schedule-case-cb" ` +
-          `data-label="${label}" ${c.enabled ? "checked" : ""}>` +
-        `<span class="schedule-case-name">${label}</span>${id}` +
+          `data-id="${cid}" ${c.enabled ? "checked" : ""}>` +
+        `<span class="schedule-case-name">${label}</span>${idChip}` +
       `</label>`
     );
   }).join("");
@@ -586,10 +587,12 @@ function _renderScheduleForm(overlay, data) {
     `<div class="schedule-form">` +
       `<div class="schedule-field">` +
         `<label class="schedule-label" for="schedule-hours-input">Pull hours` +
-          `<span class="schedule-hint">Comma-separated, 0–23 (24h, ${escapeHtml(tz)})</span>` +
+          `<span class="schedule-hint">Comma-separated, no spaces, each 0–23 (24h, ${escapeHtml(tz)}). e.g. 0,6,10,14,18</span>` +
         `</label>` +
         `<input type="text" id="schedule-hours-input" class="schedule-hours-input" ` +
-          `value="${hours.join(", ")}" placeholder="e.g. 0, 6, 10, 14, 18">` +
+          `inputmode="numeric" autocomplete="off" spellcheck="false" ` +
+          `value="${hours.join(",")}" placeholder="0,6,10,14,18">` +
+        `<span class="schedule-error" id="schedule-hours-error" role="alert" hidden></span>` +
       `</div>` +
       `<div class="schedule-field">` +
         `<div class="schedule-label">Cases on the schedule` +
@@ -603,30 +606,67 @@ function _renderScheduleForm(overlay, data) {
       `</div>` +
     `</div>`;
 
+  const input = body.querySelector("#schedule-hours-input");
+  const errEl = body.querySelector("#schedule-hours-error");
+  const saveBtn = body.querySelector("[data-schedule-save]");
+
+  // Live validation: re-check on every keystroke, show the first error and
+  // disable Save while the hours string is invalid.
+  const validate = () => {
+    const res = parseScheduleHours(input.value);
+    if (res.ok) {
+      input.classList.remove("invalid");
+      errEl.hidden = true;
+      errEl.textContent = "";
+      saveBtn.disabled = false;
+    } else {
+      input.classList.add("invalid");
+      errEl.textContent = res.error;
+      errEl.hidden = false;
+      saveBtn.disabled = true;
+    }
+  };
+  input.addEventListener("input", validate);
+  validate();
+
   body.querySelector("[data-schedule-cancel]")
     .addEventListener("click", closeScheduleModal);
-  body.querySelector("[data-schedule-save]")
-    .addEventListener("click", () => _saveSchedule(overlay));
+  saveBtn.addEventListener("click", () => _saveSchedule(overlay));
+}
+
+// Parse + validate the pull-hours string. Contract: comma-separated with NO
+// spaces, each token an integer 0–23, at least one, no duplicates. Returns
+// {ok:true, hours:[...]} (sorted, de-duped) or {ok:false, error:"..."}.
+// Shared by the live input validator and the save path so they can't diverge.
+function parseScheduleHours(value) {
+  const raw = String(value == null ? "" : value);
+  if (raw.trim() === "") return { ok: false, error: "Enter at least one hour (0–23)." };
+  if (/\s/.test(raw)) return { ok: false, error: "No spaces — comma-separated only, e.g. 0,6,10,14,18" };
+  const parts = raw.split(",");
+  const hours = [];
+  for (const p of parts) {
+    if (p === "") return { ok: false, error: "Empty slot — remove the extra comma." };
+    if (!/^\d{1,2}$/.test(p)) return { ok: false, error: `Invalid hour "${p}" — use whole numbers 0–23.` };
+    const n = parseInt(p, 10);
+    if (n < 0 || n > 23) return { ok: false, error: `Hour ${n} out of range — use 0–23.` };
+    if (hours.includes(n)) return { ok: false, error: `Duplicate hour ${n}.` };
+    hours.push(n);
+  }
+  hours.sort((a, b) => a - b);
+  return { ok: true, hours };
 }
 
 async function _saveSchedule(overlay) {
   const input = overlay.querySelector("#schedule-hours-input");
-  const raw = (input?.value || "").trim();
-  const parts = raw.split(",").map(s => s.trim()).filter(s => s !== "");
-  const hours = [];
-  for (const p of parts) {
-    if (!/^\d+$/.test(p)) { toast(`Invalid hour "${p}" — use whole numbers 0–23.`, "bad"); return; }
-    const n = parseInt(p, 10);
-    if (n < 0 || n > 23) { toast(`Hour ${n} out of range — use 0–23.`, "bad"); return; }
-    if (!hours.includes(n)) hours.push(n);
-  }
-  if (hours.length === 0) { toast("Enter at least one pull hour.", "bad"); return; }
-  hours.sort((a, b) => a - b);
+  const parsed = parseScheduleHours(input ? input.value : "");
+  if (!parsed.ok) { toast(parsed.error, "bad"); return; }
+  const hours = parsed.hours;
 
-  // A case is disabled when its checkbox is unticked.
-  const disabled_labels = Array.from(overlay.querySelectorAll(".schedule-case-cb"))
+  // A case is disabled when its checkbox is unticked. Keyed on the case id
+  // (receipt number) — the unique identifier, not the display label.
+  const disabled_ids = Array.from(overlay.querySelectorAll(".schedule-case-cb"))
     .filter(cb => !cb.checked)
-    .map(cb => cb.getAttribute("data-label"));
+    .map(cb => cb.getAttribute("data-id"));
 
   const pw = await adminChallenge({ always: true, action: "edit the Schedule" });
   if (pw === null) return;
@@ -637,7 +677,7 @@ async function _saveSchedule(overlay) {
     const r = await fetch("/api/schedule", withAdminHeader({
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ hours, disabled_labels }),
+      body: JSON.stringify({ hours, disabled_ids }),
     }, pw));
     if (r.status === 401) { toast("Wrong password — schedule unchanged.", "bad"); return; }
     if (r.status === 429) { toast("Too many attempts — try again shortly.", "bad"); return; }

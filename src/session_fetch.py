@@ -429,19 +429,21 @@ def cmd_run(args) -> int:
         return 1
 
     # Optional per-case allowlist for scheduled pulls. The server sets
-    # USCIS_ACTIVE_LABELS (comma-separated case labels) ONLY on the automatic
-    # (scheduler) trigger so an operator can disable individual cases from the
-    # schedule without touching the site. Manual pulls never set it, so a
-    # manual "Pull Update" always fetches every configured case. Unset or empty
-    # => no filtering (every case active) — backward compatible.
-    active_env = os.environ.get("USCIS_ACTIVE_LABELS")
+    # USCIS_ACTIVE_IDS (comma-separated case receipt numbers / ids) ONLY on the
+    # automatic (scheduler) trigger so an operator can disable individual cases
+    # from the schedule without touching the site. Keyed on the case `id` (the
+    # unique USCIS receipt number) NOT `label` — label is a display nickname and
+    # is not guaranteed unique. Manual pulls never set it, so a manual "Pull
+    # Update" always fetches every configured case. Unset or empty => no
+    # filtering (every case active) — backward compatible.
+    active_env = os.environ.get("USCIS_ACTIVE_IDS")
     if active_env is not None and active_env.strip() != "":
         allow = {p.strip() for p in active_env.split(",") if p.strip()}
         before = len(cases)
-        cases = [c for c in cases if (c.get("label") or c.get("type") or "") in allow]
+        cases = [c for c in cases if (c.get("id") or "") in allow]
         sys_log(
             "cli_run_active_filter", source="session_fetch",
-            active_labels=sorted(allow),
+            active_ids=sorted(allow),
             selected=len(cases), skipped=before - len(cases),
         )
         if not cases:

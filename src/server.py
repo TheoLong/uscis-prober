@@ -308,50 +308,74 @@ def load_access_lockout_enabled(config: dict | None = None) -> bool:
     return config.get("access_lockout_enabled", False) is True
 
 
-def load_schedule_disabled_labels(config: dict | None = None) -> list[str]:
-    """Read `schedule_disabled_labels` (list[str]) from config.json.
+def load_schedule_disabled_ids(config: dict | None = None) -> list[str]:
+    """Read `schedule_disabled_ids` (list[str]) from config.json.
 
-    Case labels in this list are EXCLUDED from automatic (scheduler) pulls.
-    Every configured case not in the list stays active on the schedule.
-    Manual pulls (POST /api/pull) ignore this entirely and always fetch every
-    case — the list only gates the cron-triggered pull.
+    Case receipt numbers (the `id` of each entry in `cases`) in this list are
+    EXCLUDED from automatic (scheduler) pulls. The `id` is the unique USCIS
+    receipt number — the stable identifier. `label` is only a display nickname
+    and is NOT used for gating (it can be renamed and isn't guaranteed unique).
+
+    Every configured case whose id is not in the list stays active on the
+    schedule. Manual pulls (POST /api/pull) ignore this entirely and always
+    fetch every case — the list only gates the cron-triggered pull.
 
     Persistent by design: the selection lives in config.json (not APScheduler
     state) so it survives a restart. Toggled per-case from the UI via
     /api/schedule. Missing/invalid = [] (defensive: a bad value must never
     silently disable a case the operator still expects on the schedule). Only
     string entries are kept; everything else is dropped.
+
+    Backward compatibility: if the new `schedule_disabled_ids` key is absent but
+    the legacy `schedule_disabled_labels` key is present, its labels are
+    resolved to ids against the current `cases` list so an old config keeps
+    working until it's rewritten (the next /api/schedule POST persists the new
+    key). Unknown/stale labels are dropped.
     """
     if config is None:
         try:
             config = load_config()
         except Exception:
             return []
-    raw = config.get("schedule_disabled_labels", [])
-    if not isinstance(raw, list):
-        return []
-    return [x for x in raw if isinstance(x, str)]
+
+    raw = config.get("schedule_disabled_ids")
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, str)]
+
+    # Legacy migration: map old label-based disables to ids.
+    legacy = config.get("schedule_disabled_labels")
+    if isinstance(legacy, list):
+        legacy_labels = {x for x in legacy if isinstance(x, str)}
+        ids: list[str] = []
+        for c in config.get("cases", []):
+            label = c.get("label") or c.get("type") or ""
+            cid = c.get("id") or ""
+            if cid and label in legacy_labels:
+                ids.append(cid)
+        return ids
+
+    return []
 
 
-def _scheduled_active_labels(config: dict | None = None) -> list[str]:
-    """Case labels that the automatic (scheduler) pull should fetch.
+def _scheduled_active_ids(config: dict | None = None) -> list[str]:
+    """Case ids (receipt numbers) the automatic (scheduler) pull should fetch.
 
-    All configured case labels minus `schedule_disabled_labels`, order
-    preserved from config. An empty result means every case is disabled and
-    the scheduled pull should be skipped entirely (the caller checks this).
+    All configured case ids minus `schedule_disabled_ids`, order preserved from
+    config. An empty result means every case is disabled and the scheduled pull
+    should be skipped entirely (the caller checks this).
     """
     if config is None:
         try:
             config = load_config()
         except Exception:
             return []
-    disabled = set(load_schedule_disabled_labels(config))
-    labels: list[str] = []
+    disabled = set(load_schedule_disabled_ids(config))
+    ids: list[str] = []
     for c in config.get("cases", []):
-        label = c.get("label") or c.get("type") or ""
-        if label and label not in disabled:
-            labels.append(label)
-    return labels
+        cid = c.get("id") or ""
+        if cid and cid not in disabled:
+            ids.append(cid)
+    return ids
 
 
 def admin_password(config: dict | None = None) -> str:
@@ -876,7 +900,7 @@ def _run_pull_subprocess(trigger: str = "scheduled") -> None:
         except Exception:
             _cfg = {}
         _has_cases = bool(_cfg.get("cases"))
-        if _has_cases and not _scheduled_active_labels(_cfg):
+        if _has_cases and not _scheduled_active_ids(_cfg):
             logger.info("Scheduled pull skipped: all cases disabled for the schedule.")
             sys_log("pull_skipped_all_cases_disabled", source="server",
                     trigger=trigger)
@@ -1096,15 +1120,15 @@ def _run_pull_subprocess_inner(
         }
         # Per-case schedule gating applies to the AUTOMATIC trigger only.
         # On a scheduled pull we hand session_fetch an allowlist of the
-        # currently-active case labels (all configured cases minus the
-        # operator's disabled set). A manual pull leaves this unset, so it
-        # always fetches every case. Read fresh each attempt so a live edit
-        # in the Schedule modal takes effect on the next retry/run without a
-        # restart. `_scheduled_active_labels()` already short-circuits the
-        # whole pull when nothing is active, so here the list is non-empty.
+        # currently-active case ids (all configured cases minus the operator's
+        # disabled set). A manual pull leaves this unset, so it always fetches
+        # every case. Read fresh each attempt so a live edit in the Schedule
+        # modal takes effect on the next retry/run without a restart.
+        # `_scheduled_active_ids()` already short-circuits the whole pull when
+        # nothing is active, so here the list is non-empty.
         if trigger == "scheduled":
-            active = _scheduled_active_labels()
-            child_env["USCIS_ACTIVE_LABELS"] = ",".join(active)
+            active = _scheduled_active_ids()
+            child_env["USCIS_ACTIVE_IDS"] = ",".join(active)
         try:
             proc = subprocess.run(
                 PULL_CMD,
@@ -2319,10 +2343,11 @@ def api_schedule():
       "cases": [ {"label", "id", "enabled"} ],  # per-case schedule state
     }
 
-    POST {"hours": [int...], "disabled_labels": [str...]} + `X-Admin-Password`
+    POST {"hours": [int...], "disabled_ids": [str...]} + `X-Admin-Password`
     persists both to config.json (atomic tmp + os.replace) and live-reschedules
     the pull jobs — no restart needed. Either field may be omitted to leave that
-    part unchanged. The per-case selection gates the AUTOMATIC pull only; manual
+    part unchanged. `disabled_ids` are case receipt numbers (the unique `id`),
+    NOT labels. The per-case selection gates the AUTOMATIC pull only; manual
     "Pull Update" always fetches every case. Password-gated in both directions
     (when an admin password is configured), same as the other action controls.
     """
@@ -2331,15 +2356,15 @@ def api_schedule():
             hours = list(load_pull_hours())
         except ConfigError:
             hours = list(PULL_HOURS)
-        disabled = set(load_schedule_disabled_labels())
+        disabled = set(load_schedule_disabled_ids())
         cfg = load_config()
         cases = []
         for c in cfg.get("cases", []):
-            label = c.get("label") or c.get("type") or ""
+            cid = c.get("id") or ""
             cases.append({
-                "label": label,
-                "id": c.get("id"),
-                "enabled": label not in disabled,
+                "label": c.get("label") or c.get("type") or "",
+                "id": cid,
+                "enabled": cid not in disabled,
             })
         return jsonify({
             "hours": hours,
@@ -2373,21 +2398,20 @@ def api_schedule():
             seen.add(item)
         new_hours = tuple(sorted(seen))
 
-    # ---- validate disabled_labels (optional) ----
+    # ---- validate disabled_ids (optional) ----
+    # Keyed on the unique case `id` (receipt number), not the display label.
     new_disabled: list[str] | None = None
-    if "disabled_labels" in body:
-        raw = body.get("disabled_labels")
+    if "disabled_ids" in body:
+        raw = body.get("disabled_ids")
         if not isinstance(raw, list):
-            return jsonify({"ok": False, "error": "disabled_labels_must_be_list"}), 400
-        valid_labels = {
-            (c.get("label") or c.get("type") or "") for c in cfg.get("cases", [])
-        }
+            return jsonify({"ok": False, "error": "disabled_ids_must_be_list"}), 400
+        valid_ids = {(c.get("id") or "") for c in cfg.get("cases", [])}
         cleaned: list[str] = []
         for item in raw:
             if not isinstance(item, str):
-                return jsonify({"ok": False, "error": "disabled_labels_must_be_strings"}), 400
-            if item not in valid_labels:
-                return jsonify({"ok": False, "error": "unknown_case_label", "label": item}), 400
+                return jsonify({"ok": False, "error": "disabled_ids_must_be_strings"}), 400
+            if item not in valid_ids:
+                return jsonify({"ok": False, "error": "unknown_case_id", "id": item}), 400
             if item not in cleaned:
                 cleaned.append(item)
         new_disabled = cleaned
@@ -2398,7 +2422,9 @@ def api_schedule():
     if new_hours is not None:
         cfg["pull_hours"] = list(new_hours)
     if new_disabled is not None:
-        cfg["schedule_disabled_labels"] = new_disabled
+        cfg["schedule_disabled_ids"] = new_disabled
+        # Drop the legacy label-keyed field if present so the two can't drift.
+        cfg.pop("schedule_disabled_labels", None)
 
     try:
         tmp = CONFIG_PATH.with_suffix(".json.tmp")
@@ -2420,11 +2446,15 @@ def api_schedule():
                 "type": type(e).__name__, "persisted": True,
             }), 500
 
-    disabled = set(load_schedule_disabled_labels(cfg))
+    disabled = set(load_schedule_disabled_ids(cfg))
     cases = []
     for c in cfg.get("cases", []):
-        label = c.get("label") or c.get("type") or ""
-        cases.append({"label": label, "id": c.get("id"), "enabled": label not in disabled})
+        cid = c.get("id") or ""
+        cases.append({
+            "label": c.get("label") or c.get("type") or "",
+            "id": cid,
+            "enabled": cid not in disabled,
+        })
     return jsonify({
         "ok": True,
         "hours": list(new_hours) if new_hours is not None else list(PULL_HOURS),

@@ -2949,6 +2949,17 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
   border-color: #2563eb;
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
 }
+.schedule-hours-input.invalid {
+  border-color: #dc2626;
+}
+.schedule-hours-input.invalid:focus {
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.2);
+}
+.schedule-error {
+  font-size: 0.75rem;
+  color: #dc2626;
+  margin-top: 2px;
+}
 .schedule-cases {
   display: flex;
   flex-direction: column;
