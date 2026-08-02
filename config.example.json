@@ -14,6 +14,7 @@
     "notification_from_name": "Optional: display name shown as the sender of diff-update emails. Defaults to 'USCIS Prober'."
   },
   "pull_hours": [0, 6, 10, 14, 18],
+  "schedule_disabled_labels": [],
   "retry": 2,
   "retry_wait_seconds": 180
 }

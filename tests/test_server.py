@@ -582,6 +582,73 @@ def test_access_lockout_rejects_non_bool(admin_client):
                              headers=_pw()).status_code == 400
 
 
+# -------- per-case schedule: hours + enable/disable --------------------
+
+def test_schedule_get_lists_cases_all_enabled_by_default(admin_client):
+    r = admin_client.get("/api/schedule")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["timezone"] == "America/New_York"
+    labels = {c["label"]: c["enabled"] for c in body["cases"]}
+    assert labels == {"I-485": True}
+
+
+def test_schedule_post_disables_a_case_and_persists(admin_client, tmp_path, monkeypatch):
+    # Avoid touching the real scheduler in-process.
+    monkeypatch.setattr(server, "_reschedule_pull_jobs", lambda hours: None)
+    r = admin_client.post(
+        "/api/schedule",
+        json={"hours": [6, 18], "disabled_labels": ["I-485"]},
+        headers=_pw(),
+    )
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True and body["hours"] == [6, 18]
+    assert {c["label"]: c["enabled"] for c in body["cases"]} == {"I-485": False}
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert cfg["pull_hours"] == [6, 18]
+    assert cfg["schedule_disabled_labels"] == ["I-485"]
+    # GET reflects the persisted disabled state.
+    assert {c["label"]: c["enabled"]
+            for c in admin_client.get("/api/schedule").get_json()["cases"]} == {"I-485": False}
+
+
+def test_schedule_post_requires_password_when_configured(admin_client, tmp_path):
+    assert admin_client.post("/api/schedule", json={"hours": [6]}).status_code == 401
+    # Config untouched.
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    assert "schedule_disabled_labels" not in cfg
+
+
+def test_schedule_rejects_bad_hours(admin_client, monkeypatch):
+    monkeypatch.setattr(server, "_reschedule_pull_jobs", lambda hours: None)
+    assert admin_client.post("/api/schedule", json={"hours": []}, headers=_pw()).status_code == 400
+    assert admin_client.post("/api/schedule", json={"hours": [24]}, headers=_pw()).status_code == 400
+    assert admin_client.post("/api/schedule", json={"hours": ["6"]}, headers=_pw()).status_code == 400
+
+
+def test_schedule_rejects_unknown_case_label(admin_client, monkeypatch):
+    monkeypatch.setattr(server, "_reschedule_pull_jobs", lambda hours: None)
+    r = admin_client.post("/api/schedule",
+                          json={"disabled_labels": ["I-999"]}, headers=_pw())
+    assert r.status_code == 400 and r.get_json()["error"] == "unknown_case_label"
+
+
+def test_scheduled_active_labels_excludes_disabled(monkeypatch, tmp_path):
+    cfg = {
+        "cases": [
+            {"id": "A", "label": "I-485"},
+            {"id": "B", "label": "I-765"},
+            {"id": "C", "label": "I-131"},
+        ],
+        "schedule_disabled_labels": ["I-765"],
+    }
+    assert server._scheduled_active_labels(cfg) == ["I-485", "I-131"]
+    # All disabled → empty (caller skips the scheduled pull).
+    cfg["schedule_disabled_labels"] = ["I-485", "I-765", "I-131"]
+    assert server._scheduled_active_labels(cfg) == []
+
+
 def test_guarded_action_needs_password_only_while_redacted(admin_client):
     # Redaction off → action passes with no password.
     assert admin_client.post("/api/system-log/recompute").status_code == 200

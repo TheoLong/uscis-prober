@@ -2909,6 +2909,70 @@ pre.raw .json-null    { color: var(--muted); font-style: italic; }
 }
 .mfa-modal-error { color: #b91c1c; }
 
+/* Schedule modal — hours input + per-case enable/disable checkboxes.
+   Reuses the .mfa-modal overlay/panel; these style the form inside it. */
+.schedule-modal { max-width: 460px; }
+.schedule-form { display: flex; flex-direction: column; gap: 18px; }
+.schedule-field { display: flex; flex-direction: column; gap: 8px; }
+.schedule-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #111827;
+}
+.schedule-hint {
+  font-weight: 400;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+.schedule-hours-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 0.9rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+.schedule-hours-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+.schedule-cases {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 4px;
+}
+.schedule-case-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.schedule-case-row:hover { background: #f9fafb; }
+.schedule-case-cb { width: 16px; height: 16px; cursor: pointer; }
+.schedule-case-name { font-weight: 600; font-size: 0.85rem; color: #111827; }
+.schedule-case-id {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.schedule-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
 .mfa-events-sub, .mfa-emails-sub {
   font-size: 0.78rem;
   color: #6b7280;

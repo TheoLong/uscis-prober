@@ -322,6 +322,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireExportInfo();
   wireDebugPill();
   wireRecomputeButton();
+  wireScheduleButton();
   wireRedactionPill();
   wireAccessLockoutPill();
   wireMfaModal();
@@ -445,6 +446,7 @@ function wireExportInfo() {
     ["export-demo-info-btn",    "export-demo-info-popover"],
     ["debug-info-btn",          "debug-info-popover"],
     ["recompute-info-btn",      "recompute-info-popover"],
+    ["schedule-info-btn",       "schedule-info-popover"],
     ["redaction-info-btn",      "redaction-info-popover"],
     ["access-lockout-info-btn", "access-lockout-info-popover"],
   ];
@@ -501,6 +503,160 @@ function wireExportInfo() {
     if (e.key === "Escape") closeAll();
   });
 }
+
+// Schedule button (System tab). Opens a modal to edit the automatic-pull
+// hours and pick which cases are included in the scheduled pull. Manual
+// "Pull Update" always fetches every case — this gates the schedule only.
+// Reuses the .mfa-modal-* overlay styling for a consistent popup look.
+function wireScheduleButton() {
+  const btn = document.getElementById("schedule-btn");
+  if (!btn) return;
+  btn.addEventListener("click", () => openScheduleModal());
+}
+
+function closeScheduleModal() {
+  const existing = document.querySelector(".schedule-modal-overlay");
+  if (!existing) return;
+  const h = existing._escHandler;
+  existing.remove();
+  if (h) document.removeEventListener("keydown", h);
+}
+
+async function openScheduleModal() {
+  closeScheduleModal();
+  const overlay = document.createElement("div");
+  // Piggy-back on the MFA modal's overlay + panel styling.
+  overlay.className = "mfa-modal-overlay schedule-modal-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "Schedule");
+  overlay.innerHTML =
+    `<div class="mfa-modal schedule-modal">` +
+      `<header class="mfa-modal-header">` +
+        `<h3>Schedule</h3>` +
+        `<button type="button" class="mfa-modal-close" aria-label="Close">×</button>` +
+      `</header>` +
+      `<div class="mfa-modal-body">` +
+        `<div class="mfa-modal-loading">Loading…</div>` +
+      `</div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener("click", e => {
+    if (e.target === overlay) closeScheduleModal();
+  });
+  overlay.querySelector(".mfa-modal-close")
+    .addEventListener("click", closeScheduleModal);
+  const escHandler = (e) => { if (e.key === "Escape") closeScheduleModal(); };
+  document.addEventListener("keydown", escHandler);
+  overlay._escHandler = escHandler;
+
+  let data;
+  try {
+    const r = await fetch("/api/schedule");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    overlay.querySelector(".mfa-modal-body").innerHTML =
+      `<div class="mfa-modal-error">Failed to load schedule: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  _renderScheduleForm(overlay, data);
+}
+
+function _renderScheduleForm(overlay, data) {
+  const body = overlay.querySelector(".mfa-modal-body");
+  const hours = Array.isArray(data.hours) ? data.hours.slice().sort((a, b) => a - b) : [];
+  const tz = data.timezone || "America/New_York";
+  const cases = Array.isArray(data.cases) ? data.cases : [];
+
+  const caseRows = cases.map(c => {
+    const label = escapeHtml(c.label || "");
+    const id = c.id ? `<span class="schedule-case-id">${escapeHtml(c.id)}</span>` : "";
+    return (
+      `<label class="schedule-case-row">` +
+        `<input type="checkbox" class="schedule-case-cb" ` +
+          `data-label="${label}" ${c.enabled ? "checked" : ""}>` +
+        `<span class="schedule-case-name">${label}</span>${id}` +
+      `</label>`
+    );
+  }).join("");
+
+  body.innerHTML =
+    `<div class="schedule-form">` +
+      `<div class="schedule-field">` +
+        `<label class="schedule-label" for="schedule-hours-input">Pull hours` +
+          `<span class="schedule-hint">Comma-separated, 0–23 (24h, ${escapeHtml(tz)})</span>` +
+        `</label>` +
+        `<input type="text" id="schedule-hours-input" class="schedule-hours-input" ` +
+          `value="${hours.join(", ")}" placeholder="e.g. 0, 6, 10, 14, 18">` +
+      `</div>` +
+      `<div class="schedule-field">` +
+        `<div class="schedule-label">Cases on the schedule` +
+          `<span class="schedule-hint">Unticked = held out of the automatic pull. Manual Pull Update always fetches every case.</span>` +
+        `</div>` +
+        `<div class="schedule-cases">${caseRows || '<div class="schedule-hint">No cases configured.</div>'}</div>` +
+      `</div>` +
+      `<div class="schedule-actions">` +
+        `<button type="button" class="action-btn pull-btn pull-btn-secondary" data-schedule-cancel>Cancel</button>` +
+        `<button type="button" class="action-btn pull-btn" data-schedule-save>Save schedule</button>` +
+      `</div>` +
+    `</div>`;
+
+  body.querySelector("[data-schedule-cancel]")
+    .addEventListener("click", closeScheduleModal);
+  body.querySelector("[data-schedule-save]")
+    .addEventListener("click", () => _saveSchedule(overlay));
+}
+
+async function _saveSchedule(overlay) {
+  const input = overlay.querySelector("#schedule-hours-input");
+  const raw = (input?.value || "").trim();
+  const parts = raw.split(",").map(s => s.trim()).filter(s => s !== "");
+  const hours = [];
+  for (const p of parts) {
+    if (!/^\d+$/.test(p)) { toast(`Invalid hour "${p}" — use whole numbers 0–23.`, "bad"); return; }
+    const n = parseInt(p, 10);
+    if (n < 0 || n > 23) { toast(`Hour ${n} out of range — use 0–23.`, "bad"); return; }
+    if (!hours.includes(n)) hours.push(n);
+  }
+  if (hours.length === 0) { toast("Enter at least one pull hour.", "bad"); return; }
+  hours.sort((a, b) => a - b);
+
+  // A case is disabled when its checkbox is unticked.
+  const disabled_labels = Array.from(overlay.querySelectorAll(".schedule-case-cb"))
+    .filter(cb => !cb.checked)
+    .map(cb => cb.getAttribute("data-label"));
+
+  const pw = await adminChallenge({ always: true, action: "edit the Schedule" });
+  if (pw === null) return;
+
+  const saveBtn = overlay.querySelector("[data-schedule-save]");
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+  try {
+    const r = await fetch("/api/schedule", withAdminHeader({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hours, disabled_labels }),
+    }, pw));
+    if (r.status === 401) { toast("Wrong password — schedule unchanged.", "bad"); return; }
+    if (r.status === 429) { toast("Too many attempts — try again shortly.", "bad"); return; }
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || out.ok === false) {
+      throw new Error(out.error || `HTTP ${r.status}`);
+    }
+    closeScheduleModal();
+    // Refresh the next-run countdown immediately so the new schedule shows.
+    try { await pollPullStatus(); } catch (_e) { /* countdown updates on next poll */ }
+    toast("Schedule saved — applies live, no restart.", "ok");
+  } catch (e) {
+    console.error("Schedule save failed:", e);
+    toast(`Schedule save failed: ${e.message}`, "bad");
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save schedule"; }
+  }
+}
+
 
 // Recompute diff button (System tab). POSTs to the recompute endpoint, which
 // regenerates the diff feed across every case and appends a diff_recomputed

@@ -428,6 +428,28 @@ def cmd_run(args) -> int:
         sys_log("cli_run_no_cases", level="error", source="session_fetch")
         return 1
 
+    # Optional per-case allowlist for scheduled pulls. The server sets
+    # USCIS_ACTIVE_LABELS (comma-separated case labels) ONLY on the automatic
+    # (scheduler) trigger so an operator can disable individual cases from the
+    # schedule without touching the site. Manual pulls never set it, so a
+    # manual "Pull Update" always fetches every configured case. Unset or empty
+    # => no filtering (every case active) — backward compatible.
+    active_env = os.environ.get("USCIS_ACTIVE_LABELS")
+    if active_env is not None and active_env.strip() != "":
+        allow = {p.strip() for p in active_env.split(",") if p.strip()}
+        before = len(cases)
+        cases = [c for c in cases if (c.get("label") or c.get("type") or "") in allow]
+        sys_log(
+            "cli_run_active_filter", source="session_fetch",
+            active_labels=sorted(allow),
+            selected=len(cases), skipped=before - len(cases),
+        )
+        if not cases:
+            logger.error("No active cases after schedule allowlist filter.")
+            sys_log("cli_run_no_active_cases", level="warning",
+                     source="session_fetch")
+            return 0
+
     # Policy: every pull starts from a clean slate. Any persisted
     # session cookies from a prior run are wiped BEFORE the pull begins,
     # so each pull exercises the full OIDC + MFA flow and produces a
