@@ -2345,7 +2345,7 @@ function renderSystemLogControls() {
   // .action-btn for unified action-button geometry; the .syslog-export-btn
   // class is preserved for any specialised rules (none currently).
   exportBtn.className = "action-btn syslog-export-btn";
-  exportBtn.textContent = "Export log";
+  exportBtn.textContent = "Export Log";
   exportBtn.title = "Download this log as JSON";
   exportBtn.addEventListener("click", (e) => guardedDownload(e, "/api/system-log/export"));
 
