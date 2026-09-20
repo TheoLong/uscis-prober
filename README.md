@@ -338,8 +338,9 @@ also mask PII in the rendered view — handy when sharing a screen.
 Beyond the dashboard's **Pull update** button, `session_fetch.py` exposes
 the pull pipeline as a CLI — useful for testing and debugging.
 
-**Run the tests** (`pytest -q`) — expect `580+ passed`, 100% line
-coverage on `src/`. A failure here is a dependency or install issue.
+**Run the tests** (`pytest -q`) after installing Chromium with
+`python -m playwright install chromium`. Authentication browser tests use
+local synthetic pages with network requests intercepted; they do not log in to USCIS.
 
 **First login** (one-off; triggers an MFA email):
 
@@ -443,7 +444,7 @@ src/
 ├── system_log.py      Append-only event store. Powers the System tab.
 └── static/            Dashboard UI (index.html + app.js + style.css).
 
-tests/                 pytest — 580+ tests, 100% line coverage on src/.
+tests/                 pytest — unit, browser, and DOM regression tests.
 data/                  Snapshot logs. Gitignored.
   {num}_case.json      Case-API snapshot history per form.
   {num}_status.json    Latest human-readable status (overwritten each pull).
@@ -473,8 +474,9 @@ config.example.json    Template.
 
 ### CI/CD
 
-GitHub Actions runs the full pytest suite (Python 3.11, Node 22 for the
-DOM tests) on every push and pull request. `GET /api/version` returns the
+GitHub Actions runs the full pytest suite (Python 3.11, Node 22 for DOM tests,
+and Chromium for authentication browser tests) on main-branch pushes and pull
+requests. `GET /api/version` returns the
 running commit and a sortable build label, so a deploy hook can verify
 which build is live.
 

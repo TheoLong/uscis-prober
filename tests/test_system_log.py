@@ -556,17 +556,21 @@ def test_pull_thread_crash_emits_sys_log(monkeypatch, tmp_path):
         raise RuntimeError("runner exploded")
     monkeypatch.setattr(server, "_run_pull_subprocess", _boom)
 
+    threads = []
+    thread_class = server.threading.Thread
+
+    def _thread(*args, **kwargs):
+        thread = thread_class(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(server.threading, "Thread", _thread)
     server._spawn_pull_async(trigger="manual")
-    # The daemon thread runs async; give it a beat to finish and write
-    # its sys_log entry. The call is cheap (our patched runner raises
-    # immediately) so 1s is plenty of headroom.
-    import time as _time
-    for _ in range(20):
-        crashes = [e for e in system_log.read_all()
-                   if e["event"] == "pull_thread_crashed"]
-        if crashes:
-            break
-        _time.sleep(0.05)
+    assert len(threads) == 1
+    threads[0].join(timeout=2)
+    assert not threads[0].is_alive()
+    crashes = [e for e in system_log.read_all()
+               if e["event"] == "pull_thread_crashed"]
 
     assert len(crashes) == 1
     assert "runner exploded" in crashes[0]["error"]

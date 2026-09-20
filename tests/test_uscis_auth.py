@@ -34,6 +34,13 @@ from uscis_auth import (
 @pytest.mark.parametrize("url,expected", [
     ("https://my.uscis.gov/account/applicant", True),
     ("https://myaccount.uscis.gov/dashboard", True),
+    ("https://my.uscis.gov/account/applicant/?view=cases", True),
+    ("https://myaccount.uscis.gov/api/fully_signed_in", False),
+    ("https://myaccount.uscis.gov/oauth/authorize", False),
+    ("https://my.uscis.gov/account/v1", False),
+    ("https://my.uscis.gov/account/v1/customer", False),
+    ("https://my.uscis.gov.example.com/account/applicant", False),
+    ("https://example.com/?next=https://my.uscis.gov/account/applicant", False),
     ("https://my.uscis.gov/sign-in", False),
     ("https://my.uscis.gov/oidc/login", False),
     ("https://example.com/", False),
@@ -795,10 +802,9 @@ def test_do_login_credentials_filled_records_tos_state(syslog_to_tmp):
 
 
 def test_handle_mfa_2fa_submit_did_not_advance_raises(syslog_to_tmp, tmp_path, monkeypatch):
-    """If the 2FA code was submitted but page.url stays on /auth,
-    /mfa, or /sign-in, USCIS rejected the code (expired / reused /
-    wrong) — we must raise AuthError and emit a
-    submit_did_not_advance result so retry can kick in."""
+    """An auth screen that never advances must fail so retry can kick in."""
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(uscis_auth.time, "monotonic", lambda: next(clock))
     # Page: starts on /auth (MFA challenge), click does NOT advance.
     page = _mock_stale_page("https://myaccount.uscis.gov/auth")
     page.wait_for_selector.return_value = None  # MFA prompt present
