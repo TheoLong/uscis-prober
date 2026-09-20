@@ -32,5 +32,8 @@ jobs:
       - name: Install frontend test deps (jsdom for DOM render tests)
         run: npm ci
 
+      - name: Install Chromium for authentication browser tests
+        run: python -m playwright install --with-deps chromium
+
       - name: Run pytest
         run: pytest -q

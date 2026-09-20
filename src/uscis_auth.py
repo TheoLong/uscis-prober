@@ -333,13 +333,13 @@ def is_session_page_authenticated(page: Page) -> bool:
 
 
 def is_session_page_authenticated_url(url: str) -> bool:
-    url = (url or "").lower()
-    if not url:
-        return False
-    return (
-        ("my.uscis.gov" in url or "myaccount.uscis.gov" in url)
-        and not any(p in url for p in ("/sign-in", "/auth", "/oidc/", "/login"))
-    )
+    """Match a final dashboard, not an intermediate authentication redirect."""
+    return bool(re.fullmatch(
+        r"https://(?:my\.uscis\.gov/account/applicant|myaccount\.uscis\.gov/dashboard)"
+        r"/?(?:[?#].*)?",
+        url or "",
+        flags=re.IGNORECASE,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +810,15 @@ def _do_login(
         # on myaccount.uscis.gov/dashboard — navigate once more to bridge cookies.
         bridge_started = time.monotonic()
         try:
-            page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
+            try:
+                page.wait_for_url(
+                    re.compile(re.escape(DASHBOARD_URL) + r"/?(?:[?#].*)?$"),
+                    timeout=5000,
+                    wait_until="domcontentloaded",
+                )
+            except PlaywrightTimeout:
+                page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
+            page.wait_for_load_state("domcontentloaded")
             page.wait_for_timeout(2000)
             sys_log(
                 "auth_bridge_result", source="auth",
@@ -870,22 +878,49 @@ def _do_login(
 # _handle_mfa_if_present — MFA code prompt + submission
 # ---------------------------------------------------------------------------
 
+def _wait_for_mfa_completion(page: Page) -> None:
+    """Wait for navigation, skipping only visible optional passkey enrollment."""
+    deadline = time.monotonic() + 45
+    skipped = False
+    while _is_on_mfa_url(getattr(page, "url", "")):
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return
+        skip = page.locator('[id="2fa-passkeys-skip-btn"]')
+        try:
+            if not skipped and skip.count() and skip.is_visible():
+                skip.click(timeout=min(1000, remaining_ms))
+                skipped = True
+                sys_log("login_passkey_prompt_skipped", source="auth")
+        except PlaywrightTimeout:
+            # Navigation can remove the prompt between visibility and click.
+            continue
+        except PlaywrightError:
+            if _is_on_mfa_url(getattr(page, "url", "")):
+                raise
+            return
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return
+        try:
+            page.wait_for_url(
+                lambda url: not _is_on_mfa_url(url),
+                timeout=min(500, remaining_ms),
+                wait_until="domcontentloaded",
+            )
+        except PlaywrightTimeout:
+            pass
+
+
 def _handle_mfa_if_present(
     page: Page, auth: dict[str, str], submit_time: datetime,
     *, collector: "TraceCollector | None" = None,
 ) -> None:
-    """Handle the MFA prompt if USCIS shows it — URL-aware.
+    """Handle email MFA and optional passkey enrollment before navigation.
 
-    The MFA-selector-missing branch is split into two outcomes based
-    on the current page URL:
-
-      * `prompt_absent`          — MFA selector absent AND we're past
-                                   sign-in (legitimate remember-browser
-                                   skip).
-      * `submit_did_not_advance` — MFA selector absent AND we're still
-                                   on the sign-in / OIDC-login surface.
-                                   Raises AuthError so the caller can
-                                   retry.
+    An absent MFA prompt is accepted only after leaving the login surfaces.
+    Enrollment is skipped when offered; existing passkeys and account
+    preferences are not changed. A stalled login raises AuthError for retry.
 
     Any `TraceCollector` passed in receives IMAP wire-level events
     and raw email bytes via `fetch_latest_code`. The MFA code itself
@@ -899,20 +934,17 @@ def _handle_mfa_if_present(
         page.wait_for_selector(code_selector, timeout=15_000)
     except PlaywrightTimeout:
         url = getattr(page, "url", "") or ""
+        if not _is_on_signin_url(url):
+            _wait_for_mfa_completion(page)
+            url = getattr(page, "url", "") or ""
         snap = _page_snapshot(page)
-        if _is_on_signin_url(url):
-            # The credential POST was silently refused — we never
-            # advanced off the public sign-in page. Playwright tracing
-            # is still recording (the context-level trace.start is live
-            # for the entire pull), so the DOM + screenshot of this
-            # exact moment is preserved inside the saved trace.zip.
+        if _is_on_mfa_url(url):
             sys_log(
                 "login_mfa_result", level="error", source="auth",
                 outcome="submit_did_not_advance",
                 note=(
-                    "MFA prompt not found AND page is still on sign-in. "
-                    "Most likely a silent anti-bot refusal of the "
-                    "credential POST. Full trace saved on raise."
+                    "MFA prompt not found and the login flow did not advance. "
+                    "Full trace saved on raise."
                 ),
                 **snap,
             )
@@ -974,16 +1006,10 @@ def _handle_mfa_if_present(
     mfa_submit_started = time.monotonic()
     url_before_2fa = getattr(page, "url", "") or ""
     page.click('[id="2fa-submit-btn"]')
-    page.wait_for_load_state("domcontentloaded")
-    page.wait_for_timeout(2000)
+    _wait_for_mfa_completion(page)
     url_after_2fa = getattr(page, "url", "") or ""
 
-    # Verify the 2FA POST actually advanced us past the MFA challenge
-    # page. If we're still on /auth, /mfa, /sign-in, or /oidc, USCIS
-    # silently rejected the code (expired / reused / wrong) and re-
-    # rendered the same form. Without this check, a rejected code
-    # looks identical to a network blip in the log — the next signal
-    # is a 45-second landing-URL timeout 45s later.
+    # A remaining auth screen can indicate rejection or an incomplete redirect.
     if _is_on_mfa_url(url_after_2fa):
         snap = _page_snapshot(page)
         sys_log(
@@ -991,8 +1017,9 @@ def _handle_mfa_if_present(
             outcome="submit_did_not_advance",
             note=(
                 "2FA code was submitted but page did not advance past the "
-                "MFA / sign-in surface. Most likely an expired, reused, or "
-                "rejected code. Full trace saved on raise."
+                "MFA / sign-in surface before the navigation deadline. "
+                "Code rejection or an incomplete login flow may be responsible. "
+                "Full trace saved on raise."
             ),
             code_length=len(code),
             remember_clicked=remember_clicked,
